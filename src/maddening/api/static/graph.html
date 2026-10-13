@@ -237,6 +237,9 @@
   <div id="cy"></div>
 </div>
 
+<!-- Bearer token for a non-loopback server: wraps fetch() and builds
+     the WebSocket subprotocols. No-op on a loopback bind. -->
+<script src="/viz/auth.js"></script>
 <script>
 const BASE = window.location.origin;
 let cy, ws, simTime = 0, isRunning = false;
@@ -490,7 +493,7 @@ function hideDetails() {
 // ── WebSocket ───────────────────────────────────────────────────
 function connectWebSocket() {
   const wsUrl = BASE.replace(/^http/, 'ws') + '/ws/state';
-  ws = new WebSocket(wsUrl);
+  ws = mdWebSocket(wsUrl);
 
   ws.onopen = () => {
     document.getElementById('ws-dot').classList.add('connected');

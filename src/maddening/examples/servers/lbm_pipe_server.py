@@ -13,20 +13,31 @@ bandwidth is limited and full 3D state would be too large to ship.
 
 Usage::
 
-    python maddening/examples/lbm_pipe_server.py
+    python -m maddening.examples.servers.lbm_pipe_server
+    python -m maddening.examples.servers.lbm_pipe_server --port 0 --grid 24 12 12
+    python -m maddening.examples.servers.lbm_pipe_server --gpu
 
-Then open http://localhost:8000/viz/render in a browser.
+Then open http://localhost:8000/viz/render in a browser (the server
+prints the address it is serving on).  It binds 127.0.0.1 only; to reach
+it from another machine: ``ssh -L 8000:127.0.0.1:8000 <host>``.
 
 Requirements::
 
     pip install maddening[api,viz3d]
 """
 
+import argparse
 import os
-os.environ.setdefault("XLA_FLAGS", "--xla_gpu_autotune_level=0")
-os.environ.setdefault("JAX_PLATFORMS", "cpu")
+import socket
+import sys
 
-import warnings
+os.environ.setdefault("XLA_FLAGS", "--xla_gpu_autotune_level=0")
+# Decide the JAX backend before anything imports JAX: JAX reads
+# JAX_PLATFORMS once, at import, so setting it later has no effect.
+if "--gpu" in sys.argv:
+    os.environ["JAX_PLATFORMS"] = ""   # let JAX pick CUDA/ROCm if present
+else:
+    os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.lbm_pipe import LBMPipeNode
@@ -53,20 +64,30 @@ def build_lbm_graph(
         initial_velocity=0.0,
     ))
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        gm.compile()
+    gm.compile()
 
     return gm
 
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="LBM pipe with 3D server-side rendering")
+    parser.add_argument("--port", type=int, default=8000,
+                        help="Port on 127.0.0.1 (default: 8000; 0 = any free port)")
+    parser.add_argument("--grid", type=int, nargs=3, default=[48, 24, 24],
+                        metavar=("NX", "NY", "NZ"),
+                        help="LBM grid (default: 48 24 24)")
+    parser.add_argument("--gpu", action="store_true",
+                        help="Let JAX use a GPU backend if one is installed")
+    args = parser.parse_args(argv)
+    if args.gpu:
+        print("GPU mode: JAX auto-detecting backend")
+
     print("=" * 60)
     print("  MADDENING LBM Pipe -- 3D Server-Side Rendering Demo")
     print("=" * 60)
 
     # --- Grid parameters ---
-    nx, ny, nz = 48, 24, 24
+    nx, ny, nz = args.grid
     tau = 0.8
     prop_strength = 0.0005
 
@@ -88,6 +109,7 @@ def main():
         PipeWallConfig,
     )
 
+    jpeg_quality = 85
     renderer = ServerFrameRenderer3D(
         config=View3DConfig(
             node="fluid",
@@ -138,7 +160,7 @@ def main():
         width=1280,
         height=720,
         fmt="jpeg",
-        quality=85,
+        quality=jpeg_quality,
     )
 
     # --- Create server ---
@@ -153,23 +175,32 @@ def main():
 
     print(f"\n  3D Renderer:")
     print(f"    Resolution: {renderer.width}x{renderer.height}")
-    print(f"    Format:     JPEG (quality {renderer._quality})")
+    print(f"    Format:     JPEG (quality {jpeg_quality})")
     print(f"    Panels:     2 cross-sections + longitudinal + arrows + pipe")
     print()
+    # Bound to loopback: a loopback bind is the one the API serves
+    # without a bearer token.  Binding 0.0.0.0 here (as this used to)
+    # published a graph-mutating API on the LAN.
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", args.port))
+    url = f"http://127.0.0.1:{sock.getsockname()[1]}"
+
+    print(f"  Serving on {url}", flush=True)
     print("  Open in browser:")
-    print("    http://localhost:8000/viz/render    (3D server-rendered viewer)")
-    print("    http://localhost:8000/viz/graph     (interactive graph topology)")
+    print(f"    {url}/viz/render    (3D server-rendered viewer)")
+    print(f"    {url}/viz/graph     (interactive graph topology)")
     print()
     print("  The browser is a thin display client -- 3D rendering happens")
-    print("  on the server using VTK offscreen.  Only JPEG frames are sent.\n")
+    print("  on the server using VTK offscreen.  Only JPEG frames are sent.\n",
+          flush=True)
 
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    try:
+        uvicorn.Server(uvicorn.Config(app, log_level="info", proxy_headers=False)).run(sockets=[sock])
+    except KeyboardInterrupt:   # uvicorn re-raises Ctrl-C after shutting down
+        pass
 
 
 if __name__ == "__main__":
-    import sys
-    if "--gpu" in sys.argv:
-        os.environ["JAX_PLATFORMS"] = ""
-        print("GPU mode: JAX auto-detecting backend")
     main()

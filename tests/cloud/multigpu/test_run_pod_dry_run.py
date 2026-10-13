@@ -1,0 +1,1263 @@
+"""The pod-side multi-GPU runner proves itself on CPU virtual devices.
+
+``benchmarks/multigpu/run_pod.py --goal all --dry-run`` runs every goal
+end-to-end in one subprocess on four virtual host devices; the JSON it
+writes has the schema the session summary depends on, every goal's
+checks pass (the sharded results match their unsharded or NumPy
+references, the refusals fire), every timed input is pre-placed on the
+mesh (no per-call reshard is charged to a transport), both sides of the
+gradient timing are compiled functions with compile time reported apart,
+and ``--summarise`` renders the checklist verdict and the ranking table
+without importing JAX and without pretending a CPU dry run closes the
+checklist or ranks NCCL transports.  The decision rule, the verdict rule
+and the stop-on-failure rule are checked in-process on synthetic results.
+"""
+
+from __future__ import annotations
+
+import ast
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+
+import maddening
+from tests.cloud.multigpu.run_pod_support import offline_env, run_pod
+
+_RUNNER = Path(maddening.__file__).resolve().parents[2] / "benchmarks" / "multigpu" / "run_pod.py"
+_SRC = str(Path(maddening.__file__).resolve().parents[1])
+_N_DEV = 4
+_CELLS = 256
+_METHODS = ("all_to_all", "ppermute")
+_GOALS = ("indivisible", "halo", "coupled", "stencil", "hybrid", "exchange", "forward", "gradient")
+#: The meshes every wrapper goal runs at its smallest size on four devices,
+#: as (devices along spatial axis 0, along spatial axis 1).
+_MESHES = {"1d": [4, 1], "1d-axis1": [1, 4], "2d-flat": [1, 4], "2d": [2, 2]}
+#: ... and the crossed pencil, on which the stencil goal runs one case.
+_CROSSED = {"2d-crossed": [2, 2]}
+#: The grid of 256 cells on four devices: never square (nx = ny + 4).
+_SHAPE = (16, 20)
+
+
+def _env() -> dict:
+    """Offline (``run_pod_support``): an empty ``HOME``, no cloud variables."""
+    return offline_env(_SRC + os.pathsep + os.environ.get("PYTHONPATH", ""), _N_DEV)
+
+
+def _run(*argv: str) -> subprocess.CompletedProcess:
+    out = run_pod(_RUNNER, argv, pythonpath=_env()["PYTHONPATH"], timeout=600,
+                  n_devices=_N_DEV)
+    assert out.returncode == 0, f"stdout:\n{out.stdout[-3000:]}\nstderr:\n{out.stderr[-3000:]}"
+    return out
+
+
+def _runner_module():
+    spec = importlib.util.spec_from_file_location("run_pod_under_test", _RUNNER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _rules_only_runner():
+    """The runner with its record-integrity rules switched off.
+
+    The docs the verdict tests below build are synthetic -- one check, no
+    results, no provenance -- and pin the other verdict rules in isolation:
+    flags re-derived from value, limit and sense, the device count, the dry
+    run, checks not run.  None of them is a record the runner would write,
+    so each would read ``INVALID`` and hide the rule under test.  The record
+    rules themselves are tested on a real runner record, in
+    ``test_run_pod_verdict_integrity.py``.
+    """
+    rp = _runner_module()
+    rp.record_problems = lambda doc: []
+    rp.item_problems = lambda docs: []
+    return rp
+
+
+@pytest.fixture(scope="module")
+def dry_run_dir(tmp_path_factory):
+    """One process for every goal, as the session's own dry run does."""
+    out = tmp_path_factory.mktemp("multigpu_dry_run")
+    _run("--goal", "all", "--dry-run", "--cells", str(_CELLS), "--out", str(out))
+    return out
+
+
+def _load(directory: Path, goal: str) -> dict:
+    with open(directory / f"{goal}.json", encoding="utf-8") as f:
+        doc = json.load(f)
+    assert doc["schema_version"] == 12
+    assert doc["goal"] == goal
+    assert doc["dry_run"] is True
+    assert doc["allow_fewer_devices"] is False
+    assert doc["n_devices"] == _N_DEV
+    env = doc["environment"]
+    assert env["platform"] == "cpu"
+    assert len(env["devices"]) == env["n_devices_visible"] == _N_DEV
+    assert env["device_kinds"] == ["cpu"]
+    # jaxlib precision is not comparable across versions: both are recorded.
+    assert isinstance(env["jax"], str) and env["jax"].count(".") >= 1
+    assert isinstance(env["jaxlib"], str) and env["jaxlib"].count(".") >= 1
+    assert env["nvidia_smi"] == "skipped (dry run)"     # a dry run never probes the GPU
+    assert doc["config"]["n_devices"] == _N_DEV
+    assert doc["wall_s"] > 0
+    return doc
+
+
+# Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
+# Per push: tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_recorded_dry_run_is_evidence_this_runner_would_write
+@pytest.mark.slow
+@pytest.mark.parametrize("goal", _GOALS)
+def test_every_goal_records_checks_and_passes_them_in_the_dry_run(dry_run_dir, goal):
+    doc = _load(dry_run_dir, goal)
+    assert doc["checks"], "a goal with no checks compares nothing"
+    failed = [c for c in doc["checks"] if not c["passed"]]
+    assert not failed, failed
+    assert doc["passed"] is True
+    rp = _runner_module()
+    for c in doc["checks"]:
+        assert set(c) >= {"name", "value", "limit", "sense", "passed"}
+        assert c["sense"] in rp.SENSES
+        # on four devices every case runs, and every record re-derives
+        assert rp.check_status(c) == "passed", c
+    # and the file is evidence --summarise accepts: the runner's own
+    # derivation of its checks from its results gives exactly these
+    assert rp.record_problems(doc) == [], rp.record_problems(doc)
+
+
+# Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
+# Per push: tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_recorded_dry_run_is_evidence_this_runner_would_write
+@pytest.mark.slow
+def test_coupled_json_compares_forward_and_adjoint_under_both_solvers(dry_run_dir):
+    doc = _load(dry_run_dir, "coupled")
+    # on every mesh: each spatial axis on all four devices somewhere, two
+    # mesh axes of different sizes, and the pencil
+    by_mesh = {r["mesh"]: r for r in doc["results"]}
+    assert len(doc["results"]) == len(by_mesh) == 4
+    assert {m: r["mesh_shape"] for m, r in by_mesh.items()} == _MESHES
+    for r in by_mesh.values():
+        # the field, its two averages and the far field coupled
+        assert tuple(r["shape"]) == _SHAPE and r["coupled_dof"] == 16 * 20 + 2 + 1
+        assert r["parameters"] == ["field.diffusivity", "far.conductance", "field.exchange"]
+        assert set(r["solvers"]) == {"ift", "fori"}
+        for solver, sol in r["solvers"].items():
+            assert sol["sharded"]["partitioned"] is True
+            assert sol["unsharded"]["partitioned"] is False
+            assert sol["parity_f"]["finite"] and sol["parity_f"]["max_rel"] < 1e-5
+            assert sol["parity_averages"]["finite"] and sol["parity_averages"]["max_rel"] < 1e-5
+            assert sol["parity_u"] < 1e-5 and sol["parity_loss"] < 1e-5
+            assert sol["parity_grad"] < (1e-4 if solver == "ift" else 1e-5)
+            assert all(g != 0.0 for g in sol["unsharded"]["grad"])
+            for side in ("sharded", "unsharded"):
+                _check_timing(sol[side]["value_and_grad"])
+                assert sol[side]["compile_s"] > 0
+                assert isinstance(sol[side]["device0_pinned_ops"], int)
+                # both paths against the float64 model of the coupled step
+                model = sol["model"][side]
+                assert model["f"]["max_rel"] < 1e-5 and model["u"] < 1e-5
+                assert model["loss"] < 1e-5 and model["averages"]["max_rel"] < 1e-5
+                assert model["grad"] < 1e-4
+        assert len(r["model"]["grad"]) == 3 and all(g != 0.0 for g in r["model"]["grad"])
+        ift = r["solvers"]["ift"]
+        assert 2 <= ift["sharded"]["last_step_iterations"] < r["max_iterations"]
+        assert r["solvers"]["fori"]["sharded"]["last_step_iterations"] is None
+    # one model and one unsharded group, whatever the mesh
+    assert len({json.dumps(r["model"]["grad"]) for r in by_mesh.values()}) == 1
+
+
+# Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
+# Per push: tests/cloud/multigpu/test_run_pod_dry_run.py::test_halo_reference_encodes_the_documented_boundary_fill
+@pytest.mark.slow
+def test_halo_json_is_bit_exact_on_every_boundary_mode_width_and_mesh(dry_run_dir):
+    doc = _load(dry_run_dir, "halo")
+    (r,) = doc["results"]
+    cases = r["stencil_cases"]
+    # 3 boundary modes x 2 widths on every mesh: a 1-D mesh along each
+    # spatial axis, the 1 x 4 two-axis mesh and the 2 x 2 pencil
+    assert {(c["mesh"], c["boundary"], c["halo"]) for c in cases} == {
+        (m, b, h) for m in _MESHES for b in ("periodic", "edge", "zero") for h in (1, 2)}
+    assert len(cases) == 4 * 3 * 2
+    assert all(c["mesh_shape"] == _MESHES[c["mesh"]] and tuple(c["shape"]) == _SHAPE
+               for c in cases)
+    assert all(c["forward_max_abs"] == 0.0 and c["adjoint_max_abs"] == 0.0 for c in cases)
+    assert set(r["unstructured"]["methods"]) == set(_METHODS)
+    for m in r["unstructured"]["methods"].values():
+        assert m["forward_max_abs"] == 0.0 and m["adjoint_max_abs"] == 0.0
+
+
+# Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
+@pytest.mark.slow
+def test_stencil_and_hybrid_json_match_their_unsharded_nodes(dry_run_dir):
+    """Periodic, edge (the wrapper's default) and Dirichlet ends of the
+    field, and the D2Q9 lattice, on every mesh, each forward and adjoint
+    against the unsharded node.  Periodic alone let a wrapper whose
+    unsharded halo axes always wrapped pass the goal, the 1-D mesh alone
+    one that zero-filled every sharded axis but the first, and the 1-D and
+    the 2 x 2 meshes alone on square grids three faults confined to spatial
+    axis 1."""
+    doc = _load(dry_run_dir, "stencil")
+    cases = {(s["node"], s["mesh"], s["boundary"]): s for s in doc["results"]}
+    ends = ("periodic", "edge", "dirichlet")
+    assert set(cases) == {(node, mesh, b) for mesh in _MESHES
+                          for node, b in (*(("field", b) for b in ends), ("lbm", "periodic"),
+                                          # the field with a halo of two cells
+                                          *(("field-halo2", b) for b in ends),
+                                          # and under the zero fill, with two integrals
+                                          # the wrapper stacks over the mesh
+                                          ("field-shares", "zero"))} | {
+        # the static split along the second axis, on the pencil; the crossed pencil
+        ("field-mask1", "2d", "periodic"), ("field", "2d-crossed", "periodic")}
+    assert len(doc["results"]) == 34
+    for (node, mesh, boundary), s in cases.items():
+        assert tuple(s["shape"]) == _SHAPE and s["cells"] == 16 * 20
+        assert s["mesh_shape"] == {**_MESHES, **_CROSSED}[mesh]
+        assert s["input_partitioned"] is True
+        fields = {"field": {"f", "averages"}, "lbm": {"f", "velocity"},
+                  "field-halo2": {"f", "averages"}, "field-mask1": {"f", "averages"},
+                  "field-shares": {"f", "averages", "shares", "strips"}}[node]
+        assert set(s["forward"]["parity"]) == fields
+        assert all(p["max_rel"] < 1e-5 for p in s["forward"]["parity"].values())
+        assert s["gradient"]["parity_grad_initial_field"]["max_rel"] < 1e-5
+        assert s["gradient"]["parity_grad_parameter"] < 1e-5
+        assert s["parameter"] == {"field": "diffusivity", "lbm": "viscosity",
+                                  "field-halo2": "diffusivity", "field-mask1": "diffusivity",
+                                  "field-shares": "diffusivity"}[node]
+        for side in ("sharded", "unsharded"):
+            _check_timing(s["forward"][side]["rollout"])
+            _check_timing(s["gradient"][side]["grad"])
+        py, pz = s["mesh_shape"]
+        prefix = f"{node} {mesh} {py}x{pz} 16x20 {boundary}"
+        assert sum(c["name"].startswith(prefix + " ") or c["name"].startswith(prefix + ":")
+                   for c in doc["checks"]) == 10 + 2 * (len(fields) - 2)
+    # the three conditions are different models: nothing here compares a
+    # mode with itself under another name; and one model on every mesh
+    for mesh in _MESHES:
+        losses = {b: cases[("field", mesh, b)]["gradient"]["unsharded"]["loss"]
+                  for b in ("periodic", "edge", "dirichlet")}
+        assert len(set(losses.values())) == 3, losses
+    for node, b in (("field", "periodic"), ("field", "edge"), ("field", "dirichlet"),
+                    ("lbm", "periodic")):
+        assert len({cases[(node, m, b)]["gradient"]["unsharded"]["loss"] for m in _MESHES}) == 1
+    hybrid = {h["mesh"]: h for h in _load(dry_run_dir, "hybrid")["results"]}
+    assert {m: h["mesh_shape"] for m, h in hybrid.items()} == _MESHES
+    for h in hybrid.values():
+        assert tuple(h["shape"]) == _SHAPE and h["sharded"]["partitioned"] is True
+        assert h["correction_shift"] == [2, 2]
+        assert h["correction_rel"] > 1e-3            # the correction is part of the answer
+        assert h["parity_f"]["max_rel"] < 1e-5 and h["parity_grad"] < 1e-5
+        assert h["parity_averages"]["max_rel"] < 1e-5
+
+
+# Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
+@pytest.mark.slow
+def test_indivisible_json_records_the_refusals_and_the_uneven_unstructured_run(dry_run_dir):
+    (r,) = _load(dry_run_dir, "indivisible")["results"]
+    ny, nx = r["stencil"]["shape"]
+    assert ny % _N_DEV != 0
+    for key in ("stencil", "stencil_axis1", "pointwise", "pencil"):
+        assert r[key]["raised"] == "ValueError", r[key]
+    assert f"{ny} cells" in r["stencil"]["message"] and f"{_N_DEV} devices" in r["stencil"]["message"]
+    assert r["stencil"]["divisible_raised"] is None
+    assert "spatial axis 1" in r["pencil"]["message"]
+    # the 1-D mesh sharding spatial axis 1, as the wrapper goals run it
+    rows, nx_bad = r["stencil_axis1"]["shape"]
+    assert nx_bad % _N_DEV != 0 and rows % _N_DEV == 0
+    assert "spatial axis 1" in r["stencil_axis1"]["message"]
+    assert f"{nx_bad} cells" in r["stencil_axis1"]["message"]
+    assert r["stencil_axis1"]["divisible_raised"] is None
+    un = r["unstructured"]
+    assert un["cells"] % _N_DEV != 0 and len(set(un["cells_per_device"])) > 1
+    assert un["parity_x"]["max_rel"] < 1e-5
+    # an uneven split has a pad row: its cells are never renumbered
+    assert un["renumbered"] is False
+
+
+def _check_timing(t: dict):
+    assert len(t["ms"]) == t["repeats"] >= 1
+    assert t["warmup"] >= 1
+    assert t["min_ms"] == min(t["ms"]) <= t["median_ms"] <= max(t["ms"])
+    assert t["mean_ms"] > 0
+
+
+# Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
+@pytest.mark.slow
+def test_exchange_json_ranks_both_transports_with_traffic(dry_run_dir):
+    doc = _load(dry_run_dir, "exchange")
+    (r,) = doc["results"]
+    assert r["cells"] == _CELLS and r["n_devices"] == _N_DEV
+    assert r["bit_identical"] is True
+    assert r["input_presharded"] is True
+    assert "NamedSharding" in r["input_sharding"]
+    assert set(r["methods"]) == set(_METHODS)
+    traffic = r["traffic_cells_per_shard"]
+    assert traffic["useful"] <= traffic["ppermute"] <= traffic["all_to_all"]
+    for method in _METHODS:
+        m = r["methods"][method]
+        _check_timing(m)
+        assert m["bytes_per_shard"] == traffic[method] * 4 * doc["config"]["fields"]
+        assert m["bytes_total"] == m["bytes_per_shard"] * _N_DEV
+        assert m["compile_s"] > 0
+    assert r["methods"]["ppermute"]["messages"] == traffic["ppermute_messages"]
+    assert r["ppermute_speedup_median"] == pytest.approx(
+        r["methods"]["all_to_all"]["median_ms"] / r["methods"]["ppermute"]["median_ms"])
+
+
+# Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
+@pytest.mark.slow
+def test_forward_json_matches_unsharded_reference_under_both_transports(dry_run_dir):
+    doc = _load(dry_run_dir, "forward")
+    (r,) = doc["results"]
+    assert r["cells"] == _CELLS and r["steps"] == doc["config"]["steps"]
+    # four equal shards: renumbered into partition order unless the
+    # partitioner left them in it (the per-cell source needs one or the other)
+    assert isinstance(r["renumbered"], bool)
+    assert r["n_local_max"] * _N_DEV != _CELLS or r["renumbered"] or r["partition"] != "rcm"
+    for method in _METHODS:
+        m = r["methods"][method]
+        assert m["input_presharded"] is True
+        assert m["compile_s"] > 0 and m["wrapper_first_call_s"] > 0
+        _check_timing(m["wrapper_step"])
+        _check_timing(m["device_step"])
+        assert m["wrapper_step"]["ms_per_step"] == pytest.approx(
+            m["wrapper_step"]["median_ms"] / r["steps"])
+        assert m["parity_x"]["finite"] and m["parity_x"]["max_rel"] < 1e-5
+        # the float total: information, held to no limit (its sum cancels)
+        assert m["parity_total"]["finite"] and "max_rel" in m["parity_total"]
+        # the reduction, exactly: a field of ones sums to the number of cells
+        # and each shard's [offset, cells] pair, from shard_info, is the layout's
+        assert m["ones"] == {"total": float(_CELLS), "max_abs_from_one": 0.0,
+                             "entries_not_one": 0, "per_shard": [
+                                 [float(d * r["n_local_max"]), float(k)]
+                                 for d, k in enumerate(r["n_local"])]}
+        assert sum(r["n_local"]) == _CELLS and len(r["n_local"]) == 4
+    assert r["ones_unsharded"] == {"total": float(_CELLS), "max_abs_from_one": 0.0,
+                                   "entries_not_one": 0}
+
+
+# Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
+# Per push: tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_recorded_dry_run_is_evidence_this_runner_would_write
+# and tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_the_cg_part_of_the_gradient_goal_passes_on_solves_that_converged
+@pytest.mark.slow
+def test_gradient_json_reports_parity_for_rollout_and_sharded_cg(dry_run_dir):
+    doc = _load(dry_run_dir, "gradient")
+    (r,) = doc["results"]
+    assert r["grad_steps"] == doc["config"]["grad_steps"]
+    _check_timing(r["rollout"]["unsharded"]["grad"])
+    for method in _METHODS:
+        _check_timing(r["rollout"][method]["grad"])
+        # one reverse pass: with respect to the start, the per-cell source
+        # and the injected weight
+        for key in ("parity", "parity_source", "parity_weight"):
+            p = r["rollout"][method][key]
+            assert p["finite"] and p["reference_scale"] > 0 and p["max_rel"] < 1e-5, key
+    assert isinstance(r["renumbered"], bool)
+    cg = r["sharded_cg"]
+    assert cg["dof"] == (_CELLS // _N_DEV) * _N_DEV
+    assert cg["input_presharded"] is True
+    _check_timing(cg["grad_sharded"])
+    _check_timing(cg["grad_unsharded"])
+    assert cg["compile_s"]["sharded"] > 0 and cg["compile_s"]["unsharded"] > 0
+    # Two converged float32 solves on four virtual CPU devices agree to
+    # round-off (3.9e-7 and 2.3e-7 measured here): far inside the limit.
+    assert cg["grad_parity"]["finite"] and cg["grad_parity"]["max_rel"] < 1e-5
+    assert cg["jvp_parity"]["finite"] and cg["jvp_parity"]["max_rel"] < 1e-5
+    # ... and each side's solves converged, well inside the dry run's cap.
+    cap = doc["config"]["cg_max_iters"]
+    assert (cg["shift"], cg["rtol"], cg["max_iters"]) == (0.03, 1e-4, cap) and cap == 300
+    assert set(cg["solve"]) == {"sharded", "unsharded"}
+    for side, solve in cg["solve"].items():
+        # The count decides (under the cap); the flag is recorded as
+        # information: ``sharded_cg``'s float32 residual against ``rtol``.
+        assert isinstance(solve["converged"], bool), side
+        assert 20 < solve["iterations"] < cap // 2, (side, solve["iterations"])
+        assert set(solve["true_residual"]) == {"solve", "adjoint", "tangent"}
+        assert all(0 < r <= 2e-4 for r in solve["true_residual"].values()), (side, solve)
+    names = {c["name"] for c in doc["checks"]}
+    for side in ("sharded", "unsharded"):
+        assert (f"{cg['dof']} dof sharded_cg {side} solve stopped on its tolerance, not on "
+                "the iteration cap") in names
+        for which in ("solve", "adjoint", "tangent"):
+            assert f"{cg['dof']} dof sharded_cg {side} {which} true residual" in names
+
+
+# Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
+# Per push: tests/cloud/multigpu/test_run_pod_dry_run.py::test_exchange_timing_input_is_presharded_on_the_mesh
+@pytest.mark.slow
+def test_rollout_grad_timings_are_of_compiled_functions(dry_run_dir):
+    """Both sides are ``jax.jit(jax.grad(...))`` with compile time reported
+    apart.  A non-jitted sharded grad retraced and re-partitioned the
+    statics on every call (about 1700x the unsharded median in the dry
+    run); a compiled one on four virtual CPUs stays within a small factor."""
+    doc = _load(dry_run_dir, "gradient")
+    (r,) = doc["results"]
+    ref = r["rollout"]["unsharded"]
+    assert ref["compile_s"] > 0
+    for method in _METHODS:
+        m = r["rollout"][method]
+        assert m["compile_s"] > 0
+        assert m["input_presharded"] is True
+        assert m["grad"]["median_ms"] < 300 * ref["grad"]["median_ms"], (method, m["grad"], ref["grad"])
+
+
+# Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
+# Per push: tests/cloud/multigpu/test_run_pod_dry_run.py::test_recommendation_rule
+@pytest.mark.slow
+def test_summarise_prints_ranking_table_but_does_not_rank_a_dry_run(dry_run_dir):
+    out = _run("--summarise", str(dry_run_dir)).stdout
+    assert "Exchange ranking" in out
+    assert f"{_CELLS:>9}    4 cpu" in out
+    assert "Recommendation: undecided" in out
+    assert "dry-run / CPU row" in out
+    assert "Forward run" in out and "Gradient parity" in out
+    assert "sharded_cg grad" in out
+
+
+# Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
+# Per push: tests/cloud/multigpu/test_run_pod_dry_run.py::test_the_checklist_closes_only_on_a_real_gpu_run_with_enough_devices
+@pytest.mark.slow
+def test_summarise_does_not_close_the_checklist_from_a_dry_run(dry_run_dir):
+    out = _run("--summarise", str(dry_run_dir)).stdout
+    lines = [line for line in out.splitlines() if line[:1].isdigit() and "[" in line]
+    assert len(lines) == 6, out
+    assert all("open: passed on CPU / dry run only" in line and "CLOSED" not in line
+               for line in lines), lines
+    for goal in _GOALS:
+        assert f"{goal:<12} cpu" in out
+    assert "Coupled group" in out and "Stencil wrapper" in out and "Halo exchange" in out
+    assert "Checks not run" not in out and "Failed checks" not in out     # 4 devices
+    assert "Records that cannot decide" not in out and "MIXED COMMITS" not in out
+    for mesh, (py, pz) in _MESHES.items():
+        for case in ("field", "lbm", "field-halo2"):
+            for boundary in (("periodic",) if case == "lbm"
+                             else ("periodic", "edge", "dirichlet")):
+                assert f"{case} {mesh} {py}x{pz} 16x20 {boundary}" in out, out
+    # every item names the one commit its files record
+    assert all(line.endswith(lines[0].split()[-1]) and " commit " in line for line in lines)
+
+
+def test_the_stencil_goal_runs_every_boundary_and_the_lattice_on_every_mesh_at_its_smallest_size():
+    rp = _runner_module()
+    assert rp.STENCIL_BOUNDARIES == ("periodic", "edge", "dirichlet")
+    assert rp.STENCIL_MESHES == tuple(_MESHES)
+    smallest = []
+    for mesh in _MESHES:
+        smallest += [(256, "field", b, mesh) for b in rp.STENCIL_BOUNDARIES]
+        smallest.append((256, "lbm", "periodic", mesh))
+        # the field again with a halo of two cells, under each boundary
+        smallest += [(256, "field-halo2", b, mesh) for b in rp.STENCIL_BOUNDARIES]
+        # and once under the zero fill, with integrals the wrapper stacks a shard
+        smallest.append((256, "field-shares", "zero", mesh))
+    # where the pencil fits: its static split along the second axis, and the crossed pencil
+    smallest += [(256, "field-mask1", "periodic", "2d"), (256, "field", "periodic", "2d-crossed")]
+    assert rp.stencil_cases([1024, 256], 4) == [(1024, "field", "periodic", "2d"), *smallest]
+    assert set(rp.STENCIL_NODES) == {"field", "lbm", "field-halo2", "field-shares",
+                                     "field-mask1"}
+    assert rp.stencil_goal_meshes(4) == (*_MESHES, *_CROSSED)
+    assert rp.stencil_goal_meshes(2) == rp.meshes_that_fit(2) == ("1d", "1d-axis1", "2d-flat")
+    assert rp.FIELD_BOUNDARIES == (*rp.STENCIL_BOUNDARIES, "zero")
+    # no pencil mesh on 2 or 3 devices: the other three carry every case,
+    # and the larger sizes run on the 1-D mesh
+    assert rp.stencil_cases([256, 1024], 2) == [
+        (256, kind, b, mesh) for mesh in ("1d", "1d-axis1", "2d-flat")
+        for kind, b in (("field", "periodic"), ("field", "edge"), ("field", "dirichlet"),
+                        ("lbm", "periodic"), ("field-halo2", "periodic"),
+                        ("field-halo2", "edge"), ("field-halo2", "dirichlet"),
+                        ("field-shares", "zero"))
+    ] + [(1024, "field", "periodic", "1d")]
+    gpu = rp.stencil_cases(list(rp.GPU_CELLS), 4)
+    assert gpu[:4] == [(100_000, "field", b, "1d") for b in rp.STENCIL_BOUNDARIES] + [
+        (100_000, "lbm", "periodic", "1d")]
+    assert gpu[4:7] == [(100_000, "field-halo2", b, "1d") for b in rp.STENCIL_BOUNDARIES]
+    assert gpu[-2:] == [(300_000, "field", "periodic", "2d"),
+                        (1_000_000, "field", "periodic", "2d")]
+    assert gpu[-4:-2] == [(100_000, "field-mask1", "periodic", "2d"),
+                          (100_000, "field", "periodic", "2d-crossed")]
+    assert len(gpu) == 4 * 8 + 2 + 2 == 36
+    # the graph goals: every mesh at the smallest size, the pencil after
+    assert rp.graph_cases([256, 1024], 4) == [(256, m) for m in _MESHES] + [(1024, "2d")]
+    assert rp.graph_cases([256], 3) == [(256, m) for m in ("1d", "1d-axis1", "2d-flat")]
+    # one grid for every mesh: each axis splits on all of them, and the
+    # grid is never square, so an axis read for the other shows
+    for cells in (*rp.GPU_CELLS, *rp.DRY_RUN_CELLS, 64):
+        for n_dev in (2, 3, 4, 6, 8):
+            ny, nx = rp.field_shape(cells, n_dev)
+            assert ny % n_dev == 0 and nx % n_dev == 0 and nx != ny
+            assert ny // max(1, n_dev // 2) != nx // max(1, n_dev // 2)
+            for mesh in rp.meshes_that_fit(n_dev):
+                py, pz = rp._mesh_shape_of(mesh, n_dev)
+                assert py * pz == n_dev and ny % py == 0 and nx % pz == 0
+    assert rp.field_shape(256, 4) == _SHAPE
+
+
+def _blocks(a, mesh_shape):
+    """The ``(py, pz)`` blocks of ``a`` that the shards of a mesh hold."""
+    py, pz = mesh_shape
+    by, bz = a.shape[0] // py, a.shape[1] // pz
+    return [a[i * by:(i + 1) * by, j * bz:(j + 1) * bz] for i in range(py) for j in range(pz)]
+
+
+@pytest.mark.parametrize("n_dev", [4, 8])
+def test_the_goals_grid_shaped_inputs_differ_on_every_block_of_every_mesh(n_dev):
+    """A grid-shaped input the same on two shards' blocks cannot show a
+    wrapper that hands a shard the other's block.  Until schema 6 the
+    source had period 1/2 in x -- one block of the 2 x 2 pencil -- and the
+    coupled goal's ambient was one value broadcast to every cell."""
+    rp = _runner_module()
+    for cells in (*rp.DRY_RUN_CELLS, 64):
+        ny, nx = rp.field_shape(cells, n_dev)
+        inputs = {"source": rp._source_field(ny, nx), "loss weight": rp._loss_weight(ny, nx),
+                  "coupled profile": rp.coupled_profile(ny, nx),
+                  "lattice force x": rp._lbm_force(ny, nx)[..., 0],
+                  "lattice force y": rp._lbm_force(ny, nx)[..., 1]}
+        for name, a in inputs.items():
+            assert a.shape == (ny, nx) and a.dtype == np.float32, name
+            scale = float(np.max(np.abs(a)))
+            for mesh in rp.meshes_that_fit(n_dev):
+                blocks = _blocks(a, rp._mesh_shape_of(mesh, n_dev))
+                for i in range(len(blocks)):
+                    for j in range(i):
+                        gap = float(np.max(np.abs(blocks[i] - blocks[j])))
+                        assert gap > 0.05 * scale, (name, cells, mesh, i, j, gap)
+    assert float(np.min(rp.coupled_profile(*rp.field_shape(256, n_dev)))) > 0
+
+
+def test_summarise_of_an_empty_directory_fails_clearly(tmp_path):
+    out = run_pod(_RUNNER, ["--summarise", tmp_path], pythonpath=_env()["PYTHONPATH"],
+                  timeout=300, n_devices=_N_DEV)
+    assert out.returncode == 1
+    assert "no goal JSON" in out.stdout
+
+
+def test_summarise_does_not_import_jax(tmp_path):
+    """The summary must run on a laptop without a working jaxlib."""
+    code = (
+        "import importlib.util, sys\n"
+        f"spec = importlib.util.spec_from_file_location('rp', {str(_RUNNER)!r})\n"
+        "rp = importlib.util.module_from_spec(spec); spec.loader.exec_module(rp)\n"
+        f"rc = rp.main(['--summarise', {str(tmp_path)!r}])\n"
+        "loaded = sorted(m for m in sys.modules if m == 'jax' or m.startswith('jax.') "
+        "or m == 'jaxlib' or m.startswith('jaxlib.'))\n"
+        "print(rc, loaded)\n"
+    )
+    out = subprocess.run([sys.executable, "-c", code], env=_env(),
+                         capture_output=True, text=True, timeout=300, check=False)
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert out.stdout.strip().splitlines()[-1] == "1 []", out.stdout    # rc 1: empty dir
+
+
+_FORBIDDEN_IMPORTS = ("sky", "skypilot", "runpod", "boto3",
+                      "maddening.cloud.launcher", "maddening.cloud._skypilot")
+_FORBIDDEN_NAMES = {"CloudLauncher", "launch_vm", "teardown_vm", "CloudSession"}
+
+
+def _imports_of(tree: ast.AST) -> set[str]:
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            names.add(node.module)
+            names.update(f"{node.module}.{alias.name}" for alias in node.names)
+    return names
+
+
+def test_runner_makes_no_cloud_calls():
+    tree = ast.parse(_RUNNER.read_text(encoding="utf-8"), filename=str(_RUNNER))
+    imported = _imports_of(tree)
+    for name in imported:
+        for forbidden in _FORBIDDEN_IMPORTS:
+            assert not (name == forbidden or name.startswith(forbidden + ".")), name
+    used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    used |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    assert not (used & _FORBIDDEN_NAMES), used & _FORBIDDEN_NAMES
+
+
+# --- decision rule, device-count gate and mesh helpers, in-process -----------
+
+
+def _exchange_doc(platform: str, rows: list[tuple[int, float, float]], *, dry_run=False,
+                  n_devices: int = 4, allow_fewer_devices: bool = False) -> dict:
+    """An ``exchange.json`` as the runner writes it (a ring mesh, so the
+    recorded cell counts are the configured ones), checks included: a row
+    decides only from a file that reads ``PASS``."""
+    rp = _runner_module()
+    results = []
+    for cells, a2a, ppm in rows:
+        results.append({
+            "cells": cells, "requested_cells": cells, "n_devices": n_devices,
+            "bit_identical": True, "input_presharded": True,
+            "ppermute_speedup_median": (a2a / ppm) if ppm else None,
+            "methods": {
+                "all_to_all": {"median_ms": a2a, "min_ms": a2a, "bytes_total": 8 * 4 * 4},
+                "ppermute": {"median_ms": ppm, "min_ms": ppm, "bytes_total": 2 * 4 * 4},
+            },
+        })
+    doc = {"schema_version": rp.SCHEMA_VERSION, "goal": "exchange", "dry_run": dry_run,
+           "allow_fewer_devices": allow_fewer_devices, "n_devices": n_devices,
+           "results": results,
+           "environment": {"platform": platform, "device_kinds": ["NVIDIA A100-SXM4-80GB"],
+                           "devices": [f"{platform}:{i}" for i in range(n_devices)],
+                           "n_devices_visible": n_devices, "git_commit": "0" * 40},
+           "config": {"cells": [cells for cells, _, _ in rows], "synthetic": "ring",
+                      "mesh": None, "n_devices": n_devices,
+                      "allow_fewer_devices": allow_fewer_devices}}
+    return rp.finish_checks(doc, rp.exchange_checks(results, n_devices))
+
+
+@pytest.mark.parametrize(
+    "docs, decision",
+    [
+        ([_exchange_doc("gpu", [(100_000, 1.0, 0.5), (1_000_000, 4.0, 3.0)])], "ppermute"),
+        ([_exchange_doc("gpu", [(100_000, 1.0, 0.5), (1_000_000, 3.0, 4.0)])], "all_to_all"),
+        ([_exchange_doc("gpu", [(100_000, 1.0, 0.5), (1_000_000, 3.0, 2.95)])], "tie"),
+        ([_exchange_doc("gpu", [(1_000, 1.0, 0.5)])], "undecided"),        # too small
+        ([_exchange_doc("cpu", [(1_000_000, 1.0, 0.5)])], "undecided"),    # not hardware
+        ([_exchange_doc("gpu", [(1_000_000, 1.0, 0.5)], dry_run=True)], "undecided"),
+        ([], "undecided"),
+    ],
+)
+def test_recommendation_rule(docs, decision):
+    rec = _runner_module().recommend(docs)
+    assert rec["decision"] == decision
+    assert rec["reason"]
+
+
+def test_recommendation_ignores_single_device_hardware_rows():
+    """A 1-GPU run without ``--dry-run`` looks like hardware but exchanges
+    nothing; its speedup is timer noise and must not pick a transport."""
+    rp = _runner_module()
+    rec = rp.recommend([_exchange_doc("gpu", [(100_000, 0.020, 0.010), (1_000_000, 0.02, 0.01)],
+                                      n_devices=1)])
+    assert rec["decision"] == "undecided"
+    assert "n_devices=1" in rec["reason"] and ">= 4 devices" in rec["reason"]
+    assert all(r["deciding"] is False for r in rec["rows"])
+
+
+def test_recommendation_requires_four_devices_unless_fewer_are_allowed():
+    rp = _runner_module()
+    rows = [(100_000, 1.0, 0.5), (1_000_000, 4.0, 3.0)]
+    two = rp.recommend([_exchange_doc("gpu", rows, n_devices=2)])
+    assert two["decision"] == "undecided"
+    assert "n_devices=2 < 4" in two["reason"] and "--allow-fewer-devices" in two["reason"]
+    allowed = rp.recommend([_exchange_doc("gpu", rows, n_devices=2, allow_fewer_devices=True)])
+    assert allowed["decision"] == "ppermute" and allowed["deciding_rows"] == 2
+    # the escape hatch never admits a single device
+    one = rp.recommend([_exchange_doc("gpu", rows, n_devices=1, allow_fewer_devices=True)])
+    assert one["decision"] == "undecided" and "no exchange happens" in one["reason"]
+    # the escape hatch may also be read from the recorded CLI config
+    doc = _exchange_doc("gpu", rows, n_devices=3)
+    del doc["allow_fewer_devices"]
+    doc["config"]["allow_fewer_devices"] = True
+    assert rp.recommend([doc])["decision"] == "ppermute"
+    # a 4-device real run decides on its own
+    four = rp.recommend([_exchange_doc("gpu", rows, n_devices=4)])
+    assert four["decision"] == "ppermute" and four["min_speedup"] == pytest.approx(4 / 3)
+
+
+def test_recommendation_uses_only_the_deciding_rows_of_mixed_docs():
+    rp = _runner_module()
+    docs = [
+        _exchange_doc("gpu", [(1_000_000, 1.0, 2.0)], n_devices=1),          # would say a2a
+        _exchange_doc("cpu", [(1_000_000, 1.0, 2.0)]),                       # would say a2a
+        _exchange_doc("gpu", [(1_000_000, 1.0, 2.0)], dry_run=True),         # would say a2a
+        _exchange_doc("gpu", [(100_000, 2.0, 1.0), (1_000_000, 2.0, 1.0)]),  # decides: ppermute
+    ]
+    rec = rp.recommend(docs)
+    assert rec["decision"] == "ppermute" and rec["deciding_rows"] == 2
+    assert [r["deciding"] for r in rec["rows"]] == [False, False, False, True, True]
+
+
+def test_recommendation_survives_zero_median():
+    rp = _runner_module()
+    rec = rp.recommend([_exchange_doc("gpu", [(100_000, 0.5, 0.0)])])
+    assert rec["decision"] == "undecided"
+    assert "0 ms" in rec["reason"]
+    # a zero next to a deciding row does not poison the decision either
+    rec = rp.recommend([_exchange_doc("gpu", [(100_000, 0.5, 0.0), (1_000_000, 4.0, 3.0)])])
+    assert rec["decision"] == "ppermute" and rec["deciding_rows"] == 1
+
+
+def test_exchange_goal_refuses_device_counts_that_cannot_decide():
+    rp = _runner_module()
+    with pytest.raises(SystemExit, match="performs no exchange"):
+        rp.check_exchange_device_count(1, dry_run=False, allow_fewer=False)
+    with pytest.raises(SystemExit, match="performs no exchange"):
+        rp.check_exchange_device_count(1, dry_run=False, allow_fewer=True)
+    with pytest.raises(SystemExit, match="--allow-fewer-devices"):
+        rp.check_exchange_device_count(2, dry_run=False, allow_fewer=False)
+    rp.check_exchange_device_count(2, dry_run=False, allow_fewer=True)
+    rp.check_exchange_device_count(4, dry_run=False, allow_fewer=False)
+    rp.check_exchange_device_count(1, dry_run=True, allow_fewer=False)   # proving the script
+
+
+def test_file_partition_with_empty_shards_is_an_error():
+    rp = _runner_module()
+    with pytest.raises(rp.MeshPartitionError, match=r"2 non-empty part\(s\) but --n-devices is 4"):
+        rp.check_file_partition(np.array([0, 0, 1, 1]), 4)
+    with pytest.raises(rp.MeshPartitionError, match="part ids 0..4"):
+        rp.check_file_partition(np.array([0, 1, 2, 3, 4]), 4)
+    with pytest.raises(rp.MeshPartitionError, match="part ids -1"):
+        rp.check_file_partition(np.array([-1, 0, 1, 2]), 4)
+    ok = rp.check_file_partition(np.array([3, 2, 1, 0, 0]), 4)
+    assert ok.dtype == np.int32 and ok.tolist() == [3, 2, 1, 0, 0]
+
+
+def test_gradient_goal_runs_a_file_mesh_once(tmp_path, monkeypatch):
+    """With ``--mesh`` there is one mesh, whatever ``--cells`` says; it is
+    loaded once and its partition computed once per process."""
+    rp = _runner_module()
+    n, edges = rp.grid_edges(64)
+    path = tmp_path / "mesh.npz"
+    np.savez(path, edges=edges)
+    args = SimpleNamespace(mesh=str(path), cells=[100, 300, 1000], synthetic="grid",
+                           partition="contiguous")
+    assert rp._sizes(args) == [1000]
+    assert rp._sizes(SimpleNamespace(mesh=None, cells=[100, 300])) == [100, 300]
+    loads, partitions = [], []
+    real_load, real_partition = rp.load_mesh, rp.partition_cells
+    monkeypatch.setattr(rp, "load_mesh", lambda p: (loads.append(p), real_load(p))[1])
+    monkeypatch.setattr(rp, "partition_cells",
+                        lambda *a: (partitions.append(a), real_partition(*a))[1])
+    for size in rp._sizes(args):
+        n_got, edges_got, pa, source = rp._mesh_source(args, size)
+        rp._partition_for(args, source, n_got, edges_got, pa, 4)
+        rp._mesh_source(args, size)             # a second goal asking again
+        rp._partition_for(args, source, n_got, edges_got, pa, 4)
+    assert n_got == n and loads == [str(path)] and len(partitions) == 1
+
+
+def test_exchange_timing_input_is_presharded_on_the_mesh():
+    """The slab the exchange goal times carries the mesh's ``NamedSharding``
+    before the first timed call; an uncommitted device-0 array (what
+    ``jnp.asarray`` of host data gives) is refused, because a compiled
+    ``shard_map`` would scatter it to the mesh inside every timed call."""
+    import jax
+    import jax.numpy as jnp
+    from jax.sharding import NamedSharding, PartitionSpec as P
+
+    from maddening.cloud.multigpu.halo_unstructured import build_unstructured_partition
+
+    if len(jax.devices()) < _N_DEV:
+        pytest.skip(f"needs >= {_N_DEV} devices")
+    rp = _runner_module()
+    rp._load_backend()
+    mesh = rp._mesh_for(_N_DEV)
+    n, edges = rp.grid_edges(_CELLS)
+    pa, _ = rp.partition_cells(n, edges, _N_DEV, "contiguous")
+    layout = build_unstructured_partition(partition_assignment=pa, edges=edges, n_devices=_N_DEV)
+    values = np.random.default_rng(0).standard_normal(n).astype(np.float32)
+    slab = rp.exchange_input(values, layout, mesh)
+    assert slab.sharding == NamedSharding(mesh, P("devices"))
+    assert rp.require_presharded([slab], mesh, "test") is True
+    unplaced = jnp.asarray(rp.layout_slab(values, layout))
+    assert unplaced.sharding != slab.sharding
+    with pytest.raises(RuntimeError, match="reshard it from device 0"):
+        rp.require_presharded([unplaced], mesh, "test")
+    # and the goal itself records that its timed input was pre-placed
+    args = SimpleNamespace(n_devices=_N_DEV, fields=1, cells=[_CELLS], synthetic="grid",
+                           partition="contiguous", warmup=1, repeats=2, mesh=None)
+    (entry,) = rp.run_exchange(args, {})["results"]
+    assert entry["input_presharded"] is True
+    assert entry["input_sharding"] == str(slab.sharding)
+    assert entry["bit_identical"] is True
+
+
+def test_the_unstructured_goals_node_keeps_its_statics_so_the_wrapper_partitions_them_once(
+        monkeypatch):
+    """``NeighbourMeanNode.static_data`` hands back the same arrays on every
+    access, as ``SimulationNode.static_data`` requires, so the wrapper's
+    cache of partitioned statics (keyed on the arrays' identity) holds: the
+    first public ``update()`` partitions the two statics and the ones after
+    it partition nothing.  The node used to build ``own`` afresh on every
+    access, and every public ``update()`` re-partitioned both on the host,
+    about 25 ns a cell (242 ms a step at 1e7 cells on four GPUs, against
+    4.45 with the statics held): the ``forward`` goal's wrapper column
+    timed that, not the wrapper."""
+    import jax
+
+    from maddening.cloud.multigpu import sharded_unstructured
+
+    if len(jax.devices()) < _N_DEV:
+        pytest.skip(f"needs >= {_N_DEV} devices")
+    rp = _runner_module()
+    rp._load_backend()
+    mesh = rp._mesh_for(_N_DEV)
+    n, edges = rp.grid_edges(_CELLS)
+    pa, _ = rp.partition_cells(n, edges, _N_DEV, "contiguous")
+    node = rp.NeighbourMeanNode("mesh", n, rp.neighbour_table(n, edges), partition_assignment=pa)
+    first, again = node.static_data, node.static_data
+    assert sorted(first) == ["nbr", "own"]
+    assert all(first[k].value is again[k].value for k in first)
+    assert rp.NeighbourMeanNode("mesh", n, rp.neighbour_table(n, edges)).static_data == {}
+
+    _ref, sharded, layout = rp.build_pair(n, edges, mesh, pa, "ppermute")
+    _, inputs, params = rp.node_inputs(n, layout, mesh)
+    state = sharded.initial_state()
+    calls = []
+    real = sharded_unstructured.partition_value
+    monkeypatch.setattr(sharded_unstructured, "partition_value",
+                        lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+    per_call = []
+    for _ in range(3):
+        before = len(calls)
+        state = {"x": sharded.update(state, inputs, 1.0, params=params)["x"]}
+        per_call.append(len(calls) - before)
+    assert per_call == [2, 0, 0], per_call
+
+
+def test_neighbour_and_slab_tables_agree_with_the_layout():
+    from maddening.cloud.multigpu.halo_unstructured import build_unstructured_partition
+
+    rp = _runner_module()
+    n, edges = rp.grid_edges(25)                      # 5x5 lattice
+    assert n == 25
+    tbl = rp.neighbour_table(n, edges)
+    assert tbl.shape == (25, 4)
+    assert sorted(tbl[12].tolist()) == [7, 11, 13, 17]          # interior cell
+    assert sorted(tbl[0].tolist()) == [0, 0, 1, 5]              # corner: self-padded
+    pa, how = rp.partition_cells(n, edges, 4, "contiguous")
+    assert how == "contiguous"
+    layout = build_unstructured_partition(partition_assignment=pa, edges=edges, n_devices=4)
+    slab = rp.slab_table(layout, tbl)
+    # every slab index resolves to the right global neighbour on the owner
+    for g in range(n):
+        d = int(pa[g])
+        for j, s in enumerate(slab[g]):
+            if s < layout.n_local_max:
+                assert int(layout.local_global_ids[d][s]) == int(tbl[g, j])
+            else:
+                assert int(layout.ghost_global_ids[d][s - layout.n_local_max]) == int(tbl[g, j])
+    ring = rp.ring_edges(8)
+    assert ring.tolist()[-1] == [7, 0]
+    with pytest.raises(ValueError, match="ring|grid"):
+        rp.synthetic_mesh("torus", 8)
+    rcm_pa, rcm_how = rp.partition_cells(n, edges, 4, "rcm")
+    assert rcm_how == "rcm" and np.bincount(rcm_pa, minlength=4).min() > 0
+
+
+# --- checks, the checklist verdict and the stop rule, in-process -------------
+
+
+def _goal_doc(goal: str, *, platform: str = "gpu", dry_run: bool = False, n_devices: int = 4,
+              passed: bool = True, allow_fewer_devices: bool = False) -> dict:
+    check = {"name": f"{goal} parity", "value": 1e-7 if passed else 1e-2, "limit": 1e-5,
+             "passed": passed}
+    return {"goal": goal, "dry_run": dry_run, "n_devices": n_devices,
+            "allow_fewer_devices": allow_fewer_devices, "checks": [check], "passed": passed,
+            "results": [],
+            "environment": {"platform": platform, "device_kinds": ["NVIDIA A100-SXM4-80GB"],
+                            "jax": "0.11.2", "jaxlib": "0.11.2",
+                            # one session's commit: a directory where no file
+                            # records one exits 4 (MIXED COMMITS)
+                            "git_commit": "c" * 40}}
+
+
+def _all_goal_docs(**kw) -> dict:
+    return {goal: [_goal_doc(goal, **kw)] for goal in _GOALS}
+
+
+def test_check_helpers_fail_closed():
+    rp = _runner_module()
+    assert rp.check("x", 1e-6, 1e-5)["passed"] is True
+    assert rp.check("x", 1e-4, 1e-5)["passed"] is False
+    assert rp.check("x", float("nan"), 1e-5)["passed"] is False     # NaN is not "small"
+    assert rp.check("x", 0.0, rp.LIMITS["exact"])["passed"] is True
+    assert rp.check("x", 1e-30, rp.LIMITS["exact"])["passed"] is False
+    assert rp.check("x", 1e-6, 1e-5)["sense"] == "<="
+    assert rp.check_that("y", True)["sense"] == "=="
+    assert rp.finish_checks({}, [])["passed"] is False               # nothing compared
+    assert rp.finish_checks({}, [rp.check_that("y", True)])["passed"] is True
+    assert rp.finish_checks({}, [rp.check_that("y", True), rp.check_that("z", False)])[
+        "passed"] is False
+    # a check not run is recorded, never passes, and makes the goal incomplete
+    skipped = rp.check_not_run("pencil", "needs 4 devices")
+    assert skipped["passed"] is False and skipped["not_run"] is True
+    assert rp.check_status(skipped) == "not run"
+    assert rp.finish_checks({}, [rp.check_that("y", True), skipped])["passed"] is False
+    assert rp._rel_each([1.0, 2.0], [1.0, 2.0 + 2e-6]) == pytest.approx(1e-6, rel=1e-3)
+
+
+@pytest.mark.parametrize("record, status", [
+    ({"value": 0.5, "limit": 0.0, "sense": "<=", "passed": True}, "inconsistent"),
+    ({"value": 0.0, "limit": 0.0, "sense": "<=", "passed": False}, "inconsistent"),
+    ({"value": float("nan"), "limit": 1.0, "sense": "<=", "passed": True}, "inconsistent"),
+    ({"value": False, "limit": True, "sense": "==", "passed": True}, "inconsistent"),
+    ({"value": 0.5, "limit": 0.0, "sense": ">=", "passed": True}, "inconsistent"),  # unknown
+    ({"value": "0.0", "limit": 0.0, "sense": "<=", "passed": True}, "inconsistent"),
+    ({"value": 0.5, "limit": 0.0, "passed": True}, "inconsistent"),        # schema 3
+    ({"value": 0.5, "limit": 0.0, "sense": "<=", "passed": False}, "failed"),
+    ({"value": 1e-7, "limit": 1e-5, "sense": "<=", "passed": True}, "passed"),
+    ({"value": 1e-7, "limit": 1e-5, "passed": True}, "passed"),            # schema 3
+    ({"value": True, "limit": True, "passed": True}, "passed"),            # schema 3
+    ({"value": None, "limit": None, "not_run": True, "passed": True}, "inconsistent"),
+])
+def test_check_status_rederives_pass_fail_from_the_value_and_limit(record, status):
+    assert _runner_module().check_status({"name": "c", **record}) == status
+
+
+def test_summarise_does_not_trust_a_recorded_pass(tmp_path, capsys):
+    """A check with value 0.5 against limit 0.0, recorded ``passed: true``,
+    read PASS / CLOSED: the summary counted the flags."""
+    rp = _rules_only_runner()
+    docs = _all_goal_docs()
+    docs["halo"][0]["checks"][0].update(value=0.5, limit=0.0, sense="<=", passed=True)
+    status = rp.checklist_status(docs)
+    assert status[2][0] == "FAILED", status[2]
+    assert rp.goal_verdict(docs["halo"]) == "FAIL"
+    _write_checklist_docs(tmp_path, docs)
+    assert _summarise_without_tables(rp, tmp_path) == 3
+    out = capsys.readouterr().out
+    assert ("[halo] halo parity: 5.000e-01 (limit 0.0) -- recorded passed=True, but the "
+            "value fails its limit") in out
+    # the file-level flag is re-derived too
+    docs = _all_goal_docs()
+    docs["hybrid"][0]["passed"] = False
+    assert rp.checklist_status(docs)[4][0] == "FAILED"
+
+
+def test_the_checklist_closes_only_on_a_real_gpu_run_with_enough_devices():
+    rp = _rules_only_runner()
+    closed = rp.checklist_status(_all_goal_docs())
+    assert [s for s, _ in closed.values()] == ["CLOSED"] * 6
+    for kw in ({"dry_run": True}, {"platform": "cpu"}):
+        status = rp.checklist_status(_all_goal_docs(**kw))
+        assert all(s.startswith("open: passed on CPU") for s, _ in status.values()), (kw, status)
+    # --allow-fewer-devices is about the transport ranking: on 2 devices a
+    # halo from the wrong neighbour passes every check, so fewer than four
+    # devices never close an item, whatever the flag says
+    for n_devices in (2, 3):
+        for allow in (False, True):
+            status = rp.checklist_status(_all_goal_docs(n_devices=n_devices,
+                                                        allow_fewer_devices=allow))
+            assert all(s == "open: passed on fewer than 4 devices"
+                       for s, _ in status.values()), (n_devices, allow, status)
+    assert not rp.closes_the_gap(_goal_doc("halo", n_devices=2, allow_fewer_devices=True))
+    assert rp.closes_the_gap(_goal_doc("halo", n_devices=4))
+    # a check not run keeps its items open; one that claims to have passed fails them
+    docs = _all_goal_docs()
+    docs["halo"][0]["checks"].append(rp.check_not_run("2d pencil", "needs 4"))
+    docs["halo"][0]["passed"] = False
+    assert rp.goal_verdict(docs["halo"]) == "INCOMPLETE"
+    assert rp.checklist_status(docs)[2] == ("open", "halo INCOMPLETE")
+    docs["halo"][0]["checks"][-1]["passed"] = True
+    assert rp.checklist_status(docs)[2][0] == "FAILED"
+    # one failed goal fails every item it decides, and only those
+    docs = _all_goal_docs()
+    docs["coupled"] = [_goal_doc("coupled", passed=False)]
+    status = rp.checklist_status(docs)
+    assert status[6][0] == "FAILED" and status[3][0] == "FAILED"
+    assert status[1][0] == status[2][0] == status[4][0] == status[5][0] == "CLOSED"
+    # a goal never run leaves its items open
+    del docs["hybrid"]
+    assert rp.checklist_status(docs)[4] == ("open", "hybrid not run")
+    # a schema-2 file recorded no checks and cannot close anything
+    docs = _all_goal_docs()
+    del docs["forward"][0]["checks"]
+    assert rp.checklist_status(docs)[1][0] == "open"
+
+
+def _write_checklist_docs(directory: Path, docs: dict) -> None:
+    for goal, (doc, *_) in docs.items():
+        if goal in ("exchange", "forward", "gradient"):
+            continue                    # the timing tables need full results
+        (directory / f"{goal}.json").write_text(json.dumps(doc), encoding="utf-8")
+
+
+def _summarise_without_tables(rp, directory: Path) -> int:
+    monkey_tables = rp._print_checklist_goal_tables
+    try:
+        rp._print_checklist_goal_tables = lambda docs: None
+        return rp.summarise(directory)
+    finally:
+        rp._print_checklist_goal_tables = monkey_tables
+
+
+def test_summarise_exits_3_and_lists_a_failed_check(tmp_path, capsys):
+    rp = _rules_only_runner()
+    docs = _all_goal_docs()
+    docs["halo"] = [_goal_doc("halo", passed=False)]
+    _write_checklist_docs(tmp_path, docs)
+    assert _summarise_without_tables(rp, tmp_path) == 3
+    out = capsys.readouterr().out
+    assert "[halo] halo parity: 1.000e-02 (limit 1e-05)" in out
+    assert "2  halo exchange at the shard and global boundaries" in out and "FAILED" in out
+
+
+def test_summarise_lists_checks_not_run_and_exits_0(tmp_path, capsys):
+    rp = _rules_only_runner()
+    docs = _all_goal_docs()
+    docs["indivisible"][0]["checks"].append(rp.check_not_run("pencil refusal", "needs 4"))
+    docs["indivisible"][0]["passed"] = False
+    _write_checklist_docs(tmp_path, docs)
+    assert _summarise_without_tables(rp, tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "Checks not run" in out and "[indivisible] pencil refusal -- needs 4" in out
+    assert "5  an indivisible grid is refused" in out
+    line = next(ln for ln in out.splitlines() if ln.startswith("5  "))
+    assert "open  [indivisible INCOMPLETE]" in line and "CLOSED" not in line
+    assert "Failed checks" not in out
+
+
+def test_halo_reference_encodes_the_documented_boundary_fill():
+    """The NumPy reference the halo goal holds the exchange to, pinned on
+    a case small enough to read: 8 cells on 2 shards."""
+    rp = _runner_module()
+    assert rp.halo_index_map(8, 2, 1, "periodic").tolist() == [[7, 0, 1, 2, 3, 4],
+                                                               [3, 4, 5, 6, 7, 0]]
+    assert rp.halo_index_map(8, 2, 1, "edge").tolist() == [[0, 0, 1, 2, 3, 4],
+                                                           [3, 4, 5, 6, 7, 7]]
+    assert rp.halo_index_map(8, 2, 1, "zero").tolist() == [[-1, 0, 1, 2, 3, 4],
+                                                           [3, 4, 5, 6, 7, -1]]
+    # width 2: "edge" repeats the outermost cell across the halo, as
+    # numpy.pad(mode="edge") does -- not the two outermost cells in order
+    assert rp.halo_index_map(8, 2, 2, "edge").tolist() == [[0, 0, 0, 1, 2, 3, 4, 5],
+                                                           [2, 3, 4, 5, 6, 7, 7, 7]]
+    assert rp.halo_index_map(8, 2, 2, "zero").tolist() == [[-1, -1, 0, 1, 2, 3, 4, 5],
+                                                           [2, 3, 4, 5, 6, 7, -1, -1]]
+    a = np.arange(8, dtype=np.float32).reshape(8, 1) + 1
+    rows = rp.halo_index_map(8, 2, 1, "zero")
+    padded, grad = rp.halo_reference(a, rows, np.array([[0]]), np.ones((12, 1), np.float32))
+    assert padded[:, 0].tolist() == [0, 1, 2, 3, 4, 5, 4, 5, 6, 7, 8, 0]
+    # each owned cell once, plus once more per halo slot it fills
+    assert grad[:, 0].tolist() == [1, 1, 1, 2, 2, 1, 1, 1]
+
+
+def _two_device_goals_record_what_they_cannot_run(goals):
+    """Run ``goals`` (``(name, runner, expected not-run prefixes)``) on 2
+    devices and check each records exactly those checks as not run, passes
+    the rest, and makes a valid record that reads ``INCOMPLETE``."""
+    rp = _runner_module()
+    args = SimpleNamespace(n_devices=2, cells=[64], synthetic="grid", partition="contiguous",
+                           mesh=None, steps=1, grad_steps=1, warmup=0, repeats=1)
+    for goal, run_name, expected in goals:
+        doc = getattr(rp, run_name)(args, {})
+        not_run = [c for c in doc["checks"] if c.get("not_run")]
+        assert {next(e for e in expected if c["name"].startswith(e)) for c in not_run} \
+            == expected, not_run
+        assert all(c["passed"] for c in doc["checks"] if not c.get("not_run"))
+        assert doc["passed"] is False
+        # The envelope main() writes around it, on two GPUs: the record is
+        # valid -- its checks are what the runner derives on two devices,
+        # not-run checks included -- and the goal reads incomplete.
+        doc.update(schema_version=rp.SCHEMA_VERSION, goal=goal, n_devices=2, dry_run=False,
+                   allow_fewer_devices=False,
+                   environment={"platform": "gpu", "devices": ["gpu:0", "gpu:1"],
+                                "n_devices_visible": 2, "git_commit": "0" * 40},
+                   config={"cells": [64], "synthetic": "grid", "mesh": None, "n_devices": 2,
+                           "allow_fewer_devices": False})
+        assert rp.record_problems(doc) == [], rp.record_problems(doc)
+        assert rp.goal_verdict([doc]) == "INCOMPLETE"
+
+
+_NEIGHBOUR_NOT_RUN = {"spatial axis 0 split over >= 3 devices",
+                      "spatial axis 1 split over >= 3 devices"}
+
+
+def test_a_two_device_run_records_the_cases_it_cannot_run():
+    """On 2 devices the 2-D pencil cases have no mesh and a halo from the
+    wrong neighbour cannot show along either spatial axis; each is a check
+    *not run*, so the goal reads incomplete instead of passing on what it
+    could reach."""
+    _two_device_goals_record_what_they_cannot_run([
+        ("halo", "run_halo", {"2d pencil mesh", *_NEIGHBOUR_NOT_RUN}),
+        ("indivisible", "run_indivisible", {"pencil (2-D mesh) refusal"})])
+
+
+def test_a_spatial_axis_no_case_splits_over_three_devices_is_a_check_not_run():
+    """Four devices are not enough by themselves: the 2 x 2 pencil splits
+    each spatial axis over two, where left and right are one device.  The
+    rule reads the cases' mesh shapes, so a run whose 1-D meshes went
+    missing would keep its items open; on four devices, with them, it
+    records nothing."""
+    rp = _runner_module()
+    pencil_only = rp._neighbour_direction_not_run([(2, 2)], "x")
+    assert [c["name"].split(":")[0] for c in pencil_only] == sorted(_NEIGHBOUR_NOT_RUN)
+    assert all(c["not_run"] and c["passed"] is False for c in pencil_only)
+    assert "at most 2" in pencil_only[0]["detail"]
+    axis0_only = rp._neighbour_direction_not_run([(4, 1), (2, 2)], "x")
+    assert [c["name"].split(":")[0] for c in axis0_only] == [
+        "spatial axis 1 split over >= 3 devices"]
+    assert rp._neighbour_direction_not_run(
+        [rp._mesh_shape_of(m, 4) for m in rp.meshes_that_fit(4)], "x") == []
+    for n_dev in (3, 6, 8):
+        assert rp._neighbour_direction_not_run(
+            [rp._mesh_shape_of(m, n_dev) for m in rp.meshes_that_fit(n_dev)], "x") == []
+    # and each goal applies it to its own results: a halo record holding
+    # only its pencil cases gets both checks not run
+    halo = {"stencil_cases": [{"mesh": "2d", "mesh_shape": [2, 2], "shape": [16, 20],
+                               "halo": 1, "boundary": "periodic", "forward_max_abs": 0.0,
+                               "adjoint_max_abs": 0.0}],
+            "unstructured": {"cells": 16, "methods": {
+                m: {"forward_max_abs": 0.0, "adjoint_max_abs": 0.0} for m in _METHODS}}}
+    not_run = [c["name"].split(":")[0] for c in rp.halo_checks([halo], 4) if c.get("not_run")]
+    assert not_run == sorted(_NEIGHBOUR_NOT_RUN)
+    for goal in ("stencil", "hybrid", "coupled"):
+        checks = rp.GOAL_CHECKS[goal]([], 4)
+        assert [c["name"].split(":")[0] for c in checks if c.get("not_run")] == sorted(
+            _NEIGHBOUR_NOT_RUN), goal
+        # and with no pencil (an odd count, or fewer than four), that too
+        for n_dev in (2, 3, 5):
+            names = [c["name"] for c in rp.GOAL_CHECKS[goal]([], n_dev) if c.get("not_run")]
+            assert names[0].startswith("2d pencil mesh: "), (goal, n_dev, names)
+
+
+def test_a_replicated_array_is_not_partitioned():
+    """The wrapper goals' "is partitioned over D devices" checks: a state
+    every device holds whole is not one the mesh split."""
+    import jax
+    import jax.numpy as jnp
+    from jax.sharding import NamedSharding, PartitionSpec as P
+
+    if len(jax.devices()) < _N_DEV:
+        pytest.skip(f"needs >= {_N_DEV} devices")
+    rp = _runner_module()
+    rp._load_backend()
+    mesh = rp._mesh_for(_N_DEV)
+    split = jax.device_put(jnp.ones((8, 4)), NamedSharding(mesh, P("devices")))
+    whole = jax.device_put(jnp.ones((8, 4)), NamedSharding(mesh, P()))
+    assert rp._is_partitioned(split, _N_DEV) is True
+    assert rp._is_partitioned(whole, _N_DEV) is False
+    assert rp._is_partitioned(jnp.ones((8, 4)), _N_DEV) is False      # one device
+
+
+# Per push: tests/cloud/multigpu/test_run_pod_dry_run.py::test_a_two_device_run_records_the_cases_it_cannot_run
+@pytest.mark.slow
+def test_a_two_device_run_of_the_wrapper_goals_records_the_pencil_as_not_run():
+    """The goals that run the stencil wrapper, on 2 devices: every case of
+    the three meshes that fit runs and passes, and the pencil mesh and a
+    three-device axis on each spatial axis are checks not run.  Slow: it
+    compiles twelve stencil cases, three hybrid graphs and three coupled
+    groups' adjoints."""
+    _two_device_goals_record_what_they_cannot_run([
+        ("stencil", "run_stencil", {"2d pencil mesh", *_NEIGHBOUR_NOT_RUN}),
+        ("hybrid", "run_hybrid", {"2d pencil mesh", *_NEIGHBOUR_NOT_RUN}),
+        ("coupled", "run_coupled", {"2d pencil mesh", *_NEIGHBOUR_NOT_RUN})])
+
+
+@pytest.mark.parametrize("mesh", ["1d", "1d-axis1"])
+def test_the_stencil_goal_fails_when_unsharded_halo_axes_always_wrap(monkeypatch, mesh):
+    """The fault the periodic-only goal could not see: the wrapper fills
+    the halo of an axis it does not shard periodically whatever
+    ``boundary`` says.  The field's ``"edge"`` case fails on it, and so
+    does its Dirichlet case, which overwrites the field's halos but reads
+    the grid-shaped source's, which the wrapper fills ``"edge"`` there;
+    periodic wraps anyway, and so does the lattice.  On 2 devices, on both
+    meshes with an unsharded axis: axis 1 under ``"1d"``, axis 0 under
+    ``"1d-axis1"``."""
+    from maddening.cloud.multigpu import sharded_node
+
+    rp = _runner_module()
+    rp._load_backend()
+    real = sharded_node._global_edge_halos
+
+    def always_wrap(left, right, *, spatial_axis, halo, boundary):
+        return real(left, right, spatial_axis=spatial_axis, halo=halo, boundary="periodic")
+
+    monkeypatch.setattr(sharded_node, "_global_edge_halos", always_wrap)
+    args = SimpleNamespace(n_devices=2, cells=[64], steps=2, grad_steps=2, warmup=0,
+                           repeats=1)
+    # The goal's field cases on this mesh; its lattice case is periodic,
+    # which the fault cannot move, and is left out here to keep this
+    # per-push test to three small cases.
+    cases = [c for c in rp.stencil_cases(args.cells, args.n_devices)
+             if c[1] == "field" and c[3] == mesh]
+    assert [c[2] for c in cases] == ["periodic", "edge", "dirichlet"]
+    checks = rp.stencil_checks([rp.run_stencil_case(c, args) for c in cases], args.n_devices)
+    failed = {" ".join(c["name"].split()[:5]).rstrip(":") for c in checks
+              if not c["passed"] and not c.get("not_run")}
+    py, pz = rp._mesh_shape_of(mesh, args.n_devices)
+    assert failed == {f"field {mesh} {py}x{pz} 8x10 edge",
+                      f"field {mesh} {py}x{pz} 8x10 dirichlet"}, [
+        c["name"] for c in checks if not c["passed"]]
+
+
+def test_checklist_goals_refuse_a_single_device():
+    rp = _runner_module()
+    with pytest.raises(SystemExit, match="on one device nothing is sharded"):
+        rp.check_checklist_device_count(1)
+    rp.check_checklist_device_count(2)
+
+
+def test_a_multi_goal_run_stops_at_the_first_failing_goal(tmp_path, monkeypatch):
+    """The session's stop condition, enforced by the runner: a failed goal
+    writes its JSON, the next goal does not start, and the exit code is 1."""
+    import jax
+
+    if len(jax.devices()) < _N_DEV:
+        pytest.skip(f"needs >= {_N_DEV} devices")
+    rp = _runner_module()
+    ran = []
+
+    def failing(args, out):
+        ran.append("indivisible")
+        return rp.finish_checks(out, [rp.check("seeded", 1.0, 0.0)])
+
+    def passing(name):
+        def run(args, out):
+            ran.append(name)
+            return rp.finish_checks(out, [rp.check_that("fine", True)])
+        return run
+
+    monkeypatch.setattr(rp, "run_indivisible", failing)
+    for name in ("halo", "coupled", "stencil", "hybrid"):
+        monkeypatch.setattr(rp, f"run_{name}", passing(name))
+    assert rp.main(["--goal", "checklist", "--dry-run", "--out", str(tmp_path)]) == 1
+    assert ran == ["indivisible"]
+    assert json.loads((tmp_path / "indivisible.json").read_text())["passed"] is False
+    ran.clear()
+    assert rp.main(["--goal", "checklist", "--dry-run", "--keep-going",
+                    "--out", str(tmp_path / "all")]) == 1
+    assert ran == ["indivisible", "halo", "coupled", "stencil", "hybrid"]
+
+
+def test_keep_going_records_a_goal_that_raises_and_runs_the_rest(tmp_path, monkeypatch):
+    """``--keep-going`` used to keep going only past a goal whose checks
+    failed: a goal that raised (a seeded wrapper fault makes ``shard_map``
+    refuse the step) ended the run, and every later goal read ``not run``.
+    It is recorded now -- one failed ``goal raised`` check, the exception
+    under ``raised``, a record ``--summarise`` accepts as valid -- and the
+    rest run.  Without ``--keep-going`` the exception ends the run, as
+    before."""
+    import jax
+
+    if len(jax.devices()) < _N_DEV:
+        pytest.skip(f"needs >= {_N_DEV} devices")
+    rp = _runner_module()
+    ran = []
+
+    def raising(args, out):
+        ran.append("halo")
+        out["results"] = [{"partial": True}]        # whatever it had got to
+        raise ValueError("seeded: shard_map refused the step")
+
+    def passing(name):
+        def run(args, out):
+            ran.append(name)
+            return rp.finish_checks(out, [rp.check_that("fine", True)])
+        return run
+
+    monkeypatch.setattr(rp, "run_halo", raising)
+    for name in ("indivisible", "coupled", "stencil", "hybrid"):
+        monkeypatch.setattr(rp, f"run_{name}", passing(name))
+    assert rp.main(["--goal", "checklist", "--dry-run", "--keep-going",
+                    "--out", str(tmp_path)]) == 1
+    assert ran == ["indivisible", "halo", "coupled", "stencil", "hybrid"]
+    (doc,) = rp._load_results(tmp_path, "halo")
+    assert doc["raised"]["type"] == "ValueError"
+    assert doc["raised"]["message"] == "seeded: shard_map refused the step"
+    assert "Traceback" in doc["raised"]["traceback"]
+    assert doc["results"] == [] and doc["passed"] is False
+    assert [(c["name"], c["passed"]) for c in doc["checks"]] == [("goal raised", False)]
+    assert rp.record_problems(doc) == []
+    assert rp.goal_verdict([doc]) == "FAIL"
+    ran.clear()
+    with pytest.raises(ValueError, match="seeded: shard_map refused the step"):
+        rp.main(["--goal", "checklist", "--dry-run", "--out", str(tmp_path / "stop")])
+    assert ran == ["indivisible", "halo"]
+    assert not (tmp_path / "stop" / "halo.json").exists()

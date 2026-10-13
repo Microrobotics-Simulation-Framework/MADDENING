@@ -1,0 +1,17 @@
+W1012 16:17:18.960047   79111 bfc_allocator.cc:598] Allocator (GPU_0_bfc) ran out of memory trying to allocate 37.46GiB (rounded to 40222682624) from the lower end requested by op 
+If this is caused by memory fragmentation, the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' may improve the situation.
+Current allocation summary follows.
+W1012 16:17:18.961147   79111 bfc_allocator.cc:609] ***************************************************________________________________________________*
+W1012 16:17:21.073435   79117 bfc_allocator.cc:598] Allocator (GPU_2_bfc) ran out of memory trying to allocate 37.46GiB (rounded to 40222682624) from the lower end requested by op 
+If this is caused by memory fragmentation, the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' may improve the situation.
+Current allocation summary follows.
+W1012 16:17:21.074277   79117 bfc_allocator.cc:609] ****************************************************_______________________________________________*
+W1012 16:17:21.088121   79114 bfc_allocator.cc:598] Allocator (GPU_1_bfc) ran out of memory trying to allocate 37.46GiB (rounded to 40222682624) from the lower end requested by op 
+If this is caused by memory fragmentation, the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' may improve the situation.
+Current allocation summary follows.
+W1012 16:17:21.088870   79114 bfc_allocator.cc:609] ****************************************************_______________________________________________*
+W1012 16:17:21.101286   79120 bfc_allocator.cc:598] Allocator (GPU_3_bfc) ran out of memory trying to allocate 37.46GiB (rounded to 40222682624) from the lower end requested by op 
+If this is caused by memory fragmentation, the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' may improve the situation.
+Current allocation summary follows.
+W1012 16:17:21.101941   79120 bfc_allocator.cc:609] ****************************************************_______________________________________________*
+[capacity] OUT OF MEMORY while running: JaxRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 37.46GiB with allocator GPU_0_bfc on device 0. [tf-allocator-allocation-error=''] [executable_name='jit__local_update']

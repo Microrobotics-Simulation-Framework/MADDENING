@@ -26,6 +26,7 @@ from maddening.core.coupling.mapping import (
     rbf_mapping,
     rbf_matrix,
 )
+from tests.conftest import EXAMPLES_COSTLY
 
 KERNELS = ("gaussian", "multiquadric", "inverse_multiquadric", "thin_plate_spline")
 
@@ -81,7 +82,7 @@ def test_patch_test_fails_without_polynomial_for_gaussian():
 
 @given(seed=st.integers(0, 2**31), n_src=st.integers(4, 16), n_tgt=st.integers(2, 12),
        dim=st.integers(1, 2), kernel=st.sampled_from(KERNELS))
-@settings(max_examples=60, deadline=None)
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
 def test_patch_property_float64(seed, n_src, n_tgt, dim, kernel):
     """Random clouds, float64: constants and linear fields to 1e-8."""
     prev = jax.config.read("jax_enable_x64")
@@ -121,7 +122,7 @@ def test_conservative_mode_preserves_total(kernel):
 
 
 @given(seed=st.integers(0, 2**31), n_src=st.integers(3, 12), n_tgt=st.integers(3, 12))
-@settings(max_examples=40, deadline=None)
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
 def test_conservation_property_nearest_and_rbf(seed, n_src, n_tgt):
     rng = np.random.default_rng(seed)
     src, tgt = _cloud(rng, n_src, 1), _cloud(rng, n_tgt, 1, spread=0.9)
@@ -150,7 +151,7 @@ def test_projection_1d_matches_closure_and_conserves_integral():
 
 
 @given(seed=st.integers(0, 2**31), n_src=st.integers(2, 10), n_tgt=st.integers(2, 10))
-@settings(max_examples=40, deadline=None)
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
 def test_apply_T_is_the_adjoint(seed, n_src, n_tgt):
     rng = np.random.default_rng(seed)
     m = matrix_mapping(rng.normal(size=(n_tgt, n_src)).astype(np.float32))
@@ -162,9 +163,23 @@ def test_apply_T_is_the_adjoint(seed, n_src, n_tgt):
     # cancel, so the tolerance scales with the terms, not the result.
     scale = float(jnp.linalg.norm(m.apply(v)) * jnp.linalg.norm(w)) + 1e-6
     assert abs(lhs - rhs) <= 1e-5 * scale, (lhs, rhs, scale)
-    # and matches what JAX's transpose of ``apply`` gives
+    # and matches what JAX's transpose of ``apply`` gives.  Same scaling
+    # argument as above: both are float32 sums over the target index, so a
+    # component that nearly cancels is accurate in absolute terms, not
+    # relative ones (seed=14928, n_src=3, n_tgt=9 lands on -0.0027 with a
+    # 2e-7 absolute difference, which is 7e-5 relative).
     _, vjp = jax.vjp(m.apply, v)
-    np.testing.assert_allclose(np.asarray(vjp(w)[0]), np.asarray(m.apply_T(w)), rtol=1e-5)
+    by_vjp, by_apply_T = np.asarray(vjp(w)[0]), np.asarray(m.apply_T(w))
+    row_scale = float(jnp.linalg.norm(m.H, axis=0).max() * jnp.linalg.norm(w))
+    np.testing.assert_allclose(by_vjp, by_apply_T, rtol=1e-5, atol=1e-5 * row_scale)
+
+
+@pytest.mark.parametrize("seed,n_src,n_tgt", [(14928, 3, 9)])
+def test_adjoint_agrees_with_the_vjp_when_a_component_nearly_cancels(seed, n_src, n_tgt):
+    """A component of the adjoint that nearly cancels is accurate in
+    absolute terms, not relative ones.  Pinned: this case failed the bare
+    ``rtol=1e-5`` with a 2e-7 absolute difference on a -0.0027 component."""
+    test_apply_T_is_the_adjoint.hypothesis.inner_test(seed, n_src, n_tgt)
 
 
 def test_weights_override_and_are_differentiable():
@@ -187,7 +202,13 @@ def test_describe_has_no_weights_and_validation_errors():
     d = m.describe()
     assert d == {"kind": "rbf", "mode": "consistent", "shape": [3, 5],
                  "kernel": "multiquadric", "epsilon": 2.0, "polynomial": True,
-                 "ridge": 1e-8}
+                 "ridge": 1e-8,
+                 # small point sets are inlined into the spec; never the weights
+                 "points": {"source_points": {"inline": [0.0, 0.25, 0.5, 0.75, 1.0],
+                                              "dtype": "float64"},
+                            "target_points": {"inline": [0.0, 0.5, 1.0],
+                                              "dtype": "float64"}}}
+    assert "H" not in d and "weights" not in d
     with pytest.raises(ValueError, match="Unknown kernel"):
         rbf_mapping(np.linspace(0, 1, 5), np.linspace(0, 1, 3), kernel="cubic")
     with pytest.raises(ValueError, match="mode="):
@@ -204,3 +225,28 @@ def test_nearest_neighbor_consistent_selects_nearest():
     m = nearest_neighbor_mapping(src, tgt)
     np.testing.assert_array_equal(np.asarray(m.apply(jnp.array([10.0, 20.0, 30.0]))),
                                   [10.0, 30.0, 20.0])
+
+
+@pytest.mark.parametrize("build", [
+    lambda H, mode: matrix_mapping(H, mode=mode),
+    lambda H, mode: StaticLinearMapping(jnp.asarray(H), mode=mode),
+], ids=["matrix_mapping", "StaticLinearMapping"])
+def test_the_mode_of_a_matrix_of_your_own_is_a_label(build):
+    """``H`` is applied as given under either mode: ``"conservative"``
+    neither transposes nor rescales a matrix the caller brought (the
+    factories that build theirs from two point sets build another one for
+    it: :func:`test_conservative_mode_preserves_total`).  The label is what
+    the mapping reports."""
+    # Neither the rows nor the columns sum to one, and it is not square:
+    # a transpose or a normalisation would show.
+    H = np.array([[1, 2, 0], [0, 3, 4]], np.float32)
+    for mode in ("consistent", "conservative"):
+        m = build(H, mode)
+        assert m.mode == mode and m.describe()["mode"] == mode
+        np.testing.assert_array_equal(np.asarray(m.params_pytree()["H"]), H)
+        # H @ [1, 10, 100] = [1 + 20, 30 + 400]
+        np.testing.assert_array_equal(
+            np.asarray(m.apply(jnp.array([1.0, 10.0, 100.0], jnp.float32))), [21.0, 430.0])
+        # H.T @ [1, 10] = [1, 2 + 30, 40]
+        np.testing.assert_array_equal(
+            np.asarray(m.apply_T(jnp.array([1.0, 10.0], jnp.float32))), [1.0, 32.0, 40.0])

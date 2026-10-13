@@ -1,0 +1,18 @@
+..................                                                       [100%]
+18 passed, 24 deselected in 147.01s (0:02:27)
+
+draw-rejection audit (hypothesis profile: ci)
+constant injection: ON for src/maddening (612 local constants harvested)
+9 tests with Hypothesis draws; 3 filter nothing at all. filter rate: median 0.1%, p90 19.2%, max 19.2%. Total draws 3444, of which 68 filtered out and 1053 overrun.
+
+test                                                                                                                        drawn  filtered  rate   overrun  effective  risk/run
+--------------------------------------------------------------------------------------------------------------------------  -----  --------  -----  -------  ---------  --------
+tests/property/test_sysid_contract.py::TestFIMAgainstFiniteDifference::test_fim_matches_a_finite_difference_of_a_rollout    118    19        19.2%  16.1%    80         3e-27
+tests/property/test_sysid_contract.py::TestTrainableContract::test_fit_moves_only_the_masked_trainable_leaves               114    18        18.4%  14.0%    80         3e-28
+tests/property/test_sysid_contract.py::TestFIMAgainstFiniteDifference::test_crb_is_consistent_with_the_matrix_it_came_from  258    26        11.5%  12.4%    200        5e-38
+tests/property/test_sysid_contract.py::TestTrainableContract::test_fit_defaults_its_mask_to_the_trainable_set               93     3         3.6%   10.8%    80         7e-63
+tests/property/test_sysid_contract.py::TestMaskStructure::test_a_mask_built_from_the_params_tree_is_accepted                1254   1         0.1%   36.1%    800        8e-136
+tests/property/test_sysid_contract.py::TestMaskStructure::test_a_mask_whose_keys_differ_from_params_is_refused              1286   1         0.1%   37.7%    800        8e-136
+tests/property/test_sysid_contract.py::TestFIMAgainstFiniteDifference::test_fim_matches_a_central_finite_difference         228    0         0.0%   12.3%    200        0
+tests/property/test_sysid_contract.py::TestTrainableContract::test_a_mask_may_not_widen_the_trainable_set                   3      0         0.0%   0.0%     3          0
+tests/property/test_sysid_contract.py::TestTrainableContract::test_every_fitter_honours_the_same_frozen_set                 90     0         0.0%   11.1%    80         0

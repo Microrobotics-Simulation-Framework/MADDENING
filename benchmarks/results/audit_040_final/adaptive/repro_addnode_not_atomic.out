@@ -1,0 +1,22 @@
+add_node raised AdaptiveNodeBlindnessError (documented, recoverable)
+
+gm.node_names              : ['trap']
+gm._nodes (private)      : ['trap']
+gm._state (private)      : []
+
+recovery attempt 1 -- perturb theta and re-add under the same name:
+   ValueError Node 'trap' already exists in the graph.
+
+recovery attempt 2 -- remove_node first:
+   KeyError 'trap'
+
+what the half-added node does to the graph:
+   compile(): ok
+   reset_state(): ok
+
+running the corrupted graph:
+   step: ok (!)
+   run_scan: ok (!)
+
+and a *clean* second node added afterwards:
+   the graph still runs the good node: ok

@@ -1,0 +1,13 @@
+SpringDamperNode, constructor stiffness=100, calibrated stiffness=400
+  update(params=fitted)       velocity -> -4.0000000000
+  update(no params)           velocity -> -1.0000000000
+  euler_step(node.derivatives) velocity -> -1.0000000000
+  integrate_node(method=euler) velocity -> -1.0000000000
+  implicit_euler_step          velocity -> -0.9803921104
+  -> integrate_node / implicit_euler_step have NO parameter by which the
+     calibrated stiffness could be supplied; they use 100, not 400.
+
+HeatNode, constructor alpha=0.01, calibrated alpha=0.5
+  update(params=fitted)[3]  -> 8.9840000000
+  integrate_node(euler)[3]  -> 8.9996800000
+  update(no params)[3]      -> 8.9996800000

@@ -284,9 +284,13 @@ class TestLBMPoiseuille2D:
             "outlet_pressure": jnp.float32(p_out),
         }
 
-        # Run for 2000 steps
-        for _ in range(2000):
-            state = node.update(state, boundary_inputs, node.delta_t)
+        # Run for 2000 steps, as one compiled loop: the eager Python loop
+        # this replaces spent 20-38 s on CI dispatching ops one by one.
+        state = jax.lax.fori_loop(
+            0, 2000,
+            lambda _, s: node.update(s, boundary_inputs, node.delta_t),
+            state,
+        )
 
         # Check finiteness
         assert jnp.all(jnp.isfinite(state["velocity"]))

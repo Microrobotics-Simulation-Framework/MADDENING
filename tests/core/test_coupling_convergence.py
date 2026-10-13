@@ -84,10 +84,30 @@ class TestResidualNorms:
         assert float(r) == pytest.approx(0.0, abs=1e-12)
 
     def test_l2_known_value(self):
+        """The L2 norm is of the *relative* change, since 0.4.0.
+
+        A field going 0 -> 3 has moved by all of itself, so the norm is
+        1.0, not 3.0.  That is the point of the change: the same motion
+        in micronewtons scores the same.
+        """
         s_old = {"a": {"x": jnp.array(0.0)}}
         s_new = {"a": {"x": jnp.array(3.0)}}
         r = coupling_residual_l2(s_new, s_old, ["a"])
-        assert float(r) == pytest.approx(3.0, abs=1e-6)
+        assert float(r) == pytest.approx(1.0, abs=1e-6)
+        tiny = coupling_residual_l2({"a": {"x": jnp.array(3e-6)}},
+                                    {"a": {"x": jnp.array(0.0)}}, ["a"])
+        assert float(tiny) == pytest.approx(1.0, abs=1e-6)
+
+    def test_l2_ignores_a_field_inside_the_dead_band(self):
+        """``atol`` is what counts as zero, in the field's own units.
+
+        Without it a relative norm would divide two round-offs by each
+        other on a field that is legitimately at zero.
+        """
+        s_old = {"a": {"x": jnp.array(0.0)}}
+        s_new = {"a": {"x": jnp.array(1e-12)}}
+        r = coupling_residual_l2(s_new, s_old, ["a"], 1e-8)
+        assert float(r) == pytest.approx(0.0, abs=1e-12)
 
     def test_mixed_identical_states_zero(self):
         s = {"a": {"x": jnp.array(1.0), "v": jnp.array(2.0)}}
@@ -336,16 +356,29 @@ class TestAitkenAcceleration:
         assert jnp.isfinite(new_omega)
         assert jnp.all(jnp.isfinite(residual))
 
-    def test_aitken_first_iteration_omega_clamped(self):
-        """With zero prev_residual, omega is clamped within [0.01, 2.0]."""
+    def test_aitken_without_a_previous_residual_keeps_the_seeded_omega(self):
+        """The zero ``prev_residual`` sentinel must not choose omega.
+
+        Aitken needs two successive residuals.  On the first pass of a
+        timestep the coupling loops seed ``prev_residual`` with zeros,
+        which makes the formula's numerator identically zero; the clip
+        then used to turn that into its *floor*, 0.01, throwing away
+        99% of the first correction of every timestep and silently
+        overriding the omega=1.0 the same loops seed alongside it.
+        """
         x_old = jnp.array([1.0, 2.0])
         x_raw = jnp.array([1.5, 2.5])
         prev_r = jnp.zeros(2)
         omega = jnp.array(1.0)
         x_rel, new_omega, _ = aitken_relaxation(x_old, x_raw, prev_r, omega)
-        # With zero prev_r: numerator = 0, so omega = 0 -> clamped to 0.01
-        assert float(new_omega) == pytest.approx(0.01, abs=1e-6)
-        assert jnp.all(jnp.isfinite(x_rel))
+        assert float(new_omega) == pytest.approx(1.0, abs=1e-6)
+        assert jnp.allclose(x_rel, x_raw)
+
+        # The guard returns the caller's omega; it does not hard-code 1.0.
+        _, half_omega, _ = aitken_relaxation(
+            x_old, x_raw, prev_r, jnp.array(0.5)
+        )
+        assert float(half_omega) == pytest.approx(0.5, abs=1e-6)
 
     def test_aitken_convergence_in_graph(self):
         gm = _make_bidirectional_springs(dt=0.01, k=50.0, c=0.5,
@@ -397,7 +430,10 @@ class TestAitkenAcceleration:
             acceleration="aitken",
         )
         gm.compile()
-        step_fn = gm._build_step_fn()
+        # Jitted: stepped in a Python loop under jax.grad, the bare
+        # step was retraced and compiled primitive by primitive on
+        # every pass (over a hundred compiles for one gradient).
+        step_fn = jax.jit(gm._build_step_fn())
         ext = gm._default_external_inputs()
 
         def loss_fn(init_pos):
@@ -502,6 +538,10 @@ class TestFixedRelaxation:
         ))
         assert diff < 1e-6
 
+    # An undamped pair anchored on each other: past MADD-ANO-098's limit
+    # (c < k*dt, its centre of mass grows by 1.02 a step), so compile()
+    # warns.  The test is about the relaxed iteration converging.
+    @pytest.mark.filterwarnings("ignore:.*MADD-ANO-098:UserWarning")
     def test_under_relaxation_convergence(self):
         """Under-relaxation (omega<1) should converge for stiff problems."""
         gm = _make_bidirectional_springs(dt=0.01, k=200.0, c=0.0,
@@ -524,7 +564,10 @@ class TestFixedRelaxation:
             acceleration="fixed", relaxation=0.7,
         )
         gm.compile()
-        step_fn = gm._build_step_fn()
+        # Jitted: stepped in a Python loop under jax.grad, the bare
+        # step was retraced and compiled primitive by primitive on
+        # every pass (over a hundred compiles for one gradient).
+        step_fn = jax.jit(gm._build_step_fn())
         ext = gm._default_external_inputs()
 
         def loss_fn(init_pos):
@@ -627,7 +670,10 @@ class TestJacobiIteration:
             iteration_mode="jacobi",
         )
         gm.compile()
-        step_fn = gm._build_step_fn()
+        # Jitted: stepped in a Python loop under jax.grad, the bare
+        # step was retraced and compiled primitive by primitive on
+        # every pass (over a hundred compiles for one gradient).
+        step_fn = jax.jit(gm._build_step_fn())
         ext = gm._default_external_inputs()
 
         def loss_fn(init_pos):

@@ -10,25 +10,53 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hypothesis import given, settings, assume, note
+from hypothesis import given, settings, note
 from hypothesis import strategies as st
 
 from maddening.core.graph_manager import GraphManager
+from maddening.core._graph_specs import _RESERVED_STATE_KEYS
 from maddening.nodes.ball import BallNode
 from maddening.nodes.spring import SpringDamperNode
 from maddening.nodes.heat import HeatNode
+from maddening.serialization.json_codec import NON_FINITE_TOKENS
 from maddening.warnings import ExceptionGroup
+from tests.conftest import EXAMPLES_CHEAP, EXAMPLES_COSTLY
 
 
 # ---------------------------------------------------------------------------
 # Strategies
 # ---------------------------------------------------------------------------
 
+#: A node name ``add_node`` accepts.  The three non-finite JSON tokens
+#: are mapped aside rather than drawn: ``add_node`` refuses them
+#: (``MADD-ANO-010`` -- a node named ``NaN`` cannot be written to a
+#: config or named by a mapping point reference), so drawing one fails
+#: every test here that expects a name to be *accepted*, for a reason
+#: none of them is about.  This is not a remote corner: Hypothesis
+#: harvests string literals out of local modules and injects them into
+#: draws -- and the refusal put the same three literals into
+#: ``graph_manager`` as well, so the pool for text drawn against the
+#: graph API now contains exactly the strings it rejects.  It turned up
+#: in the first CI run after the refusal landed and will keep turning
+#: up.  Mapped to the nearest *accepted* spelling, not assumed away
+#: (the same choice as the ghost-name strategy below, and as PR 79 made
+#: on the FMI header strategy): the draw is kept, the draw-rejection
+#: rate stays 0.0%, and what the name becomes -- ``"nan"``,
+#: ``"infinity"`` -- is a lookalike the API must accept, so the mapping
+#: exercises the exact-match rule rather than hiding it.  The refusal
+#: itself, and the lookalikes, are pinned in
+#: ``tests/core/test_non_finite_json_tokens.py``.
+#: The keys the graph reserves for its own state and checkpoints
+#: (``_meta``, ``_params``, ``_params_mappings``) are mapped the same way,
+#: to the name without its leading underscore -- a lookalike ``add_node``
+#: takes; the refusal is pinned in
+#: ``tests/api/test_new_nodes_need_a_usable_name_and_timestep.py``.
 node_name_st = st.text(
     alphabet=st.characters(whitelist_categories=("L", "N"), whitelist_characters="_-"),
     min_size=1,
     max_size=12,
-)
+).map(lambda n: n.lower() if n in NON_FINITE_TOKENS
+      else n.lstrip("_") or "x" if n in _RESERVED_STATE_KEYS else n)
 
 # Strategy for generating a random valid node
 def _make_ball(name, dt=0.01):
@@ -54,7 +82,7 @@ class TestRandomValidTopologies:
         n_nodes=st.integers(min_value=1, max_value=6),
         seed=st.integers(min_value=0, max_value=2**31),
     )
-    @settings(max_examples=100, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_random_ball_chain_compiles_and_steps(self, n_nodes, seed):
         """Build a chain of BallNode objects and step without crash."""
         rng = np.random.default_rng(seed)
@@ -88,7 +116,7 @@ class TestRandomValidTopologies:
         n_nodes=st.integers(min_value=2, max_value=5),
         seed=st.integers(min_value=0, max_value=2**31),
     )
-    @settings(max_examples=80, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_random_spring_ball_coupled_steps(self, n_nodes, seed):
         """Build a random mix of springs and balls, edge them, step."""
         rng = np.random.default_rng(seed)
@@ -132,7 +160,7 @@ class TestRandomValidTopologies:
             assert jnp.isfinite(state[name]["position"])
             assert jnp.isfinite(state[name]["velocity"])
 
-    @settings(max_examples=30, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     @given(seed=st.integers(min_value=0, max_value=2**31))
     def test_single_node_graph_steps(self, seed):
         """A single isolated node should compile and step cleanly."""
@@ -148,7 +176,7 @@ class TestRandomValidTopologies:
         assert "solo" in state
         assert jnp.isfinite(state["solo"]["position"])
 
-    @settings(max_examples=20, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     @given(n_steps=st.integers(min_value=1, max_value=50))
     def test_empty_boundary_inputs_multi_step(self, n_steps):
         """Multiple steps with no boundary inputs should not crash."""
@@ -165,42 +193,71 @@ class TestRandomValidTopologies:
 # ---------------------------------------------------------------------------
 
 class TestSelfEdgeHandling:
-    """Self-edges (source==target same node) should not cause undefined behavior."""
+    """An edge from a node to itself is accepted, and says which of the node's
+    own values it reads.
+
+    Outside a coupling group it is a back edge: the node reads the value it
+    had a step ago.  In a coupling group (one of that node alone is enough)
+    it is iterated with the group, and at convergence the node reads its new
+    value.  ``validate()`` says which in one ``INFO:`` line for the edge,
+    and ``compile()`` raises no warning in either case.
+    Two shipped nodes here; the closed forms across solvers, schedules,
+    rates, gradients and precisions are in
+    ``tests/core/test_an_edge_from_a_node_to_itself.py``.
+    """
 
     def test_self_edge_ball_position_to_table(self):
-        """A ball whose position feeds back to its own table_position."""
+        """A ball whose table is its own position: the one it had a step ago.
+
+        It falls below where it was, so it lands on that height and
+        bounces: after one step it is at 5.0 again, moving up at
+        ``0.8 * 9.81 * 0.01``.  (With no edge it is at 4.999019 moving
+        down, and a ball reading its *new* position is never below it.)
+        """
         gm = GraphManager()
         gm.add_node(BallNode(name="b", timestep=0.01, initial_position=5.0))
-        # This is technically a self-loop; it should either be rejected
-        # or produce a valid (non-crashing) result
         gm.add_edge("b", "b", "position", "table_position")
-        # Either compile raises or step works without crash
-        try:
-            gm.compile()
-            state = gm.step()
-            # If it doesn't raise, output must still be finite
-            assert jnp.isfinite(state["b"]["position"])
-            assert jnp.isfinite(state["b"]["velocity"])
-        except (RuntimeError, ValueError):
-            pass  # rejection is also acceptable
+        assert gm.validate() == [
+            "INFO: edge b.position -> b.table_position is from node 'b' to itself. "
+            "Outside a coupling group it is a back edge: the node reads its state of the "
+            "previous step, so the term the edge carries is explicit."]
+        gm.compile()
+        state = gm.step()
+        assert float(state["b"]["position"]) == 5.0
+        assert float(state["b"]["velocity"]) == pytest.approx(0.8 * 9.81 * 0.01, rel=1e-6)
 
-    def test_self_edge_spring_position_to_anchor(self):
-        """A spring whose position feeds back to its own anchor."""
+    @pytest.mark.parametrize("grouped", [False, True], ids=["no group", "a group of the node"])
+    def test_self_edge_spring_position_to_anchor(self, grouped):
+        """A spring anchored to its own position, at rest, with a rest length.
+
+        Outside a group the anchor is the position of a step ago, the one
+        the update starts from, so the spring is stretched by its rest
+        length exactly: ``v = dt k rest / m``.  In a group of the one node
+        the anchor is the new position, so the stretch holds the step's own
+        displacement as well: ``v = dt k rest / (m - dt**2 k)``.
+        """
+        dt, k, rest = 0.01, 10.0, 0.5
         gm = GraphManager()
         gm.add_node(SpringDamperNode(
-            name="s", timestep=0.01, stiffness=10.0, damping=1.0,
+            name="s", timestep=dt, stiffness=k, damping=1.0, rest_length=rest,
             initial_position=2.0,
         ))
         gm.add_edge("s", "s", "position", "anchor_position")
-        try:
-            gm.compile()
-            state = gm.step()
-            # Self-referencing spring: force depends on (pos - pos - rest_length)
-            # = -rest_length, which is constant. Should be finite.
-            assert jnp.isfinite(state["s"]["position"])
-            assert jnp.isfinite(state["s"]["velocity"])
-        except (RuntimeError, ValueError):
-            pass
+        if grouped:
+            gm.add_coupling_group(["s"], max_iterations=50)
+        edge = "INFO: edge s.position -> s.anchor_position is from node 's' to itself. "
+        assert gm.validate() == [edge + (
+            "With the node in a coupling group (['s']) the edge is iterated with the group "
+            "and at convergence the node reads its new value, so the term is implicit."
+            if grouped else
+            "Outside a coupling group it is a back edge: the node reads its state of the "
+            "previous step, so the term the edge carries is explicit.")]
+        gm.compile()
+        state = gm.step()
+        velocity = dt * k * rest / (1.0 - dt**2 * k) if grouped else dt * k * rest
+        # The two differ by a part in a thousand.
+        assert float(state["s"]["velocity"]) == pytest.approx(velocity, rel=2e-5)
+        assert float(state["s"]["position"]) == pytest.approx(2.0 + dt * velocity, rel=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +274,7 @@ class TestDuplicateNodeNames:
             gm.add_node(BallNode(name="dup", timestep=0.02))
 
     @given(name=node_name_st)
-    @settings(max_examples=50, deadline=None)
+    @settings(max_examples=EXAMPLES_CHEAP, deadline=None)
     def test_duplicate_name_raises_any_name(self, name):
         """Any name used twice should be rejected."""
         gm = GraphManager()
@@ -256,11 +313,16 @@ class TestMissingEdgeTargets:
         with pytest.raises(RuntimeError, match="source field"):
             gm.compile()
 
-    @given(ghost_name=node_name_st)
-    @settings(max_examples=30, deadline=None)
+    # The one name that is not a ghost is the node the test adds.  Mapped
+    # aside rather than assumed away: at 0.0% measured the ``assume`` cost
+    # nothing today, but a gate that only bites on an unlucky draw is a gate
+    # whose cost nobody can see, and ``node_name_st`` can produce "b".
+    @given(ghost_name=node_name_st.map(
+        lambda n: n + "_ghost" if n == "b" else n))
+    @settings(max_examples=EXAMPLES_CHEAP, deadline=None)
     def test_missing_target_any_name(self, ghost_name):
         """Any non-existent target should raise."""
-        assume(ghost_name != "b")
+        assert ghost_name != "b", "the drawn name must not be the real node"
         gm = GraphManager()
         gm.add_node(BallNode(name="b", timestep=0.01))
         gm.add_edge("b", ghost_name, "position", "table_position")
@@ -331,6 +393,9 @@ class TestCyclicGraphs:
     """Cycles in the graph should be handled (staggering or coupling)."""
 
     @given(n_nodes=st.integers(min_value=2, max_value=4))
+    # Absolute, not a tier: the only draw is ``n_nodes`` in 2..4, so
+    # Hypothesis exhausts the space after three examples and a deeper
+    # profile would buy nothing here.
     @settings(max_examples=20, deadline=None)
     def test_cycle_compiles_with_staggering(self, n_nodes):
         """A simple cycle should compile (back-edges use prev timestep)."""

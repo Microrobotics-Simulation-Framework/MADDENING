@@ -11,20 +11,39 @@ import jax.numpy as jnp
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.node import SimulationNode
 from maddening.core.compliance.stability import stability
-from maddening.surrogates.architecture import SurrogateArchitecture
+from maddening.surrogates.architecture import PyTree, SurrogateArchitecture
+from maddening.surrogates.types import (
+    DerivFn,
+    FieldValues,
+    Integrator,
+    MutableStateDict,
+    StateDict,
+    WeightOverrides,
+)
 
 
 # ------------------------------------------------------------------
 # Built-in integrators for derivative-mode surrogates
 # ------------------------------------------------------------------
 
-def euler_integrator(state: dict, deriv_fn, dt: float) -> dict:
+# Dynamic keys (the node's own fields): an alias, not a TypedDict --
+# the key set is a runtime property of the caller's node.
+def euler_integrator(
+    state: StateDict,
+    deriv_fn: DerivFn,
+    dt: float,
+) -> MutableStateDict:
     """Forward Euler: state + dt * d(state)/dt."""
     derivs = deriv_fn(state)
     return {k: state[k] + dt * derivs[k] for k in state}
 
 
-def rk4_integrator(state: dict, deriv_fn, dt: float) -> dict:
+# Dynamic keys, an alias not a TypedDict: see `euler_integrator`.
+def rk4_integrator(
+    state: StateDict,
+    deriv_fn: DerivFn,
+    dt: float,
+) -> MutableStateDict:
     """Classical 4th-order Runge-Kutta over a state dict."""
     k1 = deriv_fn(state)
     s2 = {k: state[k] + 0.5 * dt * k1[k] for k in state}
@@ -89,12 +108,12 @@ class SurrogateNode(SimulationNode):
         name: str,
         timestep: float,
         architecture: SurrogateArchitecture,
-        weights,
+        weights: PyTree,
         state_spec: dict[str, tuple],
         boundary_spec: dict[str, tuple],
-        initial_values: dict,
-        integrator=None,
-    ):
+        initial_values: FieldValues,
+        integrator: Integrator | None = None,
+    ) -> None:
         super().__init__(
             name,
             timestep,
@@ -158,9 +177,17 @@ class SurrogateNode(SimulationNode):
         ]
         return jax.tree_util.tree_unflatten(treedef, merged)
 
+    # Dynamic keys: an alias, not a TypedDict.  `params` is keyed by the
+    # weight pytree's own leaf paths, computed at call time (see
+    # `_weight_leaves`), and `state` by the surrogated node's fields.
     def update(
-        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
-    ) -> dict:
+        self,
+        state: StateDict,
+        boundary_inputs: StateDict,
+        dt: float,
+        *,
+        params: WeightOverrides | None = None,
+    ) -> MutableStateDict:
         weights = self._resolve_weights(params)
         arch = self.architecture
 
@@ -168,7 +195,7 @@ class SurrogateNode(SimulationNode):
             return arch.forward(weights, state, boundary_inputs, dt)
         else:
             # derivative mode: integrate d(state)/dt
-            def deriv_fn(s):
+            def deriv_fn(s: StateDict) -> MutableStateDict:
                 return arch.forward(weights, s, boundary_inputs, dt)
             return self._integrator(state, deriv_fn, dt)
 

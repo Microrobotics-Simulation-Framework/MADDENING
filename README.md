@@ -71,9 +71,8 @@ import jax.numpy as jnp
 from maddening import GraphManager, SimulationNode
 
 class BounceNode(SimulationNode):
-    @property
-    def requires_halo(self) -> bool:
-        return False  # pointwise (no spatial neighbors)
+    def halo_width(self) -> dict[int, int]:
+        return {}  # pointwise (no spatial neighbors)
 
     def initial_state(self):
         return {"position": jnp.array(5.0), "velocity": jnp.array(0.0)}
@@ -102,6 +101,7 @@ pip install maddening[runpod]
 # Set up ~/.maddening/cloud_credentials.yaml (see examples/cloud/config/)
 ```
 
+<!-- snippet: no-run, reason: cloud: provisions a cloud GPU instance -->
 ```python
 from maddening.cloud.launcher import CloudLauncher
 
@@ -112,6 +112,19 @@ job.teardown()
 ```
 
 Docker image: `ghcr.io/microrobotics-simulation-framework/maddening-cloud:latest`
+
+**The HTTP API requires a bearer token whenever it is not bound to
+loopback, and it still has no TLS.** A `127.0.0.1` bind is unauthenticated,
+as before — local development is unchanged. Any other bind (which is what
+the cloud image does) demands `Authorization: Bearer <token>` on every
+route: set `MADDENING_API_TOKEN`, or read the token the server generates
+and logs once at startup. `JobConfig.ports` no longer defaults to
+`[8000]`, so a launched job's API is **not** opened in the provider's
+firewall; reach it through an SSH tunnel
+(`ssh -L 8000:127.0.0.1:8000 root@<vm> -p <ssh-port>`). Because there is
+no TLS, the token crosses the network in cleartext — prefer the tunnel to
+a public port even now. See
+[`src/maddening/api/README.md`](src/maddening/api/README.md).
 
 ## For MIME Developers
 

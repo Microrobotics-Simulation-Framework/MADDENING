@@ -211,9 +211,11 @@ class TestQuaternion:
             name="body", timestep=dt, gravity=(0, 0, 0),
             initial_angular_velocity=(1.0, 0.5, -0.3),
         )
-        state = body.initial_state()
-        for _ in range(n_steps):
-            state = body.update(state, {}, dt)
+        # A compiled loop, not 10,000 eager updates (90 s on CI, nearly
+        # all of it op-by-op dispatch); same final norm, orientation
+        # within 1.2e-6 of the eager loop's.
+        state = jax.lax.fori_loop(
+            0, n_steps, lambda _, s: body.update(s, {}, dt), body.initial_state())
         q_norm = float(jnp.linalg.norm(state["orientation"]))
         assert q_norm == pytest.approx(1.0, abs=1e-6)
 

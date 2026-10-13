@@ -1,0 +1,48 @@
+### BASELINE
+.........................................................                [100%]
+57 passed, 1 deselected in 47.90s
+==================================================================
+MUTATION: M9 encode: a tuple comes back as a list
+Traceback (most recent call last):
+  File "<stdin>", line 4, in <module>
+AssertionError: anchor count 2
+   ANCHOR FAILED
+==================================================================
+MUTATION: M10 encode: identity shortcut always copies
+   applied to src/maddening/serialization/json_codec.py
+tests/core/test_non_finite_json_tokens.py:92: AssertionError
+=========================== short test summary info ============================
+FAILED tests/core/test_non_finite_json_tokens.py::test_a_finite_tree_is_returned_unchanged_rather_than_copied
+1 failed, 56 passed, 1 deselected in 136.31s (0:02:16)
+==================================================================
+MUTATION: M11 encode: identity shortcut always returns the ORIGINAL dict
+   applied to src/maddening/serialization/json_codec.py
+FAILED tests/fmi/test_binary_frames_properties.py::test_every_binary_request_gets_a_reply_and_the_connection_survives
+ERROR tests/fmi/test_non_finite_json_tokens.py::test_a_non_finite_get_reply_is_strict_json
+ERROR tests/fmi/test_non_finite_json_tokens.py::test_the_compiled_wrapper_reads_a_diverged_get_over_json
+13 failed, 44 passed, 1 deselected, 2 errors in 130.14s (0:02:10)
+==================================================================
+MUTATION: M12 C parse_values: do not step over the opening quote
+   applied to src/maddening/fmi/c/maddening_fmu.c
+FAILED tests/fmi/test_c_unit.py::test_c_unit_tests[plain] - AssertionError: e...
+FAILED tests/fmi/test_c_unit.py::test_c_unit_tests[asan+ubsan] - AssertionErr...
+FAILED tests/fmi/test_c_unit.py::test_c_unit_tests_under_valgrind - Assertion...
+4 failed, 53 passed, 1 deselected in 94.98s (0:01:34)
+==================================================================
+MUTATION: M13 C parse_values: drop the closing-quote check
+   applied to src/maddening/fmi/c/maddening_fmu.c
+FAILED tests/fmi/test_c_unit.py::test_c_unit_tests[plain] - AssertionError: e...
+FAILED tests/fmi/test_c_unit.py::test_c_unit_tests[asan+ubsan] - AssertionErr...
+FAILED tests/fmi/test_c_unit.py::test_c_unit_tests_under_valgrind - Assertion...
+3 failed, 54 passed, 1 deselected in 59.35s
+==================================================================
+MUTATION: M14 C do_set: allow non-finite through the JSON path
+   applied to src/maddening/fmi/c/maddening_fmu.c
+FAILED tests/fmi/test_c_unit.py::test_fmpy_drives_the_sanitized_binary - Asse...
+FAILED tests/fmi/test_c_unit.py::test_c_unit_tests_under_valgrind - Assertion...
+FAILED tests/fmi/test_c_unit.py::test_fuzz_under_valgrind - AssertionError: I...
+12 failed, 44 passed, 1 skipped, 1 deselected in 3.63s
+==================================================================
+final git status (must be clean):
+
+[exited with code 0]

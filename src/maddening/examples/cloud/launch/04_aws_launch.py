@@ -5,8 +5,8 @@ Uses the v0.2 #7 ``AWSProvider`` to materialise credentials in
 ``~/.aws/credentials`` for the duration of the launch.
 
 Usage:
-    python 04_aws_launch.py
-    python 04_aws_launch.py --job job_config.example.yaml --dry-run
+    python -m maddening.examples.cloud.launch.04_aws_launch
+    python -m maddening.examples.cloud.launch.04_aws_launch --job job_config.example.yaml --dry-run
 
 Credentials YAML structure expected (``~/.maddening/cloud_credentials.yaml``)::
 
@@ -20,6 +20,12 @@ Credentials YAML structure expected (``~/.maddening/cloud_credentials.yaml``)::
 Requires:
     - pip install "skypilot[aws]"
     - An IAM user / role with EC2 launch permissions.
+
+``--job`` defaults to ``job_config.example.yaml`` in the current
+directory.  The template ships with MADDENING; print the directory that
+holds it (and the credentials template) with::
+
+    python -c "import maddening.examples.cloud.config as c; print(c.__path__[0])"
 """
 
 import argparse

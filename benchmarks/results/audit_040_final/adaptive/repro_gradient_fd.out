@@ -1,0 +1,56 @@
+
+== MaskedDenseNode solver=gmres  theta0=0.3  jax.grad = 3.864969389252716e-03
+   h=1e-02    FD= 3.865222123148806e-03  rel.err= 6.54e-05  active set constant
+   h=1e-03    FD= 3.864971916099917e-03  rel.err= 6.54e-07  active set constant
+   h=1e-04    FD= 3.864969414643302e-03  rel.err= 6.57e-09  active set constant
+   h=1e-05    FD= 3.864969391547627e-03  rel.err= 5.94e-10  active set constant
+   h=1e-06    FD= 3.864969366307400e-03  rel.err= 5.94e-09  active set constant
+   h=1e-07    FD= 3.864969311392560e-03  rel.err= 2.01e-08  active set constant
+   h=1e-08    FD= 3.864967243819017e-03  rel.err= 5.55e-07  active set constant
+
+== MaskedDenseNode solver=cg  theta0=0.3  jax.grad = 3.864969389252713e-03
+   h=1e-02    FD= 3.865222123149153e-03  rel.err= 6.54e-05  active set constant
+   h=1e-03    FD= 3.864971916092978e-03  rel.err= 6.54e-07  active set constant
+   h=1e-04    FD= 3.864969414215042e-03  rel.err= 6.46e-09  active set constant
+   h=1e-05    FD= 3.864969390739896e-03  rel.err= 3.85e-10  active set constant
+   h=1e-06    FD= 3.864969372053672e-03  rel.err= 4.45e-09  active set constant
+   h=1e-07    FD= 3.864969438244215e-03  rel.err= 1.27e-08  active set constant
+   h=1e-08    FD= 3.864969097804732e-03  rel.err= 7.54e-08  active set constant
+
+== MaskedDenseNode solver=dense  theta0=0.3  jax.grad = 3.864969389252723e-03
+   h=1e-02    FD= 3.865222123145977e-03  rel.err= 6.54e-05  active set constant
+   h=1e-03    FD= 3.864971916109729e-03  rel.err= 6.54e-07  active set constant
+   h=1e-04    FD= 3.864969414735459e-03  rel.err= 6.59e-09  active set constant
+   h=1e-05    FD= 3.864969391141051e-03  rel.err= 4.89e-10  active set constant
+   h=1e-06    FD= 3.864969390593529e-03  rel.err= 3.47e-10  active set constant
+   h=1e-07    FD= 3.864969484864908e-03  rel.err= 2.47e-08  active set constant
+   h=1e-08    FD= 3.864967943129419e-03  rel.err= 3.74e-07  active set constant
+
+== PoissonSineTopKNode k=32 solver=cg  theta0=0.42  jax.grad = -2.394313294917625e-02
+   h=1e-02    FD=-2.395044217834942e-02  rel.err= 3.05e-04  *** ACTIVE SET CHANGES ***
+   h=1e-03    FD=-2.395978722152369e-02  rel.err= 6.96e-04  *** ACTIVE SET CHANGES ***
+   h=1e-04    FD=-2.394313150572494e-02  rel.err= 6.03e-08  active set constant
+   h=1e-05    FD=-2.394313293437380e-02  rel.err= 6.18e-10  active set constant
+   h=1e-06    FD=-2.394313295024653e-02  rel.err= 4.47e-11  active set constant
+   h=1e-07    FD=-2.394313292769512e-02  rel.err= 8.97e-10  active set constant
+   h=1e-08    FD=-2.394313297973683e-02  rel.err= 1.28e-09  active set constant
+
+== switches of the top-16 set in theta in [0.40, 0.44]: 11
+
+== PoissonSineTopKNode exactly AT a switch  theta0=0.40035000000000004  jax.grad = -1.492090516325282e-02
+   h=1e-02    FD=-1.756355616327294e-02  rel.err= 1.77e-01  *** ACTIVE SET CHANGES ***
+   h=1e-03    FD=-1.128982865368933e-02  rel.err= 2.43e-01  *** ACTIVE SET CHANGES ***
+   h=1e-04    FD=-1.492089671459133e-02  rel.err= 5.66e-07  *** ACTIVE SET CHANGES ***
+   h=1e-05    FD=-1.492090507858659e-02  rel.err= 5.67e-09  *** ACTIVE SET CHANGES ***
+   h=1e-06    FD=-1.492090516332784e-02  rel.err= 5.03e-12  active set constant
+   h=1e-07    FD=-1.492090516246047e-02  rel.err= 5.31e-11  active set constant
+   h=1e-08    FD=-1.492090504970345e-02  rel.err= 7.61e-09  active set constant
+
+== PoissonSineTopKNode 2e-5 past the switch  theta0=0.40037000000000006  jax.grad = -1.492147602608177e-02
+   h=1e-02    FD=-1.756690630942441e-02  rel.err= 1.77e-01  *** ACTIVE SET CHANGES ***
+   h=1e-03    FD=-1.129664043593697e-02  rel.err= 2.43e-01  *** ACTIVE SET CHANGES ***
+   h=1e-04    FD=-1.492146759445381e-02  rel.err= 5.65e-07  *** ACTIVE SET CHANGES ***
+   h=1e-05    FD=-1.492147594182175e-02  rel.err= 5.65e-09  active set constant
+   h=1e-06    FD=-1.492147602612931e-02  rel.err= 3.19e-12  active set constant
+   h=1e-07    FD=-1.492147603393557e-02  rel.err= 5.26e-10  active set constant
+   h=1e-08    FD=-1.492147603393557e-02  rel.err= 5.26e-10  active set constant

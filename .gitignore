@@ -10,6 +10,10 @@ build/
 .venv/
 *.jsonl
 
+# Hypothesis example database (failing examples replayed on the next run).
+# Path is fixed in tests/conftest.py and cached by the verify-hypothesis CI job.
+.hypothesis/
+
 # For throwaway / convenience files that shouldn't be pushed
 tmp/
 

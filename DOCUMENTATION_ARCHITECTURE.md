@@ -1439,10 +1439,11 @@ from datetime import date
 
 
 class AnomalySeverity(Enum):
-    """Severity classification aligned with IEC 62304 problem reporting."""
-    CRITICAL = "critical"   # Causes incorrect results with no workaround
-    MAJOR = "major"         # Causes incorrect results but has workaround
-    MINOR = "minor"         # Cosmetic or minor inconvenience
+    """Severity classification aligned with IEC 62304 problem reporting.
+    The definitions below ("Severity") are this class's docstring."""
+    CRITICAL = "critical"   # Undetectable silent wrong result by default, no workaround; default exposure to other hosts; remote code execution
+    MAJOR = "major"         # Any other silent wrong result or unauthorised access; a loud failure with no workaround
+    MINOR = "minor"         # Loud with a workaround; documentation/metadata; performance; x64-only float32 rounding; cosmetic
     ENHANCEMENT = "enhancement"  # Not a defect; a feature request
 
 
@@ -1455,14 +1456,15 @@ class SafetyRelevance(Enum):
 
 
 class ResolutionStatus(Enum):
-    OPEN = "open"
-    WORKAROUND_AVAILABLE = "workaround"
-    FIXED = "fixed"
-    WONT_FIX = "wont_fix"          # By design or out of scope
-    DEFERRED = "deferred"
+    OPEN = "open"                      # Reachable; no fix yet
+    RESOLVED = "resolved"              # Fixed; affected_versions must exclude this version
+    PARTIALLY_RESOLVED = "partially_resolved"  # A fix landed that does not cover the whole
+                                       # defect; still reachable, residual_risk says which part
+    WONT_FIX = "wont_fix"              # By design or out of scope; still reachable
+    DUPLICATE = "duplicate"            # Its range lives on the entry it duplicates
 
 
-@dataclass
+@dataclass(frozen=True)
 class AnomalyRecord:
     """A known anomaly in MADDENING.
 
@@ -1473,22 +1475,90 @@ class AnomalyRecord:
     anomaly_id: str                     # e.g., "MADD-ANO-001"
     title: str                          # Short description
     description: str                    # Detailed description
-    affected_components: tuple[str, ...]  # e.g., ("HeatNode", "LBMPipeNode")
-    affected_versions: str              # e.g., "0.1.0 – current"
     severity: AnomalySeverity
     safety_relevance: SafetyRelevance
     safety_relevance_rationale: str     # Why this assessment was made
+    affected_components: tuple[str, ...] = ()  # e.g., ("HeatNode", "LBMPipeNode")
+    affected_versions: str = ""         # PEP 440 specifier set: ">=0.1.0" (open), ">=0.1.0, <0.4.0" (fixed in 0.4.0)
     workaround: str = ""                # If available
     resolution_status: ResolutionStatus = ResolutionStatus.OPEN
-    resolved_in_version: Optional[str] = None
+    resolution_version: str = ""        # The release that fixed it, e.g. "0.4.0"
     github_issue: Optional[str] = None  # e.g., "#42"
-    date_reported: Optional[str] = None # ISO 8601 date
-    date_resolved: Optional[str] = None
 ```
+
+The block above is `src/maddening/core/compliance/anomaly.py`; the code is
+the source of truth.  Until the 0.4.0 documentation pass this section
+described a `ResolutionStatus` with `WORKAROUND_AVAILABLE`, `FIXED` and
+`DEFERRED` members that the implementation never had: a workaround is
+recorded in the `workaround` field, not in the status.
+
+##### Severity
+
+`AnomalySeverity`'s docstring in `src/maddening/core/compliance/anomaly.py`
+is the one definition; this section repeats it.  Until 0.4.0 the only
+written definition was the comment "cosmetic or minor inconvenience" for
+`minor`, and registry entries whose results were silently wrong by up to
+2.1x were labelled `minor` against it.
+
+Two terms carry the definitions.  A *wrong result* is a value the library
+returns, reports or saves that describes the simulated system or vouches for
+it -- a state, an output, a gradient, a convergence flag or error estimate,
+the reported status of an operation it performed, a saved or reloaded
+configuration -- and that differs from what the library documents by more
+than the accuracy the library states for it (a scheme's declared order, a
+solve's tolerance).  A result is *silent* when the library raised no
+exception and emitted no warning when it produced it; a field that later
+goes non-finite was still silent, because its finite values before that were
+wrong and nothing said so.
+
+**A silent wrong result is never `minor`**, whatever its size, however
+narrow the configuration that reaches it, and whether or not a built-in node
+reaches it.  Size, reach and detectability go in the entry's description and
+`safety_relevance_rationale`, where a reader can weigh them; they do not
+lower the severity below `major`.
+
+*Unauthorised access* is a party the user did not authorise reading or
+changing the simulation, its inputs or its files, or running code, by a
+defect of the library.
+
+| Severity | Definition |
+|---|---|
+| `critical` | A silent wrong result that a shipped default configuration reaches, that the user cannot detect from anything the library returns, and that no workaround avoids short of not using the feature.  Unauthorised access through a surface the library opens (a listening socket, an HTTP route) that a shipped default configuration exposes to other hosts.  Code execution by an unauthorised party through such a surface, in any configuration. |
+| `major` | Any other silent wrong result.  Any other unauthorised access: a surface that only a configuration the user chose exposes to other hosts (a loopback default is not such an exposure), or an API that executes or trusts what it is handed while presenting itself as safe for data.  A loud failure (an exception, a refusal, a crash) whose only workaround is not to use the feature. |
+| `minor` | A loud failure with a workaround that keeps the feature usable.  A wrong statement in documentation or declared metadata where the computed values still meet the accuracy the library states for them.  A defect in performance, placement or a count of work done that changes no value describing or vouching for the solution.  A difference that appears only under `jax_enable_x64` and leaves the result no less accurate than the default float32 would.  A cosmetic defect. |
+| `enhancement` | Not a defect: a request for behaviour the library never claimed. |
+
+Severity rates the defect, not its status (a `resolved` entry keeps the
+severity of what it records), and is independent of `safety_relevance`.
+The release-gate tiers below key on it: a `critical` or `major` defect must
+be in the registry before the release that closes it, with no grace period.
+
+`OPEN`, `PARTIALLY_RESOLVED` and `WONT_FIX` all count as *reachable* in the
+version the registry describes; `RESOLVED` and `DUPLICATE` do not.
+`scripts/check_anomalies.py` and `scripts/generate_soup_tables.py` share
+that one set, so the gate and the SOUP package's "reachable in this version"
+count cannot disagree.  A status nobody has enumerated counts as reachable,
+so a misspelling can never close a range by accident.
+
+The YAML registry carries two fields beyond the dataclass:
+
+- `verification`: the tests and documents that evidence the entry. It is
+  required, by `scripts/check_anomalies.py`, for `resolved` and
+  `partially_resolved` entries.
+- `residual_risk`: what a partial resolution leaves reachable, and why.
+
+The registry validator in `maddening.compliance` accepts both as known
+optional fields and refuses unknown ones.  `scripts/check_anomalies.py`
+resolves every `verification` reference against the tree.
 
 ##### YAML Registry Format
 
-The known anomalies registry lives at `docs/validation/known_anomalies.yaml`:
+The known anomalies registry lives at `docs/validation/known_anomalies.yaml`.
+Its `affected_versions` field is a PEP 440 specifier set -- `">=FIRST"` while
+a defect is reachable, `">=FIRST, <FIX"` once a release fixes it, `"none"` for
+a defect no release carried -- as written in that file's header comment and
+enforced by `scripts/check_anomalies.py`.  The example below predates the
+schema's later fields:
 
 ```yaml
 # MADDENING Known Anomalies Registry
@@ -1509,14 +1579,14 @@ anomalies:
       CUDA 12.2 with jaxlib 0.5.1 due to an XLA compilation bug with
       certain einsum patterns. The CPU backend is unaffected.
     affected_components: ["LBMPipeNode"]
-    affected_versions: "0.1.0 – current"
+    affected_versions: ">=0.1.0"   # PEP 440; see the header of the real registry
     severity: "critical"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
       Only affects GPU execution path. CPU execution produces correct
       results. Downstream tools must verify their execution platform.
     workaround: "Use CPU backend (JAX_PLATFORMS=cpu) or jaxlib >= 0.5.2"
-    resolution_status: "workaround"
+    resolution_status: "open"      # the workaround lives in `workaround`, not the status
     github_issue: null
     date_reported: "2025-01-15"
 
@@ -1527,7 +1597,7 @@ anomalies:
       satisfies the CFL stability condition dt < dx^2 / (2*alpha).
       Unstable timesteps silently produce incorrect results.
     affected_components: ["HeatNode"]
-    affected_versions: "0.1.0 – current"
+    affected_versions: ">=0.1.0"
     severity: "major"
     safety_relevance: "safety_relevant"
     safety_relevance_rationale: >
@@ -1544,9 +1614,9 @@ anomalies:
 
 | Label | Color | Meaning |
 |-------|-------|---------|
-| `anomaly:critical` | Red | Incorrect results, no workaround |
-| `anomaly:major` | Orange | Incorrect results, workaround available |
-| `anomaly:minor` | Yellow | Cosmetic or minor issue |
+| `anomaly:critical` | Red | `critical` as defined under "Severity" (section 9.7) |
+| `anomaly:major` | Orange | `major`: every other silent wrong result, among others |
+| `anomaly:minor` | Yellow | `minor`: loud with a workaround, documentation, performance, cosmetic -- never a silent wrong result |
 | `safety-relevant` | Purple | Could affect safety-critical downstream use |
 | `soup-assessment` | Blue | Relevant to IEC 62304 SOUP evaluation |
 | `known-anomaly` | Gray | Tracked in known_anomalies.yaml |
@@ -1604,7 +1674,7 @@ body:
     id: affected_versions
     attributes:
       label: Affected versions
-      description: "e.g., 0.1.0 – current"
+      description: "PEP 440 specifier set, e.g. >=0.1.0 (still affected) or >=0.1.0, <0.4.0 (fixed in 0.4.0)"
     validations:
       required: true
   - type: textarea
@@ -1626,14 +1696,39 @@ When the anomaly is sufficiently understood, a developer **manually** creates or
 
 This transition must not be automated. An automated pipeline that converts issues to YAML entries would bypass the human judgement required for a compliance artifact. The YAML registry is what a Notified Body reads; the GitHub issue is the engineering evidence behind it.
 
+**Which defects get an entry.** The registry covers:
+
+- **every defect a released version carried**, whatever its severity -- `affected_versions` names the releases (`">=FIRST"` while it is reachable, `">=FIRST, <FIX"` once a release fixes it); and
+- **every defect of severity `critical` or `major` found during a development cycle, even one no release carried** -- `affected_versions: "none"`, with the description saying which development builds had it and the entry resolved in the release that the cycle builds towards.  MADD-ANO-018, 019 and 054 are such entries.  A never-shipped defect that serious is part of the evidence of how the release was verified, and a reader assessing the release needs to see that it was found and closed.
+
+A `minor` defect introduced and fixed within one cycle needs no entry: the CHANGELOG and the commit that fixed it are its record.  When an entry falls due is the release gate's business (below); this rule says which defects the registry must eventually hold.  A security fix in the CHANGELOG's `### Security` section that meets either condition cites its entry.
+
 **Phase 3 — Verification (CI consistency check)**
 
-CI enforces consistency between the two artifacts:
+The design is for CI to enforce consistency between the two artifacts.  **Only
+the registry half of it is implemented; nothing in CI reads GitHub issues or
+labels.**  Implemented, in `scripts/check_anomalies.py`:
 
-- Every issue labeled `known-anomaly` that has been open for more than one release cycle should have a corresponding YAML entry (CI warning, not blocking — some issues may still be in Phase 1 investigation)
-- Every YAML entry with a `github_issue` field must reference a valid, existing issue
-- No YAML entries may be silently deleted (only `resolution_status` changes are permitted)
 - The YAML schema is validated on every push
+- No YAML entry may be silently deleted: within each ID prefix the numbers must
+  run contiguously from 001 to the highest present, except IDs recorded in
+  `_RETIRED_ANOMALY_IDS`, and a high-water pin (`_HIGHEST_ANOMALY_ID`, with its
+  test, in `tests/compliance/test_soup_evidence.py`) catches deletion of the
+  highest entry and an unannounced addition
+- A retirement is an `{id: reason}` record: an ID with no reason excuses
+  nothing, and the retirement of an entry whose last committed
+  `resolution_status` was reachable (`open`, `partially_resolved`,
+  `wont_fix`) is refused.  The gate reads that status from git, since the
+  tree no longer holds the entry, and refuses a retirement it cannot check
+  (no work tree, a shallow clone)
+- A `resolved` or `partially_resolved` entry cites a `verification` test,
+  and a `partially_resolved` one states its `residual_risk`
+
+Not implemented (planned):
+
+- A warning for an issue labeled `known-anomaly` that has been open for more than one release cycle without a corresponding YAML entry
+- A check that a YAML entry's `github_issue` field references a valid, existing issue
+- Restricting changes to an existing entry to `resolution_status`: the gate sees a deleted entry, not an edited one
 
 The three-phase model ensures that engineering discussion (Phase 1) and regulatory documentation (Phase 2) are clearly separated, with CI (Phase 3) enforcing consistency without automating the regulatory judgement.
 
@@ -1641,22 +1736,40 @@ The three-phase model ensures that engineering discussion (Phase 1) and regulato
 
 CI enforcement must distinguish between anomalies that are still under investigation (Phase 1) and those that have been resolved without proper formalization. The guiding principle: **never block active investigation, always block incomplete compliance**.
 
+> **Status at 0.4.0: most of this subsection is design, not implementation.**
+> Of the numbered checks below, items 1 and 4 and the deletion half of item 3
+> are implemented; items 2 and 5, the three-tier release gate (items 6-9) and
+> the automated cycle counting it depends on are **not implemented** —
+> nothing in CI reads GitHub issues, labels or close dates.  What
+> `scripts/check_anomalies.py` does enforce, on every push, is in its module
+> docstring: schema validation (`maddening.compliance.validate_anomaly_registry`);
+> ID contiguity within each prefix, excusing only IDs recorded, each with its
+> reason, in `_RETIRED_ANOMALY_IDS` (`tests/compliance/test_soup_evidence.py`)
+> and never an entry whose last committed status was reachable, with the
+> high-water pin `_HIGHEST_ANOMALY_ID` in the same file catching deletion of
+> the highest entry; a `verification:` list on every `resolved` or
+> `partially_resolved` entry, each reference resolving to a collected test,
+> and a `residual_risk` on every `partially_resolved` one; and the PEP 440
+> `affected_versions` convention, checked against `maddening_version` and the
+> released versions in `CHANGELOG.md`.  Item 4 is
+> `scripts/generate_soup_tables.py --check`'s.
+
 **On every push (CI check):**
 
-1. The YAML schema is validated (`schema_version`, required fields, valid enums, unique IDs)
-2. Every YAML entry with a `github_issue` field must reference a valid, existing issue
-3. No YAML entries have been silently deleted (only `resolution_status` changes are permitted)
-4. The `maddening_version` field in `known_anomalies.yaml` matches the current release
+1. The YAML schema is validated (`schema_version`, required fields, valid enums, unique IDs) — *implemented*
+2. Every YAML entry with a `github_issue` field must reference a valid, existing issue — *not implemented*
+3. No YAML entries have been silently deleted (only `resolution_status` changes are permitted) — *deletion is caught (ID contiguity, `_RETIRED_ANOMALY_IDS`, the high-water pin); an edit to other fields is not*
+4. The `maddening_version` field in `known_anomalies.yaml` matches the current release — *implemented: `scripts/generate_soup_tables.py --check`, which `tests/compliance/test_soup_evidence.py` runs in CI, fails when it differs from the version in `pyproject.toml` (and so does `CITATION.cff`'s); `check_anomalies.py` also holds it to PEP 440, since it anchors the `affected_versions` convention*
 
 **CI warnings (non-blocking):**
 
-5. Open issues labeled `known-anomaly` that have been open for more than one release cycle but do not yet have a corresponding YAML entry — these are Phase 1 anomalies still under investigation, and blocking CI would penalise active triage
+5. Open issues labeled `known-anomaly` that have been open for more than one release cycle but do not yet have a corresponding YAML entry — these are Phase 1 anomalies still under investigation, and blocking CI would penalise active triage — *not implemented*
 
-**Release gate (blocking — enforced before `git tag`), three tiers:**
+**Release gate (blocking — enforced before `git tag`), three tiers — not implemented:**
 
 The release gate uses a three-tier model that allocates clerical effort proportionally to safety impact. A solo developer should not spend equal formalization effort on a cosmetic numerical precision note and a known safety-relevant instability.
 
-**Tier 1 — `safety-relevant` label (any severity):** Hard gate, no grace period. Any closed issue labeled `safety-relevant` must have a corresponding YAML entry before the release is tagged. No exceptions. This tier exists because safety-relevant anomalies are Notified Body-facing artifacts for Class III — they must be formalized immediately upon resolution.
+**Tier 1 — `safety-relevant` label (any severity):** Hard gate, no grace period. Any closed issue labeled `safety-relevant` must have a corresponding YAML entry before the release is tagged. No exceptions. This tier exists because safety-relevant anomalies are the entries a downstream risk assessment depends on most — they must be formalized immediately upon resolution.
 
 **Tier 2 — `anomaly:critical` or `anomaly:major` (without `safety-relevant`):** No grace period. Must be formalized in YAML before the release in which they are closed. These are significant anomalies that affect numerical correctness and must be visible to downstream SOUP assessors, even if their safety relevance is "not_safety_relevant" or "context_dependent."
 
@@ -1669,43 +1782,12 @@ The release gate uses a three-tier model that allocates clerical effort proporti
 
 This three-tier model prevents the following failure modes: (a) CI blocks that discourage developers from filing anomaly issues in the first place, (b) issues closed as "fixed" without a corresponding compliance record, (c) releases shipped with unformalized safety-relevant anomalies, and (d) disproportionate clerical burden on minor issues that slows development velocity without meaningful compliance benefit.
 
-**Automated cycle counting**: The Tier 3 grace period tracking must be automated by `scripts/check_anomalies.py` — manual tracking of how many release cycles a specific issue has been open is an unsustainable clerical burden for a solo developer. The script must compare each closed `anomaly:minor` issue's close date (via the GitHub API) against the release timestamps in `CHANGELOG.md` or git tags. If the issue was closed more than one release cycle ago without a YAML entry, the script emits a warning. If two or more release cycles have passed, the script fails the release gate. This automation is a prerequisite for the three-tier model to function; without it, Tier 3 grace periods will be tracked inconsistently or not at all.
+**Automated cycle counting (not implemented)**: The Tier 3 grace period tracking would have to be automated by `scripts/check_anomalies.py`, which does none of it today — manual tracking of how many release cycles a specific issue has been open is an unsustainable clerical burden for a solo developer. The script would compare each closed `anomaly:minor` issue's close date (via the GitHub API) against the release timestamps in `CHANGELOG.md` or git tags. If the issue was closed more than one release cycle ago without a YAML entry, the script would emit a warning; if two or more release cycles had passed, it would fail the release gate. This automation is a prerequisite for the three-tier model to function; without it, Tier 3 grace periods will be tracked inconsistently or not at all.
 
-```python
-# scripts/check_anomalies.py (CI validation script)
-
-import yaml
-import sys
-
-def validate_anomalies(path="docs/validation/known_anomalies.yaml"):
-    with open(path) as f:
-        data = yaml.safe_load(f)
-
-    errors = []
-    ids_seen = set()
-    for a in data.get("anomalies", []):
-        # Uniqueness
-        if a["anomaly_id"] in ids_seen:
-            errors.append(f"Duplicate anomaly_id: {a['anomaly_id']}")
-        ids_seen.add(a["anomaly_id"])
-
-        # Required fields
-        for field in ("anomaly_id", "title", "description",
-                      "severity", "safety_relevance",
-                      "safety_relevance_rationale"):
-            if not a.get(field):
-                errors.append(f"{a['anomaly_id']}: missing {field}")
-
-        # Valid enums
-        if a["severity"] not in ("critical", "major", "minor", "enhancement"):
-            errors.append(f"{a['anomaly_id']}: invalid severity")
-
-    if errors:
-        for e in errors:
-            print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(1)
-    print(f"OK: {len(ids_seen)} anomalies validated")
-```
+The real gate is `scripts/check_anomalies.py`; its module docstring is the
+specification of what it enforces.  A sketch of the script that stood here,
+written before it existed, bore no resemblance to the implementation and was
+removed.
 
 ##### Release Process Integration
 
@@ -2193,7 +2275,7 @@ MADDENING depends on several core libraries that are themselves SOUP when MADDEN
 
 **Dependency monitoring**: MADDENING monitors its core dependencies (JAX, jaxlib, NumPy) for known security vulnerabilities and breaking changes using two mechanisms: (1) **GitHub Dependabot** is enabled on the repository and automatically monitors PyPI dependencies for published CVEs, creating pull requests for security-relevant version bumps; (2) **manual changelog review** of JAX ecosystem libraries (JAX, jaxlib, Equinox, Optax) at each MADDENING release, since these libraries are not comprehensively covered by CVE databases and may introduce correctness-affecting changes (XLA compiler changes, numerical behaviour changes) that are not classified as security vulnerabilities. Both mechanisms are documented in `SECURITY.md`. Security-relevant dependency updates are flagged in the `Security` section of `CHANGELOG.md`. Downstream commercial manufacturers building Class III products will need more rigorous post-market surveillance of SOUP dependencies — that is their PMS obligation under EU MDR Article 83, not MADDENING's.
 
-**Version pinning**: JAX is a rapidly evolving library with frequent releases. MADDENING pins tested version ranges in `pyproject.toml` and runs CI against pinned versions for each release. The exact versions tested are recorded in the SOUP package document and SBOM.
+**Version pinning**: JAX is a rapidly evolving library with frequent releases. MADDENING declares version ranges in `pyproject.toml` and runs CI against pinned `jax`/`jaxlib` versions for each release. The SOUP package document records those pinned versions.  The SBOM records one clean resolution of each covered install on a stated date; it is not the environment a CI run installed, and the other base dependencies CI resolves are not recorded (`docs/validation/framework_verification.md`).
 
 **Dependency credibility assessment**:
 
@@ -2482,19 +2564,22 @@ The `SimulationProvenance` dataclass (Section 9.2) captures `maddening_version` 
 
 #### Software Bill of Materials (SBOM)
 
-EU MDR (via MDCG 2019-16) and FDA cybersecurity guidance both increasingly expect SBOMs for software components in medical devices. MADDENING should publish SBOM artifacts with each release.
+EU MDR (via MDCG 2019-16) and FDA cybersecurity guidance both increasingly expect SBOMs for software components in medical devices. MADDENING publishes SBOM artifacts with each release.
 
-**Recommendation**: Generate CycloneDX or SPDX SBOMs as part of the release process. Tools like `cyclonedx-py` can generate these automatically from `pyproject.toml`.
+**Implemented in v0.4.0.**  One CycloneDX 1.6 JSON SBOM per covered install (the base install, and the `server`, `surrogates` and `usd` extras) is committed under `docs/validation/sbom/`:
 
 ```bash
-# Generate SBOM (add to release process)
-pip install cyclonedx-bom
-cyclonedx-py environment -o sbom.json --format json
+# Needs uv and network access; writes docs/validation/sbom/ and runs the check
+python scripts/generate_sbom.py
+# Offline; CI runs it through tests/compliance/test_sbom_check.py
+python scripts/check_sbom.py
 ```
 
-The SBOM should be:
-- Published alongside each GitHub release as a release artifact
-- Referenced in the SOUP package document
+Each SBOM is generated from a clean install of the wheel into a fresh virtual environment, never from a developer's environment.  The obvious recipe, `cyclonedx-py environment` in the working environment, records that machine's packages and not MADDENING's dependency set.  The `sbom.json` it produced in 2026-03 listed 350 components, ROS packages among them, and was removed in 0.4.0.  The tool runs from a separate environment so that it is not in the SBOM either.
+
+The SBOM is:
+- Regenerated from the release commit before each tag, and attached to the GitHub release by hand until a release workflow does it
+- Referenced in the SOUP package document (§6 of `docs/validation/soup_package.md`), which says which installs are covered and why, and what an SBOM does not record
 - Available for downstream tools to incorporate into their own SBOMs
 
 ---
@@ -2670,14 +2755,11 @@ from maddening.core.compliance.validation import (
     verification_benchmark,
 )
 
-# Stability — no-op stub until Phase 4
-# In Phase 0–3, `stability` is an identity decorator (applies the marker
-# attribute but does not populate a registry or generate reports).  The
-# functional implementation lands in Phase 4 (Appendix B item 30).
-# This avoids a broken import while still allowing downstream libraries
-# to annotate their API surfaces with `@stability(StabilityLevel.STABLE)`
-# from day one — the annotations are inert until the machinery exists.
-from maddening.core.compliance.stability import stability
+# Stability.  `@stability` records each tagged surface in a registry
+# (`_STABILITY_REGISTRY`), and `generate_stability_report()` renders it;
+# docs/developer_guide/stability_report.md is generated from it by
+# scripts/generate_stability_report.py and equality-checked in CI.
+from maddening.core.compliance.stability import stability, generate_stability_report
 
 # Registry validation
 from maddening.compliance._validate import validate_anomaly_registry
@@ -2695,7 +2777,7 @@ from maddening.compliance._validate import validate_anomaly_registry
 
 **Part of the base install**: The compliance namespace is included in the base `pip install maddening` — no extras required. The schema types are lightweight (standard library only: `dataclasses`, `enum`, `typing`). If a downstream library needs only the compliance schema and not the simulation framework, it can `pip install maddening` and import from `maddening.compliance` without triggering JAX installation, provided it does not import from `maddening.core` or `maddening.nodes`. A separate `pip install maddening[compliance]` extra is not needed at this time, but could be introduced later if the base install grows unwieldy.
 
-**Stability guarantee**: The `maddening.compliance` namespace is the stable API surface for downstream libraries. It follows strict semantic versioning: breaking changes to schema types only in major versions. New types may be added in minor versions. Downstream libraries pin to a MADDENING version range and import from this namespace; they are insulated from internal refactoring of `maddening.core`. The `@stability(StabilityLevel.STABLE)` decorator (Section 9.5) should be applied to `maddening.compliance` exports once the stability machinery is implemented (Phase 4).
+**Stability guarantee**: The `maddening.compliance` namespace is the stable API surface for downstream libraries. It follows strict semantic versioning: breaking changes to schema types only in major versions. New types may be added in minor versions. Downstream libraries pin to a MADDENING version range and import from this namespace; they are insulated from internal refactoring of `maddening.core`. The stability machinery (Section 9.5) is implemented; applying `@stability` to the `maddening.compliance` exports themselves is still to do.
 
 ### Shared Tooling
 
@@ -2787,7 +2869,7 @@ def validate_anomaly_registry(
 Command-line interface for MADDENING compliance tooling.
 
 Usage:
-    python -m maddening.compliance check-anomalies <path> [--prefix PREFIX]
+    python -m maddening.compliance check-anomalies <path> [--prefix PREFIX] [--version-field NAME]
     python -m maddening.compliance check-meta <module> [--require-fields FIELDS]
 
 Examples:
@@ -2832,21 +2914,14 @@ if __name__ == "__main__":
     main()
 ```
 
-The original `scripts/check_anomalies.py` (Section 9.7) should be refactored to delegate to `maddening.compliance.validate_anomaly_registry()`, so the validation logic exists in exactly one place:
-
-```python
-# scripts/check_anomalies.py (updated)
-"""CI script — thin wrapper around the compliance validator."""
-import sys
-from maddening.compliance._validate import validate_anomaly_registry
-
-errors = validate_anomaly_registry("docs/validation/known_anomalies.yaml")
-if errors:
-    for e in errors:
-        print(f"ERROR: {e}", file=sys.stderr)
-    sys.exit(1)
-print(f"OK: anomaly registry is valid")
-```
+`scripts/check_anomalies.py` (Section 9.7) delegates the schema check to
+`maddening.compliance.validate_anomaly_registry()`, so that logic exists in
+one place, and adds the registry-level rules a downstream registry does not
+necessarily want: ID contiguity against `_RETIRED_ANOMALY_IDS` (an
+`{id: reason}` record that cannot retire a reachable entry), a
+`verification:` list on every resolved entry with each reference resolved to
+a collected test, and the PEP 440 `affected_versions` convention.  It is not a
+thin wrapper; its module docstring says what it enforces.
 
 #### Other Shared Tooling
 
@@ -2857,7 +2932,7 @@ The following utilities are schema-driven and path-agnostic, making them reusabl
 | Anomaly registry validator | `maddening.compliance.validate_anomaly_registry()` | Validate downstream registry against same schema |
 | NodeMeta harvester | `maddening.compliance.collect_node_metadata()` | Harvest metadata from downstream node classes (works on any `SimulationNode` subclass) |
 | Hazard hints harvester | `maddening.compliance.collect_hazard_hints()` | Harvest hazard hints across downstream nodes for risk management input |
-| Stability report generator | `maddening.compliance.generate_stability_report()` | Generate stability report covering downstream API surfaces. **(Phase 4 — not yet available)**: depends on `@stability` decorator infrastructure (Section 9.5, Appendix B item 29). Do not import until Phase 4 is complete. |
+| Stability report generator | `maddening.compliance.generate_stability_report()` | Generate stability report covering downstream API surfaces: every surface tagged with `@stability` in the current process, MADDENING's and the downstream library's alike. |
 | Verification benchmark registry | `maddening.compliance.verification_benchmark` | Register downstream benchmarks in the same registry pattern |
 | Bibliography citation validator | `scripts/check_citations.py` (standalone) | Downstream libraries can adapt the script to validate their own algorithm guides against their own `.bib` file (or MADDENING's); set `BIB_PATH` env var to override the default path |
 
@@ -3191,7 +3266,7 @@ These items establish the shared compliance infrastructure that all subsequent p
 
 See Appendix E Phase 0 for the verifiable checklist corresponding to these items.
 
-0a. **`maddening/compliance/` namespace** (Section 16) — create the compliance subpackage with `__init__.py` re-exporting all schema types (`NodeMeta`, `AnomalyRecord`, `ValidationBenchmark`, etc.), decorators (`@verification_benchmark`, `@stability`), and harvesting utilities. Must be importable without JAX. **Note on `@stability`**: In Phase 0–3, the `stability` export is a **no-op identity decorator** — it attaches the stability level as a marker attribute but does not populate a registry or generate reports. This avoids a broken import or missing-module error during Phases 0–3 while allowing downstream libraries to annotate their API surfaces immediately. The functional implementation (registry population, `generate_stability_report()`) lands in Phase 4 (item 30).
+0a. **`maddening/compliance/` namespace** (Section 16) — create the compliance subpackage with `__init__.py` re-exporting all schema types (`NodeMeta`, `AnomalyRecord`, `ValidationBenchmark`, etc.), decorators (`@verification_benchmark`, `@stability`), and harvesting utilities. Must be importable without JAX. **Note on `@stability`**: this plan made the `stability` export an inert marker until Phase 4.  In the event the decorator has populated its registry since v0.1.0, and `generate_stability_report()` is exported from the namespace.
 0b. **`maddening/compliance/_validate.py` and `__main__.py`** (Section 16) — anomaly registry validator accepting a path argument and optional `--prefix` flag. Expose as `python -m maddening.compliance check-anomalies <path>`.
 
 ### Phase 1: Regulatory Foundation (implement now)
@@ -3230,7 +3305,7 @@ These items are essential for EU regulatory readiness and should be prioritized 
 24. **`docs/regulatory/mdcg_2019_11.md`** (Section 13) — qualification and classification guide
 25. **Complete and expand `docs/regulatory/downstream_integration.md`** (Section 2) — flesh out the Phase 1 skeleton with full per-layer responsibility documentation, classification-by-use-mode analysis, and complete commercial boundary content
 26. **`docs/validation/cou_template.md`** (Section 4) — downstream user COU template
-27. **SBOM generation** (Section 14) — add CycloneDX to release process
+27. **SBOM generation** (Section 14) — add CycloneDX to release process (done in v0.4.0; attaching it to the release is still manual)
 28. **`SECURITY.md`** (Section 8) — vulnerability reporting process
 
 ### Phase 4: UQ, Stability, and Commercial Readiness (when surrogate framework matures)
@@ -3460,7 +3535,7 @@ These items establish the shared compliance infrastructure that all subsequent p
 - [x] `maddening/compliance/__init__.py` exists and re-exports at minimum: `NodeMeta`, `EdgeMeta`, `ValidatedRegime`, `Reference`, `StabilityLevel`, `UQReadiness`, `AnomalyRecord`, `AnomalySeverity`, `SafetyRelevance`, `ResolutionStatus`, `ValidationBenchmark`, `BenchmarkType`, `verification_benchmark`, `stability` (Section 16)
 - [x] `from maddening.compliance import NodeMeta` succeeds without importing JAX (Section 16)
 - [x] `from maddening.compliance import validate_anomaly_registry` succeeds (Section 16)
-- [x] `from maddening.compliance import stability` succeeds and `stability` is a **no-op identity decorator** — applying `@stability(StabilityLevel.STABLE)` to a class or function succeeds without error but does not populate a registry or generate reports. The functional implementation lands in Phase 4 (Appendix B item 30). (Section 16)
+- [x] `from maddening.compliance import stability` succeeds, and applying `@stability(StabilityLevel.STABLE)` to a class or function records it in the stability registry that `generate_stability_report()` renders (the plan had it inert until Phase 4; it never was). (Section 16)
 
 **Anomaly registry validator:**
 
@@ -3650,8 +3725,8 @@ These items establish the shared compliance infrastructure that all subsequent p
 
 **SBOM:**
 
-- [ ] SBOM generation is integrated into the release process using CycloneDX format (Section 14)
-- [ ] SBOM artifact (JSON or XML) is attached to each GitHub release as a release asset (Section 14)
+- [x] SBOM generation is integrated into the release process using CycloneDX format (Section 14): `scripts/generate_sbom.py`, a documented release step, and a CI check that fails on a version bump until the SBOMs are regenerated
+- [ ] SBOM artifact (JSON or XML) is attached to each GitHub release as a release asset (Section 14): a manual release step in `docs/validation/soup_package.md` §6; no workflow does it yet
 
 ### Phase 4 — UQ and Stability Machinery
 
@@ -3740,7 +3815,7 @@ The checklist is organised around the schema/instance split: verify that the inh
 
 - [ ] `.github/ISSUE_TEMPLATE/anomaly.md` exists in the downstream repository, matching or extending MADDENING's template with the same mandatory fields: title, severity, safety relevance, safety rationale, affected components, affected versions, workaround (Section 9.7)
 - [ ] `docs/validation/known_anomalies.yaml` exists in the downstream repository (Sections 9.7, 16)
-- [ ] The file uses the same schema as MADDENING's registry: `schema_version`, a project version field (e.g., `mime_version`), `generated_date`, and `anomalies` list (Section 9.7)
+- [ ] The file uses the same schema as MADDENING's registry: `schema_version`, a project version field (e.g., `mime_version`), `generated_date`, and `anomalies` list (Section 9.7). The validator requires exactly one project version field: a top-level key named `<project>_version`, the whole key matching `[a-z][a-z0-9_]*_version` and not `schema_version`, whose value is a quoted, non-empty string; `--version-field NAME` (e.g. `--version-field mime_version`) requires that exact name (Section 16)
 - [ ] All anomaly IDs use the downstream prefix (e.g., `MIME-ANO-001`, not `MADD-ANO-001`) (Section 16)
 - [ ] `python -m maddening.compliance check-anomalies docs/validation/known_anomalies.yaml --prefix MIME-ANO-` passes with zero errors (Section 16)
 - [ ] CI is configured to run the anomaly validator on every push and fail on YAML schema errors (Sections 9.7, 16)

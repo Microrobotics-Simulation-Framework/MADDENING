@@ -78,12 +78,12 @@ Automate the three-tier release gate from DOCUMENTATION_ARCHITECTURE.md Section 
 - **Why deferred**: Requires actual issues and releases to test against. Zero issues currently open.
 - **Priority**: Medium — becomes important at first real release, not needed during development.
 
-#### 0b. SBOM Generation
-Integrate CycloneDX SBOM into the release process.
-- `cyclonedx-bom` generates JSON/XML from installed dependencies
-- GitHub Actions release workflow attaches SBOM as release asset
-- **Why deferred**: No releases yet; `cyclonedx-bom>=4.0` is already in `[sbom]` optional extra.
-- **Priority**: Low — needed at first release, trivial to add.
+#### 0b. SBOM Generation [DONE in v0.4.0, except the workflow job]
+CycloneDX SBOMs are generated from a clean install of the wheel and checked in CI.
+- Done: `scripts/generate_sbom.py` builds the wheel, installs it into a fresh venv per install and runs `cyclonedx-py` from a separate tool venv.  It writes one CycloneDX 1.6 JSON SBOM each for the base install and the `server`, `surrogates` and `usd` extras to `docs/validation/sbom/`.
+- Done: `scripts/check_sbom.py` checks them offline against `pyproject.toml` and the SOUP package's base dependencies, through `tests/compliance/test_sbom_check.py`.
+- Done: regenerating the SBOMs from the release commit is a documented release step (`docs/validation/soup_package.md` §6), and the check fails on a version bump until it is done.
+- **Remaining**: a release workflow job that regenerates the SBOMs from the tag and attaches them to the GitHub release.  Until then the maintainer attaches them by hand.  A workflow change needs the maintainer's approval.
 
 #### 0c. Sphinx Documentation Site (Phase 5)
 Build the full documentation site with Sphinx.

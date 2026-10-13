@@ -1,0 +1,6 @@
+LBMNode declared spatial order = 2.0, temporal = None
+   N=   16  err= 4.04138e-02 
+   N=   32  err= 1.02093e-02    1.985
+   N=   64  err= 2.55910e-03    1.996
+   N=  128  err= 6.40485e-04    1.998
+   observed (finest pair) = 1.9984  max pairwise = 1.9984  monotone=True

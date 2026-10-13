@@ -1,9 +1,27 @@
 """Built-in surrogate architectures."""
 
+from typing import TYPE_CHECKING, Any
+
 from maddening.surrogates.architectures.mlp import MLPDirect, MLPDerivative
 
+if TYPE_CHECKING:
+    # PEP 562: the names below are resolved lazily by the module
+    # `__getattr__`, which a type checker cannot see through -- without
+    # these re-exports it reports every one of them as missing from
+    # `__all__`, and a downstream `from maddening.surrogates.architectures import X` is an error.
+    # Nothing here runs at import time; the lazy table stays the only
+    # runtime path.
+    from maddening.surrogates.architectures.deeponet import (
+        DeepONetDerivative,
+        DeepONetDirect,
+        SDeepONetDerivative,
+        SDeepONetDirect,
+    )
+    from maddening.surrogates.architectures.fno import FNODerivative, FNODirect
 
-def __getattr__(name: str):
+
+
+def __getattr__(name: str) -> Any:
     """Lazy imports for architectures that need equinox."""
     _lazy = {
         "DeepONetDirect": "maddening.surrogates.architectures.deeponet",

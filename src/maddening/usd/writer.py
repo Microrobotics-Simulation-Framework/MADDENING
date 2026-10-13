@@ -46,7 +46,7 @@ class USDWriter:
         stage: Usd.Stage,
         gm: "GraphManager",
         root_path: str = "/Simulation",
-    ):
+    ) -> None:
         self._stage = stage
         self._gm = gm
         self._root_path = root_path
@@ -55,12 +55,14 @@ class USDWriter:
 
         # Create root prim as MaddeningSimulationGraph
         root_prim = stage.DefinePrim(root_path, "MaddeningSimulationGraph")
-        root_prim.GetAttribute("maddening:baseDt").Set(
-            float(gm._base_dt if hasattr(gm, "_base_dt") else 0.01)
-        )
-        root_prim.GetAttribute("maddening:isMultirate").Set(
-            bool(gm._is_multirate)
-        )
+        # One step of the graph (``gm.timestep``) and whether its nodes
+        # fire at more than one rate, by the rule the serialiser uses.
+        # baseDt used to read a ``_base_dt`` nothing set, so every stage
+        # said 0.01 whatever the graph stepped by.
+        from maddening.usd.serialization import _graph_timing  # noqa: PLC0415
+        base_dt, is_multirate = _graph_timing(gm)
+        root_prim.GetAttribute("maddening:baseDt").Set(base_dt)
+        root_prim.GetAttribute("maddening:isMultirate").Set(is_multirate)
 
         # Create nodes container
         self._nodes_path = root_path + "/nodes"
@@ -88,12 +90,13 @@ class USDWriter:
                 f"{type(node_obj).__module__}.{type(node_obj).__qualname__}"
             )
             prim.GetAttribute("maddening:timestep").Set(float(spec.timestep))
-            import json
+            # No ``default=str``: see ``_params_json`` in
+            # ``maddening.usd.serialization`` -- a param the encoder cannot
+            # represent used to be written as its repr() and reload as that
+            # string, while the config path raised for the same graph.
+            from maddening.usd.serialization import _params_json  # noqa: PLC0415
             prim.GetAttribute("maddening:paramsJson").Set(
-                json.dumps(
-                    _params_to_serializable(node_obj.params),
-                    default=str,
-                )
+                _params_json(node_obj.params, node_name)
             )
 
         self._prim_cache[node_name] = prim
@@ -168,16 +171,3 @@ class USDWriter:
                         Vt.FloatArray(np_val.ravel().tolist()), time
                     )
 
-
-def _params_to_serializable(params: dict) -> dict:
-    """Convert node params dict to JSON-serializable form."""
-    result = {}
-    for k, v in params.items():
-        if isinstance(v, np.ndarray):
-            result[k] = v.tolist()
-        elif hasattr(v, "tolist"):
-            # JAX arrays
-            result[k] = np.asarray(v).tolist()
-        else:
-            result[k] = v
-    return result

@@ -11,12 +11,19 @@ Nodes must NEVER store mutable simulation state.  All state lives in the
 GraphManager.
 """
 
+import copy
+import functools
 import inspect
+import os
 import warnings
+import weakref
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, ClassVar, Optional
+from typing import Any, Callable, ClassVar, Optional, Self, cast
 
+import jax
+import jax.core
 import jax.numpy as jnp
 import numpy as np
 
@@ -25,6 +32,7 @@ from maddening.core.compliance.stability import stability
 from maddening.core.params import ParamSpec
 
 
+@stability(StabilityLevel.EVOLVING)
 @dataclass(frozen=True)
 class BoundaryInputSpec:
     """Descriptor for an expected boundary input.
@@ -50,6 +58,7 @@ class BoundaryInputSpec:
     expected_units: str | None = None
 
 
+@stability(StabilityLevel.EVOLVING)
 @dataclass(frozen=True)
 class BoundaryFluxSpec:
     """Descriptor for a declared boundary flux output.
@@ -72,6 +81,988 @@ class BoundaryFluxSpec:
     output_units: str | None = None
 
 
+def _merge_from_wrapped(node: "SimulationNode", getter, guard: str) -> dict:
+    """Merge ``getter(inner)`` over every node held as an attribute.
+
+    The shared machinery behind the forwarding defaults of
+    :attr:`SimulationNode.static_data` and
+    :meth:`SimulationNode.static_data_deps`: both must walk the same
+    attributes, qualify colliding keys the same way and terminate on the
+    same cycles, or a wrapper's dependency declaration stops describing
+    the statics it declares for.  Note that "the same way" is not the
+    same as "to the same keys": qualification fires on a collision
+    within the dict being merged, so a wrapper whose statics collide but
+    whose declarations do not ends up with two differently shaped key
+    sets.  See :meth:`SimulationNode.static_data_deps`.
+
+    Parameters
+    ----------
+    node : SimulationNode
+        The wrapper (or leaf) to collect from.
+    getter : callable
+        ``inner -> dict``, applied to each wrapped node.
+    guard : str
+        Name of the re-entrancy flag set on ``node`` for the duration of
+        the walk, so a reference cycle between two nodes terminates.
+
+    Returns
+    -------
+    dict
+        ``{}`` when ``node`` wraps nothing.  Otherwise the union of the
+        wrapped nodes' dicts, in attribute order.  Two wrapped nodes
+        contributing the same key keep both entries, the second
+        qualified by the attribute holding it, rather than one silently
+        displacing the other.
+    """
+    d = getattr(node, "__dict__", None)
+    # Fast path: a leaf node wraps nothing, and this runs per node per
+    # ``step()``.  Checked before the guard so a leaf never even grows
+    # the guard attribute.
+    if not d or not any(isinstance(v, SimulationNode) for v in d.values()):
+        return {}
+    if getattr(node, guard, False):
+        return {}
+    # ``object.__setattr__`` so a node built as a frozen dataclass can
+    # still carry the guard; a node that refuses it outright is only at
+    # risk from a reference cycle, which is not a shape the wrappers
+    # make.
+    try:
+        object.__setattr__(node, guard, True)
+    except (AttributeError, TypeError):
+        pass
+    try:
+        out: dict = {}
+        for attr, value in list(d.items()):
+            if not isinstance(value, SimulationNode):
+                continue
+            for key, item in getter(value).items():
+                while key in out:
+                    key = f"{attr}.{key}"
+                out[key] = item
+        return out
+    finally:
+        try:
+            object.__setattr__(node, guard, False)
+        except (AttributeError, TypeError):
+            pass
+
+
+class _ParamsDict(dict):
+    """A node's ``params``: a plain ``dict`` that counts its own writes.
+
+    ``GraphManager`` needs to know that ``node.params[key] = value`` happened,
+    not only whether a value changed: a write of the value the node already
+    held (reverting a calibration written into ``gm.params``) is a write, and
+    used to be invisible; and a write the compiled step has not taken must
+    make every entry point recompile before it runs, or a cached trace runs
+    the old model while a fresh trace (a new scan length, a sysid loss) runs
+    the new one.  So each mutation through the mapping interface bumps a
+    total and a per-key count.
+
+    A value mutated *inside* a stored object -- an element of a list, of a
+    NumPy array or of a nested dict, written in place -- goes through no
+    method of this mapping and is not counted here.  The graph finds it by
+    comparing each such value with a copy taken at its last sync
+    (:func:`_mutable_snapshot`, :func:`_mutated_keys`), so it counts as a
+    write of that key all the same; the cost is a copy and a comparison of
+    those values per sync, and nothing for an immutable value (a float, a
+    tuple of numbers, a JAX array).  Until 0.4.0 shipped no comparison was
+    made, although this docstring said one was, and such a write was lost
+    to ``gm.params`` and to every run (MADD-ANO-175).
+
+    A mapping *assigned* over this one -- ``node.params = {**node.params,
+    "k": v}`` -- takes over from it (:meth:`_succeed`): the node stores the
+    assigned items in a fresh mapping whose own counts start at zero, which
+    carries what this one had counted and counts each key the assignment
+    changed.  The assignment names one key, and the others are the node's
+    own values handed back, so they are not writes.  Until 0.4.0 shipped
+    the graph read a replaced mapping as a write of *every* key, which put
+    the node's own value over every other constant of that node a fit had
+    calibrated in ``gm.params`` (MADD-ANO-203).
+
+    Behaves as a ``dict`` everywhere else: ``isinstance(p, dict)``, JSON,
+    and a JAX pytree with the dict's own flattening.
+
+    Copies.  ``copy.deepcopy`` and ``pickle`` carry the counts and the
+    lineage with the items (:meth:`__reduce__`).  A graph copied with its
+    nodes (a deep copy or a pickle: ``copy.copy(gm)`` is refused, see
+    ``GraphManager.__copy__``) holds, beside each node's mapping, the
+    counts it last saw there (``GraphManager._node_writes_seen``); those
+    are copied as they are, so
+    the mapping's own counts must be too, or the copy's first sync reads
+    "fewer writes than I saw" as a write and puts the node's value over a
+    leaf calibrated in ``gm.params`` since.  Until 0.4.0 shipped such a copy
+    started at zero, and ``copy.deepcopy(gm)`` of a graph with a node write
+    in its past and a calibration after it ran the node's value where the
+    original ran the calibrated one, with nothing said (MADD-ANO-279).  The
+    lineage is copied once per copy operation, so mappings that shared one
+    still do and share none with the originals.  ``copy.copy(p)`` and
+    ``dict(p)`` are another matter: a second mapping beside this one, with
+    no graph record copied along, so it starts at zero with a lineage of
+    its own (two mappings that counted alike and then diverged must not
+    pass for one another).
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._writes = 0
+        self._key_writes: dict = {}
+        # The counts of the mappings this one replaced as a node's params,
+        # and one write for each key each replacement changed (``_succeed``).
+        self._carried: dict = {}
+        # Shared by a mapping and everything that succeeds it, so a graph
+        # can tell "the node's params, replaced" from an unrelated mapping.
+        self._lineage: object = object()
+
+    def _wrote(self, key) -> None:
+        self._writes += 1
+        self._key_writes[key] = self._key_writes.get(key, 0) + 1
+
+    def _succeed(self, old: "_ParamsDict") -> None:
+        """Take over from ``old`` as a node's params: carry what it counted,
+        and count a write of each key whose value this mapping changes
+        (:func:`_replaced_keys`: a key added, dropped, or holding another
+        value, bit for bit).  Decided here, when the node is assigned, from
+        what ``old`` holds at that moment."""
+        self._lineage = old._lineage
+        carried = old._write_counts()
+        for key in _replaced_keys(old, self):
+            carried[key] = carried.get(key, 0) + 1
+        self._carried = carried
+
+    def _write_counts(self) -> dict:
+        """``{key: writes}`` since this mapping's lineage began: its own
+        counted writes and what it carries (:meth:`_succeed`).  What a graph
+        compares with the counts it last saw."""
+        counts = dict(self._carried)
+        for key, n in self._key_writes.items():
+            counts[key] = counts.get(key, 0) + n
+        return counts
+
+    def __setitem__(self, key, value) -> None:
+        super().__setitem__(key, value)
+        self._wrote(key)
+
+    def __delitem__(self, key) -> None:
+        super().__delitem__(key)
+        self._wrote(key)
+
+    def pop(self, key, *default):
+        present = key in self
+        value = super().pop(key, *default)
+        if present:
+            self._wrote(key)
+        return value
+
+    def popitem(self):
+        key, value = super().popitem()
+        self._wrote(key)
+        return key, value
+
+    def setdefault(self, key, default=None):
+        if key not in self:
+            self[key] = default
+        return self[key]
+
+    def update(self, *args, **kwargs) -> None:  # type: ignore[override]
+        for key, value in dict(*args, **kwargs).items():
+            self[key] = value
+
+    def clear(self) -> None:
+        keys = list(self)
+        super().clear()
+        for key in keys:
+            self._wrote(key)
+
+    def __ior__(self, other):  # type: ignore[override]
+        self.update(other)
+        return self
+
+    def __reduce__(self):
+        # pickle and copy.deepcopy: the items with the counts and the lineage
+        # (see "Copies" in the class docstring).
+        return (_restored_params_dict,
+                (dict(self), self._writes, self._key_writes, self._carried, self._lineage))
+
+    def __copy__(self):
+        # A second mapping beside this one: zero counts, its own lineage.
+        return _ParamsDict(self)
+
+
+def _restored_params_dict(items, writes, key_writes, carried, lineage) -> "_ParamsDict":
+    """A :class:`_ParamsDict` with the counts and the lineage of the one it
+    was copied or pickled from (:meth:`_ParamsDict.__reduce__`)."""
+    restored = _ParamsDict(items)
+    restored._writes = writes
+    restored._key_writes = dict(key_writes)
+    restored._carried = dict(carried)
+    restored._lineage = lineage
+    return restored
+
+
+def _holds_mutable(value) -> bool:
+    """Whether ``value`` can change in place: a list, dict, set, bytearray or
+    NumPy array, or a tuple holding one.  A float, a string, a tuple of
+    numbers and a JAX array cannot."""
+    if isinstance(value, (list, dict, set, bytearray, np.ndarray)):
+        return True
+    if isinstance(value, tuple):
+        return any(_holds_mutable(item) for item in value)
+    return False
+
+
+def _mutable_snapshot(params) -> dict:
+    """``{key: deep copy}`` of every value of ``params`` that can change in
+    place (:func:`_holds_mutable`) -- what :func:`_mutated_keys` compares
+    against at the next sync.  Empty, and free, for a mapping of floats."""
+    if not isinstance(params, Mapping):
+        return {}
+    out = {}
+    for key, value in params.items():
+        if _holds_mutable(value):
+            try:
+                out[key] = copy.deepcopy(value)
+            except Exception:   # noqa: BLE001 - an uncopyable value is not compared
+                continue
+    return out
+
+
+def _same_value(a, b) -> bool:
+    """Bit-for-bit equality of two parameter values, element by element:
+    a ``NaN`` equals itself and ``-0.0`` is not ``0.0``, so an unchanged
+    value never reads as written and a written one never reads as
+    unchanged.  A Python ``float`` or ``complex`` is compared by its bit
+    pattern, as an array is: a ``NaN`` equals a ``NaN`` of the same sign
+    and payload only (``-nan`` is not ``nan``), and a complex ``NaN``
+    equals itself."""
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, np.ndarray):
+        return (a.shape == b.shape and a.dtype == b.dtype
+                and np.ascontiguousarray(a).tobytes() == np.ascontiguousarray(b).tobytes())
+    if isinstance(a, (list, tuple)):
+        return len(a) == len(b) and all(_same_value(x, y) for x, y in zip(a, b))
+    if isinstance(a, dict):
+        return a.keys() == b.keys() and all(_same_value(a[k], b[k]) for k in a)
+    if isinstance(a, np.generic):
+        return a.dtype == b.dtype and a.tobytes() == b.tobytes()
+    if isinstance(a, jax.Array) and not isinstance(a, jax.core.Tracer):
+        # A JAX array is immutable, but two of them can hold one value: a
+        # mapping rebuilt around a copy has not written it.
+        return (a.shape == b.shape and a.dtype == b.dtype
+                and np.asarray(a).tobytes() == np.asarray(b).tobytes())
+    if isinstance(a, float):
+        # NumPy's float64 / complex128 hold the same IEEE bits as a Python
+        # float / complex, the sign and payload of a NaN included.
+        return np.float64(a).tobytes() == np.float64(b).tobytes()
+    if isinstance(a, complex):
+        return np.complex128(a).tobytes() == np.complex128(b).tobytes()
+    try:
+        return bool(a == b)
+    except Exception:   # noqa: BLE001 - an incomparable value is unchanged only if it is the same object
+        return a is b
+
+
+def _mutated_keys(params, snapshot: dict) -> set:
+    """The keys of ``params`` whose value no longer equals its copy in
+    ``snapshot`` (:func:`_mutable_snapshot`): an in-place write the mapping
+    could not count.  A key the snapshot does not hold was counted, or
+    replaced, through the mapping."""
+    if not snapshot or not isinstance(params, Mapping):
+        return set()
+    return {key for key, copied in snapshot.items()
+            if key in params and not _same_value(params[key], copied)}
+
+
+def _replaced_keys(old, new) -> set:
+    """The keys a mapping assigned over ``old`` changes: a key ``new`` adds
+    or drops, and one whose value is not ``old``'s, bit for bit
+    (:func:`_same_value`).
+
+    What ``node.params = {**node.params, "k": v}`` writes
+    (:meth:`_ParamsDict._succeed`).  It is the rule an in-place element
+    write follows, the other write no method of the mapping sees: a value
+    is written when it is no longer the value held before.  So a
+    replacement that hands a key the value it already had is not a write of
+    it; ``node.params[key] = value`` is, whatever the value.
+    """
+    return {key for key in set(old) | set(new)
+            if key not in old or key not in new or not _same_value(new[key], old[key])}
+
+
+def _params_dict_flatten_with_keys(d: _ParamsDict):
+    keys = tuple(sorted(d))
+    return [(jax.tree_util.DictKey(k), d[k]) for k in keys], keys
+
+
+def _params_dict_unflatten(keys, values) -> _ParamsDict:
+    return _ParamsDict(zip(keys, values))
+
+
+# Flattened as a dict is (sorted keys, ``DictKey`` paths), so a tree map
+# over a node's params reaches its values rather than taking the mapping
+# for a leaf.
+jax.tree_util.register_pytree_with_keys(
+    _ParamsDict, _params_dict_flatten_with_keys, _params_dict_unflatten,
+)
+
+
+def _params_empty(params: Any) -> bool:
+    """``True`` for ``None`` and for an empty mapping -- the two spellings
+    of "nothing to inject"."""
+    if params is None:
+        return True
+    try:
+        return len(params) == 0
+    except TypeError:
+        return False
+
+
+def _detached_config(value: Any) -> Any:
+    """*value* copied into plain containers that share nothing mutable
+    with it: what a config hands out.
+
+    A ``dict`` of any class (a node's ``params`` is a counting subclass)
+    comes back as a ``dict``, a ``list`` as a new ``list``, a ``tuple`` as
+    a tuple of copies (a named tuple keeps its class), a NumPy array as a
+    copy; anything else -- a number, a string, a JAX array, none of which
+    can be changed in place -- as it is.
+
+    ``to_dict()`` used to hand out the graph's own containers: a node's
+    ``params`` mapping, the lists inside it, a mapped edge's point sets, a
+    sharded wrapper's ``axis_map``.  Editing a config to build a variant
+    of a graph -- ``cfg = gm.to_dict(); cfg["nodes"][0]["params"]["k"] =
+    5.0`` -- therefore edited the graph it came from, which ran the
+    variant's value from its next step or recompile on, with nothing
+    said (MADD-ANO-205).  It also made the config's ``params`` a ``dict``
+    subclass, which ``yaml.safe_dump`` refuses.
+    """
+    if isinstance(value, dict):
+        return {key: _detached_config(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_detached_config(item) for item in value]
+    if isinstance(value, tuple):
+        items = [_detached_config(item) for item in value]
+        make = getattr(type(value), "_make", None)      # a named tuple's constructor
+        return make(items) if make is not None else tuple(items)
+    if isinstance(value, np.ndarray):
+        return value.copy()
+    return value
+
+
+def _signature_takes_keyword(fn: Any, keyword: str) -> bool:
+    """Would calling ``fn(..., <keyword>=x)`` deliver ``x``?
+
+    True for a signature that names ``keyword`` as a parameter a keyword
+    can reach, and for one that forwards ``**kwargs``
+    (``inspect.Parameter.VAR_KEYWORD``).  A signature that cannot be
+    inspected is ``False``: the refusals built on it fail closed.
+    :func:`_signature_takes_params` is this rule for ``params``; the
+    sharded wrappers read it for ``static_padded`` and ``shard_info`` too,
+    so one spelling means the same thing for every optional keyword a
+    wrapper forwards.
+
+    A parameter of that name which a keyword cannot reach is ``False``:
+    positional-only (``def f(params, /)``, ``def f(params=None, /)``) or
+    the name of ``*args`` (``def f(*params)``).  Until 0.4.0 shipped the
+    name alone answered ``True`` for those, so the caller passed the
+    keyword and Python raised ``TypeError`` -- from inside the first
+    trace of a step, for a node.  The answer is now the one the question
+    has, and it is only an answer: a hook that holds the name where no
+    keyword reaches it is not thereby a hook without the keyword.  The
+    callers that would otherwise run it without the value refuse it
+    instead (:func:`_refuse_keyword_no_keyword_reaches`, when a node is
+    added to a graph or wrapped; the mapping registry, at registration).
+    """
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    named = sig.parameters.get(keyword)
+    if named is not None and named.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+
+
+def _named_where_no_keyword_reaches(fn: Any, keyword: str) -> Optional[str]:
+    """How ``fn`` holds the name ``keyword`` where ``fn(..., <keyword>=x)``
+    cannot deliver ``x`` -- ``"as a positional-only parameter"`` or
+    ``"as its *args"`` -- or ``None``.
+
+    Not a second keyword rule: :func:`_signature_takes_keyword` is asked
+    first, and wherever it answers ``True`` this is ``None`` -- a keyword
+    reaches the name, or ``**kwargs`` takes it beside a positional-only
+    parameter of the same name.  Of the signatures it answers ``False``
+    for, this tells the one that holds the name from the one that never
+    mentions it (``None``, like a signature that cannot be inspected).
+    """
+    if _signature_takes_keyword(fn, keyword):
+        return None
+    try:
+        named = inspect.signature(fn).parameters.get(keyword)
+    except (TypeError, ValueError):
+        return None
+    if named is None:
+        return None
+    if named.kind is inspect.Parameter.POSITIONAL_ONLY:
+        return "as a positional-only parameter"
+    if named.kind is inspect.Parameter.VAR_POSITIONAL:
+        return "as its *args"
+    return None
+
+
+def _refuse_keyword_no_keyword_reaches(
+        node: Any, method: str, keyword: str = "params", *, caller: str = "the graph") -> None:
+    """Raise ``ValueError`` when ``node.<method>`` holds the name
+    ``keyword`` where no keyword reaches it
+    (:func:`_named_where_no_keyword_reaches`).
+
+    *caller* passes the hook that value as ``<keyword>=...``.  Until 0.4.0
+    shipped it did so for such a hook too, and Python raised ``TypeError``
+    from inside the first trace.  Answering "takes no such keyword" there
+    and calling the hook without the value would have been quieter and
+    worse: a node that plainly means to take ``params`` would run on its
+    constructor's constants, with every value written to ``gm.params``
+    ignored.  So it is refused where the node is handed over, by name.
+    """
+    fn = getattr(node, method, None)
+    if fn is None:
+        return
+    how = _named_where_no_keyword_reaches(fn, keyword)
+    if how is None:
+        return
+    raise ValueError(
+        f"Node {getattr(node, 'name', None)!r}: {type(node).__name__}.{method}() names "
+        f"`{keyword}` {how}, where no keyword reaches it, and {caller} passes it as "
+        f"`{keyword}=...`.  Accept `{keyword}` as a keyword argument (`{keyword}=None` "
+        f"with no `/` after it), or give the parameter another name if {method}() is "
+        f"not meant to receive it."
+    )
+
+
+#: The hooks, beside ``update``, that are handed the node's entry of the
+#: params pytree when the node has one.
+_PARAMS_COUPLING_HOOKS = ("compute_boundary_fluxes", "compute_interface_correction")
+
+
+def _refuse_params_no_keyword_reaches(
+        node: Any, update: str = "update", *, caller: str = "the graph") -> None:
+    """:func:`_refuse_keyword_no_keyword_reaches` for ``params``, on every
+    hook of *node* that would be handed them.
+
+    ``update`` (``update_padded`` for a node wrapped for sharding) always:
+    it is what decides whether the node has an entry in ``gm.params``.
+    The flux and interface-correction hooks when ``update`` takes
+    ``params``: only then is there an entry to hand them, and a hook
+    called without it would compute from the constructor's constants
+    beside an ``update`` on the calibrated ones.  A node whose ``update``
+    takes no ``params`` is never passed any, so what its other hooks name
+    is its own business, as it was in every release.
+    """
+    _refuse_keyword_no_keyword_reaches(node, update, caller=caller)
+    if _method_accepts_params(node, update):
+        for hook in _PARAMS_COUPLING_HOOKS:
+            _refuse_keyword_no_keyword_reaches(node, hook, caller=caller)
+
+
+def _signature_required_arguments(fn: Any) -> Optional[dict[str, bool]]:
+    """The arguments a call of ``fn`` must supply, each with whether a
+    keyword can supply it.
+
+    ``{name: True}`` for a parameter without a default that may be passed
+    by name, ``{name: False}`` for a positional-only one; ``*args`` and
+    ``**kwargs`` require nothing.  ``None`` for a signature that cannot be
+    inspected, so the caller decides what that means (the keyword rule
+    above answers ``False`` there).
+
+    This is not a second keyword rule.  Whether ``fn`` *takes* a keyword
+    is :func:`_signature_takes_keyword`'s to say, and a caller that needs
+    both answers -- the mapping registry, which checks a declaration
+    against its factory before any config names the kind -- asks both
+    here, the one module that reads a signature
+    (``tests/core/test_params_probe_agreement.py`` scans for any other).
+    """
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return None
+    return {
+        name: p.kind is not inspect.Parameter.POSITIONAL_ONLY
+        for name, p in sig.parameters.items()
+        if p.default is inspect.Parameter.empty
+        and p.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+    }
+
+
+def _signature_takes_params(fn: Any) -> bool:
+    """Would calling ``fn(..., params=x)`` deliver ``x``?
+
+    True for a signature that names ``params`` and for one that forwards
+    ``**kwargs`` (``inspect.Parameter.VAR_KEYWORD``), because a
+    ``def derivatives(self, *args, **kwargs): return
+    super().derivatives(*args, **kwargs)`` receives the keyword exactly
+    as an explicit one does.  A signature that cannot be inspected is
+    ``False``: the refusal fails closed.
+
+    This is the *callable* half of the one params rule; the *node* half
+    is :func:`_method_accepts_params`, which asks the node's own
+    :meth:`SimulationNode.accepts_params` first and falls back to this.
+    Every "does this take ``params``" question in the package goes
+    through one of the two, and
+    ``tests/core/test_params_probe_agreement.py`` runs every probe
+    against one matrix of spellings (explicit keyword, ``**kwargs``,
+    ``functools.partial``, a decorator without ``functools.wraps``, a
+    bound method of another object, a callable object, a duck-typed
+    node) and asserts that they agree.  Until 0.4.0 shipped there were
+    three rules: this one; an explicit-keyword-only one in
+    ``ShardedUnstructuredNode`` and in the duck-typed fallbacks of the
+    graph and of ``ShardedPointwiseNode``; and an always-``False`` one
+    for duck-typed nodes in ``verify_node`` and the REST server.
+    """
+    return _signature_takes_keyword(fn, "params")
+
+
+def _method_accepts_params(node: Any, method: str) -> bool:
+    """Would ``node.<method>(..., params=x)`` deliver ``x``?  The node half
+    of the one params rule.
+
+    ``node.accepts_params(method=method)`` when the node has that probe,
+    so a wrapper that answers for the node it wraps (the sharded
+    wrappers, :class:`~maddening.core.simulation.hybrid_node.HybridNode`)
+    is asked rather than read past; :func:`_signature_takes_params` of
+    the method itself otherwise.  "Otherwise" is a duck-typed node object
+    with no probe at all (the graph accepts those), and a third-party
+    subclass whose override still declares ``accepts_params(self)``
+    without the ``method`` keyword: that override is asked the
+    ``"update"`` question it was written for, and any other method is
+    read off its signature, so the integrators' refusal cannot be
+    switched off by an old override of the *probe*.
+
+    The graph, the integrators, the implicit solver, the sharded
+    wrappers, ``HybridNode``, the verification battery and the REST
+    server all ask through here; see :func:`_signature_takes_params` for
+    when they did not.
+    """
+    probe = getattr(node, "accepts_params", None)
+    if callable(probe):
+        try:
+            return bool(probe(method=method))
+        except TypeError:
+            if method == "update":
+                try:
+                    return bool(probe())
+                except TypeError:
+                    pass
+    fn = getattr(node, method, None)
+    if fn is None:
+        return False
+    return _signature_takes_params(fn)
+
+
+def _method_with_params(node: Any, method: str, params: Any) -> Callable:
+    """The bound ``node.<method>`` with ``params`` applied, or a refusal.
+
+    Empty ``params`` (``None`` or ``{}``) returns the bound method as it
+    is, to be called the way it always was: that is what keeps an
+    override declared without the keyword working.  A non-empty
+    ``params`` returns ``functools.partial(method, params=params)`` when
+    the override can take it, and raises ``ValueError`` naming the class
+    and the method when it cannot.  The one thing it never does is call
+    the method without the params it was given -- integrating the
+    constructor's constants while ``update`` used the calibrated ones
+    was ``MADD-ANO-018``.
+    """
+    fn = getattr(node, method)
+    if _params_empty(params):
+        return fn
+    if not _method_accepts_params(node, method):
+        raise ValueError(
+            f"params given, but {type(node).__name__}.{method}() takes no "
+            "'params' keyword: calling it without would integrate the "
+            "constructor's constants while update() used the calibrated "
+            f"ones (MADD-ANO-018).  Declare {method}(..., *, params=None) "
+            "and read constants from {**self.params, **params}, or pass "
+            "no params."
+        )
+    return functools.partial(fn, params=params)
+
+
+def static_data_dep_violations(
+    node, spec_overrides: Optional[dict] = None,
+) -> list[tuple[str, str, str]]:
+    """Declared static-data dependencies that name a trainable parameter.
+
+    The rule
+    :meth:`~maddening.core.graph_manager.GraphManager.compile` refuses a
+    graph over, factored out so it can be asked of a node on its own.
+    See :meth:`SimulationNode.static_data_deps` for why such a
+    dependency is an error rather than a supported feature.
+
+    A declared dependency is a violation when the named parameter is
+    **both** a leaf of :meth:`SimulationNode.params_pytree` -- a value
+    the graph actually differentiates -- and left trainable by
+    :meth:`SimulationNode.param_specs`.  A structural parameter (an
+    ``int`` such as ``n_cells``, a ``str``, a ``bool``, a nested dict)
+    never reaches the parameter pytree, so nothing differentiates
+    through it and baking it into a static is the whole point of the
+    static channel.
+
+    ``node`` and the nodes it wraps are all walked, each resolved
+    against **its own** specs and pytree.  The forwarding default of
+    :meth:`SimulationNode.static_data_deps` means a wrapper republishes
+    what it wraps, but a wrapper is not obliged to republish
+    ``param_specs`` or ``params_pytree`` (``HybridNode`` does; a
+    hand-rolled one need not), so resolving an inner declaration against
+    the outer node alone would quietly find nothing.  A violation
+    visible at more than one level is reported once, attributed to the
+    innermost node that declares it -- the one holding both the static
+    and the parameter, which is where the fix goes.  The graph supplies
+    the outer name it knows the node by.
+
+    ``spec_overrides`` is how the *graph* takes part.  The node's own
+    ``param_specs()`` is not the view the optimiser sees:
+    :meth:`~maddening.core.graph_manager.GraphManager.param_specs` merges
+    :meth:`~maddening.core.graph_manager.GraphManager.set_param_spec`
+    overrides over it, and ``trainable_mask``, ``unconstrain``,
+    ``check_params`` and ``maddening.sysid`` all read that merged view.
+    Resolving the rule against the node alone made it disagree with the
+    optimiser in both directions: unfreezing a parameter at graph level
+    let a baked static through (a silently wrong gradient), and the
+    remedy the error message names -- freeze it -- did not clear the
+    refusal when applied through ``set_param_spec``.
+
+    Parameters
+    ----------
+    node : SimulationNode
+        The node to check.  Duck-typed objects missing any of the three
+        methods contribute nothing rather than raising, matching how
+        ``compile`` probes for the other node-contract hooks.
+    spec_overrides : dict of str to ParamSpec, optional
+        The graph's overrides for *this* node, applied over each walked
+        node's own specs.  They always apply to ``node`` itself, whose
+        ``params_pytree`` is the one they were validated against.  They
+        reach a wrapped node only when it is the single wrapped holder of
+        the parameter name: two wrapped nodes exposing the same name make
+        the override ambiguous (the graph sees one of them under a
+        qualified key), and leaving their own specs alone can only
+        over-refuse, never let a baked static through.
+
+    Returns
+    -------
+    list of (str, str, str)
+        ``(owner_name, static_data_key, param_key)``, in walk order.
+    """
+    # ``owner_of`` is overwritten as the walk descends, so the deepest
+    # node that declares a given violation is the one named; ``order``
+    # keeps the report in first-seen (outermost) order.
+    owner_of: dict[tuple[str, str], str] = {}
+    order: list[tuple[str, str]] = []
+    overrides = dict(spec_overrides or {})
+    # How many *wrapped* nodes expose each overridden name, so an
+    # ambiguous override can be recognised without a second walk.
+    holders: dict[str, int] = {}
+    if overrides:
+        inner_seen: set[int] = {id(node)}
+        inner_queue = [
+            v for v in getattr(node, "__dict__", {}).values()
+            if isinstance(v, SimulationNode)
+        ]
+        while inner_queue:
+            obj = inner_queue.pop(0)
+            if id(obj) in inner_seen:
+                continue
+            inner_seen.add(id(obj))
+            pytree_of: Callable[..., Any] | None = getattr(
+                obj, "params_pytree", None)
+            if callable(pytree_of):
+                for key in pytree_of() or {}:
+                    if key in overrides:
+                        holders[key] = holders.get(key, 0) + 1
+            for value in list(getattr(obj, "__dict__", {}).values()):
+                if isinstance(value, SimulationNode):
+                    inner_queue.append(value)
+    seen: set[int] = set()
+    queue = [node]
+    while queue:
+        obj = queue.pop(0)
+        if id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        # Duck-typed: a node may implement none, some or all of these.
+        # Declared `Callable[..., Any] | None` rather than `Any` so the
+        # `callable()` guard below narrows to something whose *return*
+        # is `Any`; narrowing a bare `Any` yields `(...) -> object`,
+        # which is not iterable, indexable or `set()`-able.
+        deps: Callable[..., Any] | None = getattr(
+            obj, "static_data_deps", None)
+        specs_of: Callable[..., Any] | None = getattr(
+            obj, "param_specs", None)
+        pytree_of: Callable[..., Any] | None = getattr(
+            obj, "params_pytree", None)
+        if callable(deps) and callable(specs_of) and callable(pytree_of):
+            declared = deps() or {}
+            if declared:
+                specs = dict(specs_of() or {})
+                if overrides:
+                    specs.update({
+                        k: v for k, v in overrides.items()
+                        if obj is node or holders.get(k) == 1
+                    })
+                leaves = set(pytree_of() or {})
+                owner = getattr(obj, "name", repr(obj))
+                for static_key in sorted(declared):
+                    for param_key in declared[static_key]:
+                        if param_key not in leaves:
+                            continue
+                        if not specs.get(param_key, ParamSpec()).trainable:
+                            continue
+                        if (static_key, param_key) not in owner_of:
+                            order.append((static_key, param_key))
+                        owner_of[(static_key, param_key)] = owner
+        for value in list(getattr(obj, "__dict__", {}).values()):
+            if isinstance(value, SimulationNode):
+                queue.append(value)
+    return [(owner_of[k], k[0], k[1]) for k in order]
+
+
+# ---------------------------------------------------------------------------
+# What a saved node cannot rebuild
+# ---------------------------------------------------------------------------
+#
+# A saved node is its ``params`` and nothing else: every reload calls
+# ``cls(name=..., timestep=..., **params)``.  A constructor argument the
+# class keeps anywhere but ``params`` (``self.stiffness = stiffness``) is
+# therefore dropped by the save, and the reloaded graph runs the default,
+# with nothing said.  ``SimulationNode.to_dict`` says so, for the arguments
+# it can tell were lost: the ones the node was constructed with.
+
+#: The package directory, with a trailing separator: frames inside it are
+#: skipped when a warning is attributed to the caller's line.
+_PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + os.sep
+
+#: What :meth:`SimulationNode.__init__` itself takes: ``name`` and
+#: ``timestep``, which a saved entry carries beside its ``params``, and
+#: ``geometry_source``, which the base constructor takes out of ``params``
+#: (nothing in this package reads it, and no save carries it).
+_BASE_CONSTRUCTOR_NAMES = frozenset({"name", "timestep", "geometry_source"})
+
+#: ``id(node) -> (weak reference to the node, names)``.  For a node built by
+#: calling its class: the named parameters of its constructor that were
+#: given a value other than their default.  Names only (a value may be a
+#: large array), and kept off the node, so that ``vars(node)``, a pickle and
+#: a copy are what they were; a copy therefore has no record, and is not
+#: warned about.
+_CONSTRUCTED_WITH: dict = {}
+
+#: ``__init__ function -> its signature`` (``None`` when it has none to
+#: read), dropped with the function.
+_INIT_SIGNATURES: "weakref.WeakKeyDictionary[Any, Optional[inspect.Signature]]" = \
+    weakref.WeakKeyDictionary()
+
+
+def _init_signature(cls: type) -> Optional[inspect.Signature]:
+    init = cls.__init__
+    try:
+        return _INIT_SIGNATURES[init]
+    except KeyError:
+        pass
+    except TypeError:       # not a Python function: nothing to read
+        return None
+    try:
+        signature: Optional[inspect.Signature] = inspect.signature(init)
+    except (TypeError, ValueError):
+        signature = None
+    _INIT_SIGNATURES[init] = signature
+    return signature
+
+
+def _is_the_default(value: Any, default: Any) -> bool:
+    """Whether a constructor given ``value`` for a parameter was given that
+    parameter's default: the same object, or a value of the same type that
+    is the same bit for bit, element by element in a list, a tuple, a dict
+    or an array (:func:`_same_value`).
+
+    Exactly that, because a reload passes the default itself, and only a
+    value that cannot be told from it is known to build the same node.  So
+    ``-0.0`` is not the default ``0.0`` (a constructor may read the sign),
+    ``2`` is not the default ``2.0`` (an integer state multiplied by it
+    stays an integer, and by the float does not), ``np.float32(2.0)`` is
+    not ``2.0`` (it carries a dtype), a list is not a tuple and an array is
+    not a tuple of the same numbers.  A ``NaN`` is the default ``NaN``
+    only with the same sign and payload (``-nan`` is not the default
+    ``nan``: a reload passes ``nan`` and the sign is lost), a complex
+    ``NaN`` is a complex ``NaN`` default with the same bits, and anything
+    that cannot be compared is not the default.  Until this was made exact
+    the first two were taken for the default, and a node built with them
+    lost the argument with nothing said; until the bits of a ``float`` and
+    a ``complex`` were compared, so was a ``-nan``, and an equal complex
+    ``NaN`` was warned of."""
+    if value is default:
+        return True
+    try:
+        return _same_value(value, default)
+    except Exception:   # noqa: BLE001 - what cannot be compared is not the default
+        return False
+
+
+def _note_constructor_arguments(node: Any, cls: type, args: tuple, kwargs: dict) -> None:
+    """Record, for :func:`_unsaved_constructor_arguments`, which named
+    parameters of ``cls.__init__`` (the class's own constructor, or the one
+    it inherits) this call gives a value that is not exactly their default
+    (:func:`_is_the_default`).  What a ``**kwargs`` or an ``*args`` of that
+    constructor takes in is not looked at.  Records nothing when it cannot
+    tell: a signature that cannot be read, a call the constructor is about
+    to refuse, a node that takes no weak reference.  Never raises."""
+    try:
+        signature = _init_signature(cls)
+        if signature is None:
+            return
+        try:
+            bound = signature.bind(node, *args, **kwargs)
+        except TypeError:
+            return                              # the constructor raises it itself
+        parameters = signature.parameters
+        first = next(iter(parameters), None)
+        names = set()
+        for name, value in bound.arguments.items():
+            parameter = parameters[name]
+            if name == first or name in _BASE_CONSTRUCTOR_NAMES \
+                    or parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD):
+                continue
+            if parameter.default is not parameter.empty \
+                    and _is_the_default(value, parameter.default):
+                continue
+            names.add(name)
+        if not names:
+            return
+        key = id(node)
+
+        def forget(reference, key=key, records=_CONSTRUCTED_WITH):
+            entry = records.get(key)
+            if entry is not None and entry[0] is reference:
+                del records[key]
+
+        _CONSTRUCTED_WITH[key] = (weakref.ref(node, forget), frozenset(names))
+    except Exception:   # noqa: BLE001 - a record that cannot be made is not made
+        return
+
+
+def _unsaved_constructor_arguments(node: "SimulationNode", *, stage: bool = False) -> list[str]:
+    """The constructor arguments of ``node`` that are not in its saved
+    entry, sorted: named parameters of its class's ``__init__`` (its own,
+    or the one it inherits) that it was constructed with a value other than
+    their default for (:func:`_is_the_default`: exactly the default, type
+    and sign included), and that are no key of ``node.params``.
+
+    The rule goes by the name: "given, and not in ``params`` under that
+    name".  It is silent for a node built with its defaults, which reloads
+    as the node it was.  It is **not** proof of a loss: a class that saves
+    an argument another way -- under another key, or folded into another
+    argument -- is named too, and says so by overriding ``to_dict`` (below).
+
+    Not reported, though the argument may be lost all the same:
+
+    * anything a ``**kwargs`` of the constructor took in.  Most of it
+      reaches the base's ``**params`` and is saved; an argument the class
+      takes out on the way is not, and neither is one a subclass's
+      ``**kwargs`` hands up to a parent that keeps it as an attribute
+      (``Child(gain=5.0)`` where ``Parent.__init__`` does ``self.gain =
+      gain``).  The parents' signatures are not read, because a parent may
+      save such an argument under another name (the built-in adaptive
+      node takes ``blindness_threshold`` and saves it as
+      ``gradient_capture_threshold``), and going by a parent's names would
+      then warn of a built-in node that reloads bit for bit;
+    * anything an ``*args`` of the constructor took in: it has no name to
+      look for in ``params``;
+    * a node whose arguments were not seen when it was created: a class,
+      or a mixin before ``SimulationNode`` in its bases, whose own
+      ``__new__`` hands no arguments on; a copy; an unpickled node;
+    * at the config door (``stage`` false), a node of a class that
+      overrides ``to_dict``, which answers for its own saving (the sharded
+      wrappers and ``HybridNode`` save the node they wrap, which is asked
+      in its own right).  A USD stage (``stage`` true) carries ``params``
+      and never what ``to_dict`` returns, so there such a class is asked
+      like any other.  A config keeps what the override returns under
+      ``params``: for a node whose ``update`` takes ``params``,
+      ``GraphManager.to_dict`` writes the live values of the keys of
+      ``node.params`` there and keeps the keys the override adds;
+    * an attribute written after construction (``node.stiffness = 40.0``),
+      which no save carries either;
+    * ``name`` and ``timestep``, which the entry carries beside ``params``,
+      and ``geometry_source``, which the base constructor takes out of
+      ``params`` and nothing saves.
+    """
+    if not stage and type(node).to_dict is not SimulationNode.to_dict:
+        return []
+    entry = _CONSTRUCTED_WITH.get(id(node))
+    if entry is None or entry[0]() is not node:
+        return []
+    params = node.params
+    if not isinstance(params, Mapping):
+        return []
+    return sorted(name for name in entry[1] if name not in params)
+
+
+def _warn_of_unsaved_constructor_arguments(node: "SimulationNode", *, stage: bool = False) -> None:
+    """``UserWarning`` naming the node, its class, the arguments
+    :func:`_unsaved_constructor_arguments` finds, what a reload does
+    instead, and the fix.  A warning and not an error: an error would stop
+    every such node from being saved at all, and a node built with its
+    defaults saves correctly.  Called by every door that saves a node's
+    constants: ``SimulationNode.to_dict`` (a config, ``GET /graph``, the
+    reply to ``POST /graph/nodes``) and, with ``stage`` true,
+    ``save_graph_to_usd``, which carries ``params`` only and so asks a
+    class that overrides ``to_dict`` too.  Given a wrapper, it asks the
+    node the wrapper's constants belong to."""
+    # A wrapper's constants are its node's (``_params_owner``): a door that
+    # saves a wrapper by its ``params`` (the USD writer) is told of the node.
+    for _ in range(8):
+        owner = node._params_owner() if isinstance(node, SimulationNode) else None
+        if owner is None:
+            break
+        node = owner
+    names = _unsaved_constructor_arguments(node, stage=stage)
+    if not names:
+        return
+    cls = type(node)
+    signature = _init_signature(cls)
+    parameters = signature.parameters if signature is not None else {}
+    defaulted, required = [], []
+    for name in names:
+        parameter = parameters.get(name)
+        if parameter is None or parameter.default is parameter.empty:
+            required.append(name)
+        else:
+            shown = repr(parameter.default)
+            defaulted.append(f"{name}={shown if len(shown) <= 40 else shown[:37] + '...'}")
+    outcomes = []
+    if defaulted:
+        outcomes.append(f"runs with the default {', '.join(defaulted)}")
+    if required:
+        outcomes.append(f"cannot build the node ({', '.join(required)}: no default)")
+    one = len(names) == 1
+    if stage and cls.to_dict is not SimulationNode.to_dict:
+        # The config door's way out does not reach a stage.
+        another_way = (f"{cls.__name__} overrides to_dict(), which a USD stage does not "
+                       f"honour: a stage carries params only.")
+    else:
+        another_way = (f"or, if the node saves {'it' if one else 'them'} another way, "
+                       f"override to_dict() to say so.")
+    warnings.warn(
+        f"node {node.name!r} ({cls.__name__}) does not save the constructor "
+        f"argument{'' if one else 's'} {', '.join(names)}.  {cls.__name__}'s constructor (or one it "
+        f"inherits) does not hand {'it' if one else 'them'} to SimulationNode.__init__ under "
+        f"{'that name' if one else 'those names'}, so {'it is' if one else 'they are'} not in "
+        f"node.params, and a saved node is rebuilt as {cls.__name__}(name=..., timestep=..., "
+        f"**params): a graph loaded from this save {' and '.join(outcomes)}.  Hand "
+        f"{'it' if one else 'them'} on -- super().__init__(name, timestep, "
+        f"{', '.join(f'{name}={name}' for name in names)}) -- and read {'it' if one else 'them'} "
+        f"from self.params; {another_way}",
+        UserWarning, stacklevel=2, skip_file_prefixes=(_PACKAGE_DIR,),
+    )
+
+
 @stability(StabilityLevel.STABLE)
 class SimulationNode(ABC):
     """Abstract base class for all simulation nodes.
@@ -87,6 +1078,14 @@ class SimulationNode(ABC):
     """
 
     meta: ClassVar[Optional["NodeMeta"]] = None  # type: ignore[name-defined]
+
+    #: Private.  For a node that wraps another and runs it under its own
+    #: name (the sharded wrappers, ``HybridNode``): the name of the
+    #: attribute holding the wrapped node.  Such a wrapper has no ``params``
+    #: of its own -- its ``params`` *is* the wrapped node's, read and
+    #: assigned through it (see :attr:`params`).  ``None`` for every other
+    #: node.
+    _params_owner_attr: ClassVar[Optional[str]] = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Reject legacy subclasses that override ``requires_halo``.
@@ -116,11 +1115,137 @@ class SimulationNode(ABC):
                 ),
             )
 
+    def __new__(cls, *args: Any, **kwargs: Any) -> Self:
+        """Create the node, and note which constructor arguments it is
+        being given (:func:`_note_constructor_arguments`), so that
+        :meth:`to_dict` can say which of them it does not save.  The
+        arguments are ``__init__``'s; nothing else changes."""
+        make = super().__new__
+        node = make(cls) if make is object.__new__ else make(cls, *args, **kwargs)
+        if args or kwargs:
+            _note_constructor_arguments(node, cls, args, kwargs)
+        return node
+
     def __init__(self, name: str, timestep: float, **params):
+        """
+        Parameters
+        ----------
+        name : str
+            The node's name in a graph.
+        timestep : float
+            The node's time step.
+        **params
+            The node's constants.  They are stored in :attr:`params`, and
+            they are all a save carries: ``to_dict()`` writes ``params``,
+            and a reload calls ``cls(name=..., timestep=..., **params)``.
+            A subclass passes every constructor argument it wants a saved
+            graph to rebuild -- ``super().__init__(name, timestep,
+            stiffness=stiffness)`` -- and reads it from ``self.params``.
+        """
         self.name = name
         self.delta_t = float(timestep)
         self.geometry_source: Optional[str] = params.pop("geometry_source", None)
-        self.params = dict(params)
+        # Counts its writes, so a graph can tell a write after compile from
+        # an unchanged value (see ``_ParamsDict``).
+        self.params = _ParamsDict(params)
+
+    @property
+    def params(self) -> dict:
+        """The node's constants: a ``dict`` that counts the writes made
+        through it (``_ParamsDict``), so a graph holding the node takes each
+        one in (``GraphManager.params``).
+
+        Assigning it -- ``node.params = {**node.params, "k": v}`` -- stores
+        the mapping's items in a fresh counting mapping (one that already
+        counts, another node's included, is stored as it is), so writes made
+        through ``node.params`` afterwards are seen like any other.  Until
+        0.4.0 shipped the assigned ``dict`` was stored as given: the
+        replacement itself was taken in, but every later write into it was
+        lost to the graph (MADD-ANO-175).  A reference to the assigned
+        object is therefore not ``node.params``: write through
+        ``node.params``.
+
+        The assignment is a write of the keys whose values it changes -- a
+        key added, dropped, or given another value -- and of no other: a
+        constant of this node calibrated in ``gm.params`` stays calibrated
+        when the assignment hands its key back unchanged.  (For a time
+        during 0.4.0 development it was a write of every key, and the
+        one-key idiom silently reverted every other calibrated constant of
+        the node, MADD-ANO-203.)  To write a value the node already holds --
+        to revert a calibration -- write the key: ``node.params[key] =
+        value``.
+
+        A node that wraps another and runs it (``ShardedStencilNode``,
+        ``ShardedPointwiseNode``, ``ShardedUnstructuredNode``,
+        ``HybridNode``, and one of them around another) has no mapping of
+        its own: its ``params`` is the wrapped node's, so there is one
+        mapping however it is reached, and an assignment made on the
+        wrapper or on the node it wraps is the same assignment, counted
+        once, seen by both and by the graph.  Until 0.4.0 shipped the two
+        only *shared* a mapping from construction on, and an assignment on
+        the wrapper -- the node ``gm.get_node(name)`` returns for a sharded
+        graph -- replaced the wrapper's alone: the step went on with the
+        old value while ``node.params`` read the new one back, and every
+        later keyed write through the wrapper was lost with it.  A wrapper
+        written outside this package that shares its node's mapping
+        (``self.params = inner.params``) is followed in one direction: an
+        assignment on *it* reaches every node it holds that shared the
+        mapping replaced; one made on the node it wraps does not reach it.
+        """
+        owner = self._params_owner()
+        if owner is not None:
+            return owner.params
+        try:
+            return self.__dict__["params"]
+        except KeyError:
+            raise AttributeError(
+                f"{type(self).__name__!r} object has no attribute 'params'") from None
+
+    @params.setter
+    def params(self, value) -> None:
+        attrs = cast(dict, self.__dict__)
+        owner = self._params_owner()
+        if owner is not None:
+            # A wrapper: the assignment is the wrapped node's, and the copy
+            # the base constructor stored here before the wrapped node was
+            # attached goes, so that nothing can read a second mapping.
+            owner.params = value
+            attrs.pop("params", None)
+            return
+        # Kept in the instance ``__dict__`` under its own name, so pickle,
+        # ``copy`` and every walk of ``vars(node)`` see what they always saw.
+        old = attrs.get("params")
+        if isinstance(value, Mapping) and not isinstance(value, _ParamsDict):
+            value = _ParamsDict(value)
+            if isinstance(old, _ParamsDict):
+                # The replacement writes the keys it changes, not the ones
+                # it hands back (MADD-ANO-203).
+                value._succeed(old)
+        attrs["params"] = value
+        if old is None or value is old:
+            return
+        # A node this one holds that shared the mapping just replaced (a
+        # wrapper written as ``self.params = inner.params``) goes on sharing:
+        # left with the old one, it would run and report a value this node
+        # no longer holds.  Through its own setter, so a wrapper it is, or
+        # holds in turn, is followed; this node already holds ``value``, so
+        # a reference cycle ends here.
+        for held in list(attrs.values()):
+            if isinstance(held, SimulationNode) and held is not self \
+                    and getattr(held, "params", None) is old:
+                held.params = value
+
+    def _params_owner(self) -> Any:
+        """The wrapped node whose ``params`` are this node's
+        (:attr:`_params_owner_attr`), or ``None``: for a node that wraps
+        nothing, and for a wrapper whose constructor has not attached its
+        node yet (the base constructor runs first, and stores a copy that
+        the wrapper's first assignment drops)."""
+        attr = self._params_owner_attr
+        if attr is None:
+            return None
+        owner = self.__dict__.get(attr)
+        return None if owner is self else owner
 
     # ------------------------------------------------------------------
     # Abstract interface
@@ -148,20 +1273,48 @@ class SimulationNode(ABC):
         """
         ...
 
-    def accepts_params(self) -> bool:
-        """True when :meth:`update` declares a ``params`` keyword.
+    def accepts_params(self, *, method: str = "update") -> bool:
+        """True when ``method`` (default :meth:`update`) declares a ``params`` keyword.
+
+        A ``**kwargs`` that would forward the keyword counts as declaring
+        it (the same rule ``ShardedStencilNode`` applies to
+        ``update_padded``); see :func:`_signature_takes_params`.
 
         Such nodes receive their entry of the graph parameter pytree on
         every call; the others keep the 3-argument contract and read
         constants from ``self.params`` (baked into the trace, so not
         differentiable through the graph).
-        """
-        try:
-            sig = inspect.signature(self.update)
-        except (TypeError, ValueError):
-            return False
-        return "params" in sig.parameters
 
+        Parameters
+        ----------
+        method : str, optional
+            Which entry point to inspect.  ``"update"`` (the default)
+            answers the graph's question.  ``"derivatives"`` and
+            ``"implicit_residual"`` answer the integrators' question:
+            :func:`~maddening.core.simulation.integrators.integrate_node`
+            and
+            :func:`~maddening.core.simulation.implicit.implicit_euler_step`
+            refuse a non-empty ``params`` for a node whose override of
+            the method they call has no ``params`` keyword, rather than
+            calling it without and integrating the constructor's
+            constants (the ``MADD-ANO-018`` shape).  Any other attribute
+            name is inspected the same way; a missing one is ``False``.
+
+        Notes
+        -----
+        The base-class :meth:`derivatives` and :meth:`implicit_residual`
+        take ``params``, so this is ``True`` for a node that does not
+        override them -- the base then raises ``NotImplementedError``
+        when called, which is the right outcome.  It is the *override
+        without the keyword* the integrators need to know about, and
+        that is what ``False`` means here.
+        """
+        fn = getattr(self, method, None)
+        if fn is None:
+            return False
+        return _signature_takes_params(fn)
+
+    @stability(StabilityLevel.EVOLVING)
     def param_specs(self) -> dict[str, ParamSpec]:
         """Per-parameter :class:`ParamSpec` for the leaves of
         :meth:`params_pytree`.
@@ -185,33 +1338,106 @@ class SimulationNode(ABC):
         """The node's differentiable parameters as a pytree of arrays.
 
         Default: every float-valued entry of ``self.params`` — Python
-        floats, floating-point arrays, and lists/tuples of numbers —
-        promoted to float32 arrays.  Ints, bools, strings and nested
-        dicts are structural (they change shapes or the trace) and are
-        excluded; they stay on the recompile path.
+        floats, floating-point arrays, and lists/tuples of numbers — as
+        arrays at the graph's working float precision.  Ints, bools,
+        strings and nested dicts are structural (they change shapes or
+        the trace) and are excluded; they stay on the recompile path.
+
+        Integer spellings of a declared constant
+        ----------------------------------------
+        One exception to "ints are structural": an integer-valued entry
+        (``stiffness=100``, ``inertia=(1, 2, 3)``, an integer array) whose
+        key :meth:`param_specs` declares with ``trainable=True`` is a
+        physical constant somebody spelled without a decimal point, not a
+        shape, and is promoted to the working float precision like the
+        float spelling of the same number.  Until 0.4.0 shipped it was
+        dropped: ``SpringDamperNode(stiffness=100, mass=2)`` left both out
+        of ``gm.params``, so a fit or an FIM over the graph never saw them
+        and nothing said so.  An integer whose key has no spec, or a spec
+        with ``trainable=False`` (``n_cells``, an ``initial_*`` entry),
+        stays structural.  ``bool`` is never promoted.  So a node that
+        declares a spec for a structural integer must declare it
+        ``trainable=False``: the default ``ParamSpec()`` is trainable, and
+        a promoted ``n_cells`` would reach ``update`` as a traced float.
+
+        Precision
+        ---------
+        A value that carries a floating dtype of its own — an array, a
+        numpy scalar — keeps it.  A value that carries none — a Python
+        float, a list of them — is placed at JAX's canonical float
+        precision, resolved the way :class:`AdaptiveNode` resolves it
+        (``jnp.zeros(()).dtype``): float32 by default, float64 under
+        ``jax_enable_x64``.  Either way nothing is narrowed *below* the
+        precision the rest of the graph is working in.
+
+        That last clause is the part that used to fail.  ``float`` was
+        pinned to ``float32`` outright, and ``numpy.float64`` is a
+        subclass of ``float``, so under ``jax_enable_x64`` a Python
+        float, an ``np.float64`` scalar and a list of floats all came
+        back float32 — a 1.7e-8 relative shift, no warning — while *the
+        same value* written as a 0-d array, a 1-d array or a ``jnp``
+        float64 array came back float64.  One value, two dtypes, two
+        answers; and an :class:`AdaptiveNode` that solved in float64
+        while its parameters, gradients and diagnostics were float32,
+        so its ``check_gradient_capture()`` evaluated at a point the
+        state had not been built at.
 
         ``GraphManager.compile`` snapshots this into
         ``GraphManager.params["nodes"][name]`` for nodes whose
         :meth:`update` accepts ``params``.
         """
+        canonical = jnp.zeros(()).dtype
         out: dict = {}
+        # Read lazily: most nodes have no integer entry at all, and
+        # ``param_specs`` is a subclass hook.
+        declared: Optional[set] = None
+
+        def declared_trainable(key: str) -> bool:
+            nonlocal declared
+            if declared is None:
+                declared = {
+                    k for k, spec in (self.param_specs() or {}).items()
+                    if spec.trainable
+                }
+            return key in declared
+
         for key, value in self.params.items():
-            if isinstance(value, (bool, int, str, dict)) or value is None:
+            if isinstance(value, (bool, str, dict)) or value is None:
                 continue
-            if isinstance(value, float):
-                out[key] = jnp.asarray(value, dtype=jnp.float32)
+            if isinstance(value, int):
+                # A Python int: structural unless declared a trainable
+                # constant (see "Integer spellings" above).  ``float()``
+                # first, so an int too wide for int32 still converts.
+                if declared_trainable(key):
+                    out[key] = jnp.asarray(float(value), dtype=canonical)
                 continue
-            # Arrays, tracers (a node built inside a traced function),
-            # and lists/tuples of numbers.  Anything jnp can't turn into
-            # a floating array is structural and skipped.
+            if isinstance(value, float) and not isinstance(value, np.generic):
+                # A Python float states a value, not a precision, so it
+                # takes the working one.  ``np.float64`` is a ``float``
+                # subclass but *does* carry a dtype, so it goes the array
+                # way below and is treated exactly like the same number
+                # spelled as a 0-d array.
+                out[key] = jnp.asarray(value, dtype=canonical)
+                continue
+            # Arrays, numpy scalars, tracers (a node built inside a
+            # traced function), and lists/tuples of numbers.  Anything
+            # jnp can't turn into a floating array is structural and
+            # skipped.
             try:
                 arr = jnp.asarray(value)
             except (TypeError, ValueError):
                 continue
-            if arr.size == 0 or not jnp.issubdtype(arr.dtype, jnp.floating):
+            if arr.size == 0:
+                continue
+            if jnp.issubdtype(arr.dtype, jnp.integer):
+                # ``(1, 2, 3)``, ``np.int64(2)``, an integer array.
+                if declared_trainable(key):
+                    out[key] = arr.astype(canonical)
+                continue
+            if not jnp.issubdtype(arr.dtype, jnp.floating):
                 continue
             if isinstance(value, (list, tuple)):
-                arr = arr.astype(jnp.float32)
+                arr = arr.astype(canonical)
             out[key] = arr
         return out
 
@@ -262,8 +1488,168 @@ class SimulationNode(ABC):
         outside the state, closing over them in ``update()``.  JAX bakes
         them into the JIT-compiled HLO as constants, which is exactly
         what we want for a 1 GB FVM mesh.
+
+        Derived from a parameter
+        ------------------------
+        A static built in ``__init__`` from ``self.params`` goes stale
+        when that parameter is written: a live write does not mark the
+        graph dirty (interactive edits stay cheap that way) and
+        :meth:`static_data_hash` covers shape and dtype, never contents,
+        so the drift check cannot see it either.  Declare the link in
+        :meth:`static_data_deps`; ``compile()`` then refuses the one
+        case that is unfixable, a static derived from a *trainable*
+        parameter, which no amount of rebuilding could make
+        differentiable.
+
+        Wrappers
+        --------
+        The default is **not** an empty dict for a node that wraps
+        others: it forwards, returning the merged ``static_data`` of
+        every :class:`SimulationNode` held as an instance attribute.
+        A wrapper that declares no statics of its own therefore reports
+        the statics of the node it wraps, and
+        :meth:`static_data_hash` -- the signal
+        :meth:`~maddening.core.graph_manager.GraphManager._check_static_data_dirty`
+        watches -- moves when those change.  Without the forwarding a
+        wrapped node's statics were invisible to the graph, which sees
+        only the outermost object, and the drift check could never fire
+        for exactly the nodes (the sharded wrappers) that cache a
+        materialisation of them.  Forwarding composes, so
+        ``HybridNode(ShardedStencilNode(inner))`` reports ``inner``'s
+        statics through both levels; re-entrancy is guarded, so a cycle
+        between two nodes terminates (and contributes nothing).
+
+        What is reported is the wrapped node's **declaration** -- the
+        :class:`~maddening.core.static_data.StaticArray` as the node
+        built it, full shape, ``replication`` and ``shard_axis`` intact
+        -- never a wrapper's materialised per-device view.  Three
+        reasons, and getting this backwards makes every compile look
+        like drift:
+
+        * the hash is over ``(key, shape, dtype, replication,
+          shard_axis)``, and a materialised shard is a bare
+          ``jax.Array`` that has lost ``replication`` and
+          ``shard_axis``; ``coerce_static_data_value`` raises
+          ``MigrationError`` on a bare array, so hashing one would not
+          merely be wrong, it would fail;
+        * materialising costs a ``device_put`` per array, and this
+          property is read on every ``step()`` via the drift check --
+          precisely the per-frame host overhead the cached
+          materialisation exists to avoid;
+        * a per-device view is a function of the mesh, not of the
+          node's statics.  "The statics changed" is a property of the
+          declaration; an unchanged node must hash the same however
+          many devices it is spread over.
+
+        A wrapper that does declare statics of its own overrides this
+        and should merge ``super().static_data`` in, or the nodes it
+        wraps drop out of the hash again.
         """
-        return {}
+        return self._wrapped_static_data()
+
+    def _wrapped_static_data(self) -> dict:
+        """Merged ``static_data`` of every node held as an attribute.
+
+        The default :attr:`static_data` of a node that declares none of
+        its own; see that property for the contract and the reasoning.
+
+        Returns
+        -------
+        dict
+            ``{}`` when this node wraps nothing.  Otherwise the union of
+            the wrapped nodes' ``static_data``, in attribute order.  Two
+            wrapped nodes declaring the same key keep both entries, the
+            second qualified by the attribute holding it, rather than
+            one silently displacing the other and going unhashed.
+        """
+        return _merge_from_wrapped(
+            self, lambda inner: inner.static_data, "_collecting_static_data",
+        )
+
+    @stability(StabilityLevel.STABLE)
+    def static_data_deps(self) -> dict[str, tuple[str, ...]]:
+        """Which parameters each entry of :attr:`static_data` derives from.
+
+        Default: ``{}`` for a leaf node, and -- like :attr:`static_data`
+        and :meth:`invalidate_static_cache` -- the merged declaration of
+        every node this one wraps otherwise, keyed by the same rule.
+
+        The same *rule*, not necessarily the same *keys*.
+        ``_merge_from_wrapped`` qualifies a key with the attribute
+        holding it only when two wrapped nodes collide on it, and
+        colliding is a property of the dict being merged: a wrapper over
+        two nodes that both publish ``table``, where only the second
+        declares a dependency, publishes ``static_data`` keys
+        ``table`` and ``inner_b.table`` but a declaration under ``table``
+        alone.  Nothing consumes the pairing today --
+        :func:`static_data_dep_violations` walks every node separately
+        and resolves each declaration against that node's own pytree, so
+        a mis-keyed wrapper entry can neither hide nor invent a
+        violation -- and the D10 step-4 rebuild hook, which would key a
+        rebuild off exactly this pairing, has to make the qualification
+        unconditional before it can rely on it.
+
+        Returns
+        -------
+        dict[str, tuple[str, ...]]
+            ``{static_data_key: (param_key, ...)}``.  A static with no
+            entry declares nothing: one built from literals, read from a
+            file, or passed in by the caller has no parameter to name.
+
+        What to declare
+        ---------------
+        The statics whose **contents the compiled step reads**, and for
+        each, the ``self.params`` keys those contents were computed
+        from.  Both halves are load-bearing:
+
+        * *contents*, not shape.  :meth:`static_data_hash` covers
+          ``(shape, dtype, replication, shard_axis)`` and deliberately
+          never the values, so a static rebuilt at the same shape from a
+          different parameter value is invisible to it.  A live write to
+          a parameter does not mark the graph dirty either -- that is
+          what makes interactive slider edits cheap.  This declaration
+          is the only place the link is written down.
+        * *read by the step*.  A static the node publishes but whose
+          values ``update()`` never looks at bakes nothing into the HLO,
+          so there is no derivative for the graph to lose and nothing to
+          declare.  ``HeatNode`` is exactly that case on its uniform
+          grid: ``grid_x`` is built from ``length``, but the uniform
+          Laplacian recomputes ``dx = length / n_cells`` from the
+          *traced* parameter and never reads ``grid_x``.
+
+        Why a trainable dependency is refused
+        -------------------------------------
+        :meth:`~maddening.core.graph_manager.GraphManager.compile`
+        raises when a declared dependency names a parameter that is both
+        a leaf of :meth:`params_pytree` and left trainable by
+        :meth:`param_specs`.  A static is baked into the compiled HLO as
+        a constant while a trainable parameter is traced; deriving the
+        first from the second means the gradient the graph reports is
+        missing the term through the static -- silently, and in exactly
+        the direction an optimiser is pushing.  You cannot have both, so
+        it is an error rather than a feature.  The two ways out are to
+        mark the parameter ``ParamSpec(trainable=False)``, or to stop
+        deriving the static from it and compute the quantity inside
+        ``update()`` from the traced parameter instead.
+
+        A structural parameter is never a violation: an ``int``, ``str``
+        or ``bool`` never reaches :meth:`params_pytree`, nothing
+        differentiates through it, and baking it is what the static
+        channel is for.
+
+        Notes
+        -----
+        Declaring a dependency does not yet *rebuild* anything.  A write
+        to a declared non-trainable dependency still leaves the static
+        as ``__init__`` built it; recovering it means reconstructing the
+        node.  The rebuild hook and the ``set_node_params`` integration
+        are D10 steps 4 and 5, deferred to 0.5.0.
+        """
+        return _merge_from_wrapped(
+            self,
+            lambda inner: inner.static_data_deps(),
+            "_collecting_static_data_deps",
+        )
 
     def static_data_hash(self) -> int:
         """Stable hash over :attr:`static_data` for JIT cache invalidation.
@@ -302,9 +1688,106 @@ class SimulationNode(ABC):
                 items.append((str(k), repr(v)))
         return hash(tuple(items))
 
+    @stability(StabilityLevel.STABLE)
+    def invalidate_static_cache(self) -> None:
+        """Drop any cached materialisation of this node's static data.
+
+        Part of the node contract rather than a duck-typed hook: a node
+        that keeps a derived copy of :attr:`static_data` (the sharded
+        wrappers cache the per-device placement) overrides this to drop
+        it, and :meth:`~maddening.core.graph_manager.GraphManager.compile`
+        calls it on every node so that a rebuild is a clean slate.
+
+        The default is a no-op for the node itself and **forwards to every
+        node this one wraps**, found by scanning the instance attributes
+        for :class:`SimulationNode` values.  Without that, a cache one
+        level down -- a ``ShardedStencilNode`` inside a
+        :class:`~maddening.core.simulation.hybrid_node.HybridNode`, say --
+        is invisible to the graph, which sees only the outermost object
+        and would trace a rebuilt step against the previous buffer.
+        Re-entrancy is guarded, so a cycle between two nodes terminates.
+
+        A wrapper that overrides this must call ``super()`` so the chain
+        keeps going.  A node that holds its inner nodes in a list or dict
+        rather than in a plain attribute must forward to them itself.
+
+        Notes
+        -----
+        Cheap and idempotent by contract: it runs once per node per
+        ``compile()``, and the cost of a re-materialisation is paid
+        lazily on the next trace, not here.
+        """
+        if getattr(self, "_invalidating_static_cache", False):
+            return
+        # ``object.__setattr__`` so a node built as a frozen dataclass
+        # can still carry the guard.  A node that refuses the attribute
+        # outright (``__slots__``) has no ``__dict__`` for the scan
+        # below to walk, so it forwards to nothing and the recursion
+        # stops there with or without a guard.
+        try:
+            object.__setattr__(self, "_invalidating_static_cache", True)
+        except (AttributeError, TypeError):
+            pass
+        try:
+            for value in list(getattr(self, "__dict__", {}).values()):
+                if isinstance(value, SimulationNode):
+                    value.invalidate_static_cache()
+        finally:
+            try:
+                object.__setattr__(self, "_invalidating_static_cache", False)
+            except (AttributeError, TypeError):
+                pass
+
     # ------------------------------------------------------------------
     # UQ interface (Section 9.4)
     # ------------------------------------------------------------------
+
+    def update_evaluations(self) -> Optional[float]:
+        """How many evaluations' worth of float rounding one ``update`` carries.
+
+        Read by the coupling diagnostics' float floor
+        (:func:`~maddening.core.coupling.acceleration.residual_precision_floor`).
+        The residual a coupling group measures is ``F~(x) - x`` for the
+        one-pass map *as float arithmetic evaluates it*, and a distance
+        bound built on it has to add the map's evaluation error: once a
+        slow group stalls, that error is the whole bound.  The floor
+        models it as
+        :data:`~maddening.core.coupling.acceleration.PRECISION_FLOOR_ULPS`
+        units of ``eps * max|field|`` per evaluation, and an ``update``
+        that sub-steps internally is several evaluations, not one: an
+        explicit Euler update taking ``N`` sub-steps, each moving its
+        field by less than half an ulp, rounds every one of them away,
+        and its evaluation error grows with ``N`` (measured, float32:
+        about 29 units at ``N = 100`` against the 4 a single evaluation
+        is allowed).
+
+        Returns
+        -------
+        float or None
+            * ``N >= 1`` if ``update`` advances its own state through
+              ``N`` sequential sub-steps, or otherwise rounds its outputs
+              as often as that; ``1`` for a single explicit step, a relay,
+              or any update that rounds each output entry a few times.
+              For an internal iterative solve, a count ``N`` for which
+              ``PRECISION_FLOOR_ULPS * N * eps`` covers the solve's
+              relative tolerance.
+            * ``None`` (the default): not declared.  The floor then
+              counts the update as one evaluation, and a coupling group
+              containing the node reports ``spectral_usable=False`` (so
+              ``gradient_bound_usable=False``) wherever its residual is
+              at that floor -- ``precision_limited`` -- because there the
+              unchecked count *is* the bound.  Above the floor the count
+              carries less than half of it, but a long undeclared loop
+              can still exceed it: declare it.
+
+        The framework's own sub-cycling (``subcycling=True``) is counted
+        separately and needs no declaration: a node evaluated ``d``
+        times per coupling pass contributes ``d * update_evaluations()``
+        (see ``GraphManager.coupling_diagnostics``).  Declaring more than
+        the update performs only loosens the bound; declaring less makes
+        it read low.
+        """
+        return None
 
     def uncertainty_spec(self) -> Optional["UncertaintySpec"]:  # type: ignore[name-defined]
         """Return the UQ specification for this node, or None.
@@ -346,6 +1829,10 @@ class SimulationNode(ABC):
         dt: float,
         *,
         static_padded: dict | None = None,
+        # Spells only the int-keyed entries; the one str key,
+        # ShardedUnstructuredNode's "n_local", is documented below.
+        # Widening it changes a recorded STABLE signature, which
+        # scripts/check_stable_signatures.py classifies as breaking.
         shard_info: dict[int, tuple[Any, int]] | None = None,
     ) -> dict:
         """Update from halo-padded state.
@@ -355,6 +1842,13 @@ class SimulationNode(ABC):
         declared width on each side of the relevant spatial axis.  The
         return value is expected to have the same padded shape; the
         sharding wrapper strips halos afterwards.
+
+        ``ShardedUnstructuredNode`` calls the same method with a
+        different layout -- each field is ``[the shard's own cells |
+        ghost cells]`` in partition order, not ``[halo | interior |
+        halo]`` -- so a node is written for one wrapper or the other.
+        That wrapper refuses a node that declares a non-empty
+        :meth:`halo_width` (see its docstring).
 
         Default: pointwise nodes (empty ``halo_width()``) fall back to
         :meth:`update`.  Stencil nodes that have not been ported must
@@ -373,18 +1867,47 @@ class SimulationNode(ABC):
             ``{static_data_key: halo_padded_slab}`` for each
             :class:`~maddening.core.static_data.StaticArray` declared with
             ``replication="shard"`` on this node.  The wrapper has
-            materialised the per-device slice and halo-exchanged it
-            (``boundary="edge"`` — statics don't evolve, so periodic
-            wrap would be wrong even when state uses periodic).  ``None``
-            in the unsharded path and when the node carries no sharded
-            statics.
-        shard_info : dict[int, tuple[Any, int]], optional
+            materialised the per-device slice and halo-exchanged it.  At
+            the edges of the global grid the static's halo is filled
+            periodically when the wrapper's ``boundary`` is
+            ``"periodic"`` -- the cells beyond a periodic edge are the
+            opposite edge's, for a static as much as for the state -- and
+            by repeating the edge cell under ``"edge"`` and ``"zero"``,
+            where there is no cell beyond the edge.  (Until 0.4.0 it was
+            edge-filled under every mode.)  ``None`` in the unsharded
+            path and when the node carries no sharded statics.
+        shard_info : dict, optional
             ``{spatial_axis: (global_offset, local_extent)}`` for every
             spatial axis the wrapping :class:`ShardedStencilNode` shards.
             ``global_offset`` is a **traced JAX scalar**
             (``lax.axis_index * local_extent``) — usable in
             ``jax.lax.dynamic_slice`` but **not** in Python integer
             slicing.  ``None`` in the unsharded path.
+            ``ShardedUnstructuredNode`` passes ``{0: (offset,
+            n_local_max), "n_local": n_owned}``: ``n_local_max`` is the
+            padded length of the owned block, the same on every shard;
+            ``n_owned`` (a traced int32 scalar, added in 0.4.0) is this
+            shard's own cell count, and rows from ``n_owned`` on are
+            padding that a node summing its cells must mask out
+            (``jnp.arange(n_local_max) < shard_info["n_local"]``).
+            So the keys are ``int`` spatial axes, each mapped to an
+            ``(offset, extent)`` tuple, plus, from the unstructured
+            wrapper only, the one ``str`` key ``"n_local"``, mapped to a
+            scalar.  The annotation,
+            ``dict[int, tuple[Any, int]] | None``, spells only the
+            ``int``-keyed entries.
+
+            **Iterate over the integer keys only; ``"n_local"`` is the
+            one string key.**  ``for axis, (offset, extent) in
+            shard_info.items()`` unpacks ``"n_local"``'s scalar as a
+            tuple and fails under ``ShardedUnstructuredNode``.  Filter
+            the keys instead::
+
+                for axis in (k for k in shard_info if isinstance(k, int)):
+                    offset, extent = shard_info[axis]
+
+            or index the axis you shard (``shard_info[0]``).  No other
+            ``str`` key is passed by any wrapper in 0.4.0.
 
         Sharded outputs
         ---------------
@@ -415,6 +1938,13 @@ class SimulationNode(ABC):
         on the shards of one pencil row, or a per-slab integral.  An
         empty tuple means no reduction: the per-shard partial values are
         stacked.  Values must be floating-point.
+
+        "The mesh" is the axes that split the node's cells: a mesh axis
+        the wrapper does not shard along (one a ``ShardedStencilNode``'s
+        ``axis_map`` leaves unused, every axis but a
+        ``ShardedUnstructuredNode``'s own) holds a copy of the same block
+        on every device, and an integral is neither reduced nor stacked
+        over it; it is replicated along it.
         """
         return {}
 
@@ -428,7 +1958,8 @@ class SimulationNode(ABC):
         every mesh axis.
 
         Declaring a key here tells :class:`ShardedStencilNode` to apply
-        ``jax.lax.psum`` across the full mesh after
+        ``jax.lax.psum`` across the full mesh (every mesh axis that splits
+        the grid; see :meth:`domain_integral_axes`) after
         :meth:`update_padded` returns.  Values must be floating-point
         (``psum`` on integer dtypes risks wrap).
 
@@ -476,7 +2007,7 @@ class SimulationNode(ABC):
         return {}
 
     def derivatives(
-        self, state: dict, boundary_inputs: dict
+        self, state: dict, boundary_inputs: dict, *, params=None,
     ) -> dict[str, Any]:
         """Compute time derivatives of the state fields.
 
@@ -487,6 +2018,38 @@ class SimulationNode(ABC):
         This enables pluggable integration (RK4, etc.) at the graph
         level.  Default raises ``NotImplementedError`` -- override in
         nodes that have a natural ODE form.
+
+        Parameters
+        ----------
+        state : dict
+            Current state.
+        boundary_inputs : dict
+            Boundary inputs for this evaluation.
+        params : dict, optional
+            The node's entry of the graph parameter pytree.  A node that
+            takes ``params`` in :meth:`update` must take it here too and
+            read its constants by the same ``{**self.params, **params}``
+            rule, so that a value calibrated through ``gm.params`` or
+            :func:`maddening.sysid.fit` drives
+            :func:`~maddening.core.simulation.integrators.integrate_node`
+            exactly as it drives :meth:`update`.  ``None`` (the default)
+            reads ``self.params``, the constructor's values.
+
+        Notes
+        -----
+        An override may still be declared without the keyword
+        (``def derivatives(self, state, boundary_inputs)``); it keeps
+        working for every caller that passes no ``params``.  What it
+        cannot do is have one silently dropped for it:
+        ``integrate_node`` refuses a non-empty ``params`` for such a
+        node with a ``ValueError`` naming the class and the method,
+        because calling it without would integrate the constructor's
+        constants while ``update`` used the calibrated ones.  That
+        silent divergence -- a factor of four on a spring calibrated
+        from 100 to 400, from one node object -- was ``MADD-ANO-018``,
+        resolved in 0.4.0 by this keyword; before it existed there was
+        no way to deliver the value at all.
+        ``accepts_params(method="derivatives")`` is the probe.
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not implement derivatives(). "
@@ -499,6 +2062,8 @@ class SimulationNode(ABC):
         state_old: dict,
         boundary_inputs: dict,
         dt: float,
+        *,
+        params=None,
     ) -> dict[str, Any]:
         """Compute the residual for implicit (backward Euler) integration.
 
@@ -512,6 +2077,30 @@ class SimulationNode(ABC):
 
         Default raises ``NotImplementedError`` -- override in nodes
         that need implicit time integration (e.g., stiff systems).
+
+        Parameters
+        ----------
+        state_new : dict
+            The unknown state the Newton iteration is solving for.
+        state_old : dict
+            State at the beginning of the timestep.
+        boundary_inputs : dict
+            Boundary inputs for this step.
+        dt : float
+            Timestep.
+        params : dict, optional
+            Same contract as :meth:`derivatives`: the node's entry of
+            the graph parameter pytree, read as
+            ``{**self.params, **params}``.  Every in-tree override
+            builds its residual from
+            ``self.derivatives(state_new, boundary_inputs, params=params)``,
+            so a calibrated value reaches the implicit solve through the
+            same door it reaches :meth:`update`.
+            :func:`~maddening.core.simulation.implicit.implicit_euler_step`
+            forwards its own ``params`` keyword here, and refuses a
+            non-empty one for an override that has no such keyword
+            rather than solving with the constructor's constants
+            (``MADD-ANO-018``, resolved in 0.4.0).
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not implement implicit_residual()."
@@ -581,10 +2170,56 @@ class SimulationNode(ABC):
     # ------------------------------------------------------------------
 
     def to_dict(self) -> dict:
-        """Serialise the node descriptor (not runtime state)."""
+        """Serialise the node descriptor (not runtime state).
+
+        ``params`` is a copy in plain containers
+        (:func:`_detached_config`), not the node's own ``params``.  It
+        used to be that mapping itself, so writing into a config wrote
+        into the node (MADD-ANO-205).
+
+        ``params`` is all of the node that is saved: a reload calls
+        ``type(node)(name=..., timestep=..., **params)``.  A constructor
+        argument the class keeps anywhere else (``self.stiffness =
+        stiffness``) is not in the entry, and the reloaded node has the
+        default.  When the node was constructed with such an argument, at
+        a value other than its default, this method says so with a
+        ``UserWarning`` naming the node, its class, the arguments and the
+        fix (:func:`_unsaved_constructor_arguments` states the rule and
+        what it cannot tell).  Until 0.4.0 nothing said so.  A warning and
+        not an error, so that such a node can still be saved.  The rule
+        goes by the argument's name, so a class that saves an argument
+        another way is named as well: it overrides ``to_dict`` (calling
+        this one is enough), and is then not asked here.  A USD stage
+        carries ``params`` only, so ``save_graph_to_usd`` asks such a class
+        all the same; and ``GraphManager.to_dict`` writes, for a node whose
+        ``update`` takes ``params``, the live values of the keys of
+        ``node.params`` into the ``params`` an override returns, keeping
+        the keys the override adds there.
+        """
+        _warn_of_unsaved_constructor_arguments(self)
         return {
             "type": type(self).__name__,
             "name": self.name,
             "timestep": self.delta_t,
-            "params": self.params,
+            "params": _detached_config(self.params),
         }
+
+
+def _constructor_signature_for_new() -> inspect.Signature:
+    """``__init__``'s signature, with ``cls`` for ``self``: what
+    ``SimulationNode.__new__`` presents to ``inspect.signature``.
+
+    ``inspect.signature(cls)`` reads whichever of ``__new__`` and
+    ``__init__`` comes first along the MRO.  A node class that defines its
+    own ``__init__`` is unaffected; one that inherits the base constructor
+    would otherwise show ``(*args, **kwargs)`` in ``help()`` and in the
+    generated documentation where it showed ``(name, timestep, **params)``.
+    """
+    init = _init_signature(SimulationNode)
+    assert init is not None
+    parameters = list(init.parameters.values())
+    cls = inspect.Parameter("cls", inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    return init.replace(parameters=[cls, *parameters[1:]])
+
+
+setattr(SimulationNode.__new__, "__signature__", _constructor_signature_for_new())

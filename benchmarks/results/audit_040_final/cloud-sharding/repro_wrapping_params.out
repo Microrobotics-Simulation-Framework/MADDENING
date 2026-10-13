@@ -1,0 +1,30 @@
+devices: 4
+
+== 1. params= injected through the wrapper reaches inner.update_padded ==
+   rate=0.25 dev=1: err=0.00e+00 OK
+   rate=0.25 dev=2: err=0.00e+00 OK
+   rate=0.25 dev=4: err=0.00e+00 OK
+   rate=0.75 dev=1: err=5.96e-08 OK
+   rate=0.75 dev=2: err=5.96e-08 OK
+   rate=0.75 dev=4: err=5.96e-08 OK
+
+== 2. inner.update_padded declared with **kwargs ==
+   _inner_accepts_static_padded = True
+   _inner_accepts_shard_info    = True
+   _inner_accepts_params        = False   <-- var-keyword NOT recognised (sharded_node.py:284)
+   injected rate=0.9 honoured? err vs reference = 2.344e-03 *** PARAMS SILENTLY DROPPED ***
+   with params vs without params: max diff = 0.000e+00 (params had NO effect)
+
+== 3. HybridNode wrapping a sharded node ==
+   HybridNode(Sharded(inner)).update err = 0.00e+00 OK
+   accepts_params=True  params_pytree keys=['rate']
+
+== 4. sharded node inside a GraphManager: does params reach it? ==
+   gm.params['nodes'] keys: ['diff']
+   diff params: ['rate']
+   step with rate=0.5 vs rate=2.0 differ? max diff = 8.791e-03 OK (params reach the sharded node)
+
+== 5. d/d(rate) through a **kwargs inner node under the sharded wrapper ==
+   unsharded reference           d/d rate = -0.08005735
+   sharded, explicit params kwarg d/d rate = -0.08005735
+   sharded, **kwargs inner        d/d rate = 0.00000000   <-- SILENTLY ZERO

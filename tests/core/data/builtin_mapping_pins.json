@@ -1,0 +1,1706 @@
+{
+ "refusals": {
+  "bool given a number": {
+   "cause": "ValueError",
+   "message": "edge a.v -> b.inp: cannot rebuild interface mapping (kind 'rbf'): ValueError: mapping kind 'rbf': hyper-parameter 'polynomial' must be a bool, got 1",
+   "type": "MappingRebuildError"
+  },
+  "extra point set": {
+   "cause": "ValueError",
+   "message": "edge a.v -> b.inp: cannot rebuild interface mapping (kind 'matrix'): ValueError: mapping kind 'matrix' takes point sets ['H']; got ['G', 'H']",
+   "type": "MappingRebuildError"
+  },
+  "factory refuses the kernel": {
+   "cause": "ValueError",
+   "message": "edge a.v -> b.inp: cannot rebuild interface mapping (kind 'rbf'): ValueError: Unknown kernel 'cubic'; choose from ('gaussian', 'multiquadric', 'inverse_multiquadric', 'thin_plate_spline')",
+   "type": "MappingRebuildError"
+  },
+  "factory refuses the mode": {
+   "cause": "ValueError",
+   "message": "edge a.v -> b.inp: cannot rebuild interface mapping (kind 'nearest_neighbor'): ValueError: mode='sideways' not in ('consistent', 'conservative')",
+   "type": "MappingRebuildError"
+  },
+  "hyper-parameter another kind takes": {
+   "cause": "ValueError",
+   "message": "edge a.v -> b.inp: cannot rebuild interface mapping (kind 'nearest_neighbor'): ValueError: mapping kind 'nearest_neighbor' has no hyper-parameter(s) ['epsilon']; it takes ['mode']",
+   "type": "MappingRebuildError"
+  },
+  "label not a str": {
+   "cause": "ValueError",
+   "message": "edge a.v -> b.inp: cannot rebuild interface mapping (kind 'matrix'): ValueError: mapping kind 'matrix': hyper-parameter 'label' must be a str, got 5",
+   "type": "MappingRebuildError"
+  },
+  "missing matrix reference": {
+   "cause": "PointReferenceError",
+   "message": "edge a.v -> b.inp: cannot rebuild interface mapping (kind 'matrix'): PointReferenceError: mapping spec 'matrix' has no reference for ['H']; it was built from a point set too large to inline and without asset=",
+   "type": "MappingRebuildError"
+  },
+  "missing reference": {
+   "cause": "PointReferenceError",
+   "message": "edge a.v -> b.inp: cannot rebuild interface mapping (kind 'rbf'): PointReferenceError: mapping spec 'rbf' has no reference for ['source_points']; it was built from a point set too large to inline and without source_ref=",
+   "type": "MappingRebuildError"
+  },
+  "no points": {
+   "cause": "ValueError",
+   "message": "edge a.v -> b.inp: cannot rebuild interface mapping (kind 'rbf'): ValueError: mapping spec of kind 'rbf' has no 'points'; a mapping saved without point references cannot be rebuilt",
+   "type": "MappingRebuildError"
+  },
+  "points not a dict": {
+   "cause": "ValueError",
+   "message": "edge a.v -> b.inp: cannot rebuild interface mapping (kind 'nearest_neighbor'): ValueError: mapping spec of kind 'nearest_neighbor': 'points' must be a dict, got list",
+   "type": "MappingRebuildError"
+  },
+  "real given None": {
+   "cause": "ValueError",
+   "message": "edge a.v -> b.inp: cannot rebuild interface mapping (kind 'rbf'): ValueError: mapping kind 'rbf': hyper-parameter 'ridge' must be a real number, got None",
+   "type": "MappingRebuildError"
+  },
+  "real given a bool": {
+   "cause": "ValueError",
+   "message": "edge a.v -> b.inp: cannot rebuild interface mapping (kind 'rbf'): ValueError: mapping kind 'rbf': hyper-parameter 'epsilon' must be a real number, got True",
+   "type": "MappingRebuildError"
+  },
+  "real given a string": {
+   "cause": "ValueError",
+   "message": "edge a.v -> b.inp: cannot rebuild interface mapping (kind 'rbf'): ValueError: mapping kind 'rbf': hyper-parameter 'epsilon' must be a real number, got 'abc'",
+   "type": "MappingRebuildError"
+  },
+  "recorded shape differs": {
+   "cause": "ValueError",
+   "message": "edge a.v -> b.inp: cannot rebuild interface mapping (kind 'nearest_neighbor'): ValueError: rebuilt mapping has shape [3, 3] but the config recorded [3, 9]; the referenced point sets changed",
+   "type": "MappingRebuildError"
+  },
+  "str given a number": {
+   "cause": "ValueError",
+   "message": "edge a.v -> b.inp: cannot rebuild interface mapping (kind 'rbf'): ValueError: mapping kind 'rbf': hyper-parameter 'kernel' must be a str, got 3",
+   "type": "MappingRebuildError"
+  },
+  "unknown hyper-parameter": {
+   "cause": "ValueError",
+   "message": "edge a.v -> b.inp: cannot rebuild interface mapping (kind 'rbf'): ValueError: mapping kind 'rbf' has no hyper-parameter(s) ['sigma']; it takes ['kernel', 'epsilon', 'polynomial', 'ridge', 'mode']",
+   "type": "MappingRebuildError"
+  },
+  "wrong point sets": {
+   "cause": "ValueError",
+   "message": "edge a.v -> b.inp: cannot rebuild interface mapping (kind 'projection_1d'): ValueError: mapping kind 'projection_1d' takes point sets ['source_boundaries', 'target_boundaries']; got ['source_points']",
+   "type": "MappingRebuildError"
+  }
+ },
+ "rods_with_node_references": {
+  "config": "{\"nodes\": [{\"type\": \"HeatNode\", \"name\": \"coarse\", \"timestep\": 0.0001, \"params\": {\"n_cells\": 6, \"length\": 1.0, \"thermal_diffusivity\": 0.1, \"initial_temperature\": 0.0, \"stencil_order\": 2, \"grid_points\": null}}, {\"type\": \"HeatNode\", \"name\": \"fine\", \"timestep\": 0.0001, \"params\": {\"n_cells\": 12, \"length\": 1.0, \"thermal_diffusivity\": 0.1, \"initial_temperature\": 0.0, \"stencil_order\": 2, \"grid_points\": null}}], \"edges\": [{\"source_node\": \"coarse\", \"target_node\": \"fine\", \"source_field\": \"temperature\", \"target_field\": \"heat_source\", \"mapping\": {\"kind\": \"rbf\", \"mode\": \"consistent\", \"shape\": [12, 6], \"kernel\": \"gaussian\", \"epsilon\": 24.0, \"polynomial\": true, \"ridge\": 1e-08, \"points\": {\"source_points\": {\"node\": \"coarse\", \"field\": \"grid_x\", \"sha256\": \"8b6cb7ec86377d77f636f3869cc5f994ce50dd2f480b61c758c578c0d45c490b\"}, \"target_points\": {\"node\": \"fine\", \"field\": \"grid_x\", \"sha256\": \"ba24aeb27cacd07d2174c39955f32fa41360f984d304bbc81be0c88e89c27ce1\"}}}}, {\"source_node\": \"fine\", \"target_node\": \"coarse\", \"source_field\": \"temperature\", \"target_field\": \"heat_source\", \"mapping\": {\"kind\": \"nearest_neighbor\", \"mode\": \"conservative\", \"shape\": [6, 12], \"points\": {\"source_points\": {\"node\": \"fine\", \"field\": \"grid_x\", \"sha256\": \"ba24aeb27cacd07d2174c39955f32fa41360f984d304bbc81be0c88e89c27ce1\"}, \"target_points\": {\"node\": \"coarse\", \"field\": \"grid_x\", \"sha256\": \"8b6cb7ec86377d77f636f3869cc5f994ce50dd2f480b61c758c578c0d45c490b\"}}}}], \"external_inputs\": []}",
+  "rebuilt_config": "{\"nodes\": [{\"type\": \"HeatNode\", \"name\": \"coarse\", \"timestep\": 0.0001, \"params\": {\"n_cells\": 6, \"length\": 1.0, \"thermal_diffusivity\": 0.1, \"initial_temperature\": 0.0, \"stencil_order\": 2, \"grid_points\": null}}, {\"type\": \"HeatNode\", \"name\": \"fine\", \"timestep\": 0.0001, \"params\": {\"n_cells\": 12, \"length\": 1.0, \"thermal_diffusivity\": 0.1, \"initial_temperature\": 0.0, \"stencil_order\": 2, \"grid_points\": null}}], \"edges\": [{\"source_node\": \"coarse\", \"target_node\": \"fine\", \"source_field\": \"temperature\", \"target_field\": \"heat_source\", \"mapping\": {\"kind\": \"rbf\", \"mode\": \"consistent\", \"shape\": [12, 6], \"kernel\": \"gaussian\", \"epsilon\": 24.0, \"polynomial\": true, \"ridge\": 1e-08, \"points\": {\"source_points\": {\"node\": \"coarse\", \"field\": \"grid_x\", \"sha256\": \"8b6cb7ec86377d77f636f3869cc5f994ce50dd2f480b61c758c578c0d45c490b\"}, \"target_points\": {\"node\": \"fine\", \"field\": \"grid_x\", \"sha256\": \"ba24aeb27cacd07d2174c39955f32fa41360f984d304bbc81be0c88e89c27ce1\"}}}}, {\"source_node\": \"fine\", \"target_node\": \"coarse\", \"source_field\": \"temperature\", \"target_field\": \"heat_source\", \"mapping\": {\"kind\": \"nearest_neighbor\", \"mode\": \"conservative\", \"shape\": [6, 12], \"points\": {\"source_points\": {\"node\": \"fine\", \"field\": \"grid_x\", \"sha256\": \"ba24aeb27cacd07d2174c39955f32fa41360f984d304bbc81be0c88e89c27ce1\"}, \"target_points\": {\"node\": \"coarse\", \"field\": \"grid_x\", \"sha256\": \"8b6cb7ec86377d77f636f3869cc5f994ce50dd2f480b61c758c578c0d45c490b\"}}}}], \"external_inputs\": []}",
+  "rebuilt_weights": {
+   "coarse.temperature->fine.heat_source": {
+    "H": {
+     "dtype": "float32",
+     "shape": [
+      12,
+      6
+     ],
+     "values": [
+      [
+       0.7347044944763184,
+       0.2622363567352295,
+       0.1576477587223053,
+       0.05305909365415573,
+       -0.051529526710510254,
+       -0.1561182141304016
+      ],
+      [
+       0.6632289886474609,
+       0.2194661796092987,
+       0.14333616197109222,
+       0.0673295259475708,
+       -0.00867709144949913,
+       -0.08468375355005264
+      ],
+      [
+       0.27658092975616455,
+       0.5758870244026184,
+       0.13955776393413544,
+       0.07110794633626938,
+       0.0026581049896776676,
+       -0.0657917708158493
+      ],
+      [
+       0.20506411790847778,
+       0.5330512523651123,
+       0.12540246546268463,
+       0.08538657426834106,
+       0.04549407213926315,
+       0.005601547192782164
+      ],
+      [
+       0.18617229163646698,
+       0.15395990014076233,
+       0.4893798828125,
+       0.08916500955820084,
+       0.05682932585477829,
+       0.024493582546710968
+      ],
+      [
+       0.11477874964475632,
+       0.11100029945373535,
+       0.47510209679603577,
+       0.10356692224740982,
+       0.09966516494750977,
+       0.09588678181171417
+      ],
+      [
+       0.09588691592216492,
+       0.0996653139591217,
+       0.10356709361076355,
+       0.4751012325286865,
+       0.11100050061941147,
+       0.11477896571159363
+      ],
+      [
+       0.024493515491485596,
+       0.05682921037077904,
+       0.0891648679971695,
+       0.48938074707984924,
+       0.15395966172218323,
+       0.1861720085144043
+      ],
+      [
+       0.005601561162620783,
+       0.04549410939216614,
+       0.08538665622472763,
+       0.125402569770813,
+       0.5330508351325989,
+       0.20506426692008972
+      ],
+      [
+       -0.06579168885946274,
+       0.0026580956764519215,
+       0.07110787183046341,
+       0.1395576000213623,
+       0.5758875608444214,
+       0.2765805721282959
+      ],
+      [
+       -0.08468380570411682,
+       -0.008677109144628048,
+       0.06732958555221558,
+       0.14333626627922058,
+       0.21946629881858826,
+       0.6632287502288818
+      ],
+      [
+       -0.15611803531646729,
+       -0.05152948573231697,
+       0.05305905267596245,
+       0.15764759480953217,
+       0.2622360587120056,
+       0.734704852104187
+      ]
+     ]
+    }
+   },
+   "fine.temperature->coarse.heat_source": {
+    "H": {
+     "dtype": "float32",
+     "shape": [
+      6,
+      12
+     ],
+     "values": [
+      [
+       1.0,
+       1.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       1.0,
+       1.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       1.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       1.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       1.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       1.0
+      ]
+     ]
+    }
+   }
+  },
+  "weights": {
+   "coarse.temperature->fine.heat_source": {
+    "H": {
+     "dtype": "float32",
+     "shape": [
+      12,
+      6
+     ],
+     "values": [
+      [
+       0.7347044944763184,
+       0.2622363567352295,
+       0.1576477587223053,
+       0.05305909365415573,
+       -0.051529526710510254,
+       -0.1561182141304016
+      ],
+      [
+       0.6632289886474609,
+       0.2194661796092987,
+       0.14333616197109222,
+       0.0673295259475708,
+       -0.00867709144949913,
+       -0.08468375355005264
+      ],
+      [
+       0.27658092975616455,
+       0.5758870244026184,
+       0.13955776393413544,
+       0.07110794633626938,
+       0.0026581049896776676,
+       -0.0657917708158493
+      ],
+      [
+       0.20506411790847778,
+       0.5330512523651123,
+       0.12540246546268463,
+       0.08538657426834106,
+       0.04549407213926315,
+       0.005601547192782164
+      ],
+      [
+       0.18617229163646698,
+       0.15395990014076233,
+       0.4893798828125,
+       0.08916500955820084,
+       0.05682932585477829,
+       0.024493582546710968
+      ],
+      [
+       0.11477874964475632,
+       0.11100029945373535,
+       0.47510209679603577,
+       0.10356692224740982,
+       0.09966516494750977,
+       0.09588678181171417
+      ],
+      [
+       0.09588691592216492,
+       0.0996653139591217,
+       0.10356709361076355,
+       0.4751012325286865,
+       0.11100050061941147,
+       0.11477896571159363
+      ],
+      [
+       0.024493515491485596,
+       0.05682921037077904,
+       0.0891648679971695,
+       0.48938074707984924,
+       0.15395966172218323,
+       0.1861720085144043
+      ],
+      [
+       0.005601561162620783,
+       0.04549410939216614,
+       0.08538665622472763,
+       0.125402569770813,
+       0.5330508351325989,
+       0.20506426692008972
+      ],
+      [
+       -0.06579168885946274,
+       0.0026580956764519215,
+       0.07110787183046341,
+       0.1395576000213623,
+       0.5758875608444214,
+       0.2765805721282959
+      ],
+      [
+       -0.08468380570411682,
+       -0.008677109144628048,
+       0.06732958555221558,
+       0.14333626627922058,
+       0.21946629881858826,
+       0.6632287502288818
+      ],
+      [
+       -0.15611803531646729,
+       -0.05152948573231697,
+       0.05305905267596245,
+       0.15764759480953217,
+       0.2622360587120056,
+       0.734704852104187
+      ]
+     ]
+    }
+   },
+   "fine.temperature->coarse.heat_source": {
+    "H": {
+     "dtype": "float32",
+     "shape": [
+      6,
+      12
+     ],
+     "values": [
+      [
+       1.0,
+       1.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       1.0,
+       1.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       1.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       1.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       1.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       1.0
+      ]
+     ]
+    }
+   }
+  }
+ },
+ "spec_forms": {
+  "a label that is another kind's name is still a matrix": "{\"kind\": \"matrix\", \"label\": \"rbf\", \"mode\": \"consistent\", \"points\": {\"H\": {\"asset\": \"H.npy\"}}}",
+  "a user label names the matrix factory": "{\"kind\": \"matrix\", \"label\": \"supermesh\", \"mode\": \"consistent\", \"points\": {\"H\": {\"asset\": \"H.npy\"}}}",
+  "defaults filled by the factory, not the spec": "{\"kind\": \"rbf\", \"epsilon\": 2.0, \"points\": {\"source_points\": {\"inline\": [0.0, 0.5, 1.0], \"dtype\": \"float64\"}, \"target_points\": {\"inline\": [0.0, 0.5, 1.0], \"dtype\": \"float64\"}}}",
+  "mode dropped for a kind with a fixed mode": "{\"kind\": \"projection_1d\", \"points\": {\"source_boundaries\": {\"inline\": [0.0, 0.5, 1.0], \"dtype\": \"float64\"}, \"target_boundaries\": {\"inline\": [0.0, 0.5, 1.0], \"dtype\": \"float64\"}}}"
+ },
+ "unserialisable": {
+  "large source without a reference": {
+   "build": "PointReferenceError: mapping spec 'rbf' has no reference for ['source_points']; it was built from a point set too large to inline and without source_ref=",
+   "message": "mapping StaticLinearMapping(rbf, consistent, 2x65) on edge a.v->b.inp cannot be serialised: point set(s) ['source_points'] were not recorded (more than 64 points, a non-numeric or non-finite set, or an explicit matrix).  Pass source_ref= to the factory \u2014 a node field {'node': <name>, 'field': <key>} or an asset {'asset': '<file>.npy'} saved next to the config",
+   "shown": "[{\"source_node\": \"a\", \"target_node\": \"b\", \"source_field\": \"v\", \"target_field\": \"inp\", \"mapping\": {\"kind\": \"rbf\", \"mode\": \"consistent\", \"shape\": [2, 65], \"kernel\": \"gaussian\", \"epsilon\": 1.0, \"polynomial\": true, \"ridge\": 1e-08, \"points\": {\"source_points\": null, \"target_points\": {\"inline\": [0.0, 1.0], \"dtype\": \"float64\"}}}}]"
+  },
+  "matrix without an asset": {
+   "build": "PointReferenceError: mapping spec 'matrix' has no reference for ['H']; it was built from a point set too large to inline and without asset=",
+   "message": "mapping StaticLinearMapping(supermesh, consistent, 6x4) on edge a.v->b.inp cannot be serialised: point set(s) ['H'] were not recorded (more than 64 points, a non-numeric or non-finite set, or an explicit matrix).  Pass asset= to the factory \u2014 a node field {'node': <name>, 'field': <key>} or an asset {'asset': '<file>.npy'} saved next to the config",
+   "shown": "[{\"source_node\": \"a\", \"target_node\": \"b\", \"source_field\": \"v\", \"target_field\": \"inp\", \"mapping\": {\"kind\": \"supermesh\", \"mode\": \"consistent\", \"shape\": [6, 4], \"label\": \"supermesh\", \"points\": {\"H\": null}}}]"
+  }
+ },
+ "usd": {
+  "rods_with_node_references": {
+   "attributes": {
+    "e0": "{\"kind\": \"rbf\", \"mode\": \"consistent\", \"shape\": [12, 6], \"kernel\": \"gaussian\", \"epsilon\": 24.0, \"polynomial\": true, \"ridge\": 1e-08, \"points\": {\"source_points\": {\"node\": \"coarse\", \"field\": \"grid_x\", \"sha256\": \"8b6cb7ec86377d77f636f3869cc5f994ce50dd2f480b61c758c578c0d45c490b\"}, \"target_points\": {\"node\": \"fine\", \"field\": \"grid_x\", \"sha256\": \"ba24aeb27cacd07d2174c39955f32fa41360f984d304bbc81be0c88e89c27ce1\"}}}",
+    "e1": "{\"kind\": \"nearest_neighbor\", \"mode\": \"conservative\", \"shape\": [6, 12], \"points\": {\"source_points\": {\"node\": \"fine\", \"field\": \"grid_x\", \"sha256\": \"ba24aeb27cacd07d2174c39955f32fa41360f984d304bbc81be0c88e89c27ce1\"}, \"target_points\": {\"node\": \"coarse\", \"field\": \"grid_x\", \"sha256\": \"8b6cb7ec86377d77f636f3869cc5f994ce50dd2f480b61c758c578c0d45c490b\"}}}"
+   },
+   "rebuilt_weights": {
+    "coarse.temperature->fine.heat_source": {
+     "H": {
+      "dtype": "float32",
+      "shape": [
+       12,
+       6
+      ],
+      "values": [
+       [
+        0.7347044944763184,
+        0.2622363567352295,
+        0.1576477587223053,
+        0.05305909365415573,
+        -0.051529526710510254,
+        -0.1561182141304016
+       ],
+       [
+        0.6632289886474609,
+        0.2194661796092987,
+        0.14333616197109222,
+        0.0673295259475708,
+        -0.00867709144949913,
+        -0.08468375355005264
+       ],
+       [
+        0.27658092975616455,
+        0.5758870244026184,
+        0.13955776393413544,
+        0.07110794633626938,
+        0.0026581049896776676,
+        -0.0657917708158493
+       ],
+       [
+        0.20506411790847778,
+        0.5330512523651123,
+        0.12540246546268463,
+        0.08538657426834106,
+        0.04549407213926315,
+        0.005601547192782164
+       ],
+       [
+        0.18617229163646698,
+        0.15395990014076233,
+        0.4893798828125,
+        0.08916500955820084,
+        0.05682932585477829,
+        0.024493582546710968
+       ],
+       [
+        0.11477874964475632,
+        0.11100029945373535,
+        0.47510209679603577,
+        0.10356692224740982,
+        0.09966516494750977,
+        0.09588678181171417
+       ],
+       [
+        0.09588691592216492,
+        0.0996653139591217,
+        0.10356709361076355,
+        0.4751012325286865,
+        0.11100050061941147,
+        0.11477896571159363
+       ],
+       [
+        0.024493515491485596,
+        0.05682921037077904,
+        0.0891648679971695,
+        0.48938074707984924,
+        0.15395966172218323,
+        0.1861720085144043
+       ],
+       [
+        0.005601561162620783,
+        0.04549410939216614,
+        0.08538665622472763,
+        0.125402569770813,
+        0.5330508351325989,
+        0.20506426692008972
+       ],
+       [
+        -0.06579168885946274,
+        0.0026580956764519215,
+        0.07110787183046341,
+        0.1395576000213623,
+        0.5758875608444214,
+        0.2765805721282959
+       ],
+       [
+        -0.08468380570411682,
+        -0.008677109144628048,
+        0.06732958555221558,
+        0.14333626627922058,
+        0.21946629881858826,
+        0.6632287502288818
+       ],
+       [
+        -0.15611803531646729,
+        -0.05152948573231697,
+        0.05305905267596245,
+        0.15764759480953217,
+        0.2622360587120056,
+        0.734704852104187
+       ]
+      ]
+     }
+    },
+    "fine.temperature->coarse.heat_source": {
+     "H": {
+      "dtype": "float32",
+      "shape": [
+       6,
+       12
+      ],
+      "values": [
+       [
+        1.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        1.0
+       ]
+      ]
+     }
+    }
+   }
+  },
+  "vectors_with_inline_and_asset_references": {
+   "attributes": {
+    "e0": "{\"kind\": \"projection_1d\", \"mode\": \"conservative\", \"shape\": [6, 4], \"points\": {\"source_boundaries\": {\"inline\": [0.0, 0.25, 0.5, 0.75, 1.0], \"dtype\": \"float64\"}, \"target_boundaries\": {\"inline\": [0.0, 0.16666666666666666, 0.3333333333333333, 0.5, 0.6666666666666666, 0.8333333333333333, 1.0], \"dtype\": \"float64\"}}}",
+    "e1": "{\"kind\": \"projection_1d\", \"mode\": \"conservative\", \"shape\": [6, 4], \"points\": {\"source_boundaries\": {\"asset\": \"grids.npz\", \"key\": \"four\", \"sha256\": \"a008969b4655f484791c31c2a52b037313fa2db396b69c9ad79842944acd61ff\"}, \"target_boundaries\": {\"asset\": \"grids.npz\", \"key\": \"six\", \"sha256\": \"d505e9677a6bce5e3935e568ed9dee53c61e809f2ef2d29af3f749657769f343\"}}}",
+    "e2": "{\"kind\": \"supermesh\", \"mode\": \"conservative\", \"shape\": [6, 4], \"label\": \"supermesh\", \"points\": {\"H\": {\"asset\": \"H.npy\", \"sha256\": \"1055e9e9b41cebc70980f9896cec35cd165ad57550fc1b702806d8f9fdfb3035\"}}}",
+    "e3": "{\"kind\": \"matrix\", \"mode\": \"consistent\", \"shape\": [6, 4], \"points\": {\"H\": {\"asset\": \"H.npy\", \"sha256\": \"1055e9e9b41cebc70980f9896cec35cd165ad57550fc1b702806d8f9fdfb3035\"}}}",
+    "e4": "{\"kind\": \"nearest_neighbor\", \"mode\": \"consistent\", \"shape\": [4, 6], \"points\": {\"source_points\": {\"inline\": [0.0, 0.20000000298023224, 0.4000000059604645, 0.6000000238418579, 0.800000011920929, 1.0], \"dtype\": \"float32\"}, \"target_points\": {\"inline\": [0.0, 0.3333333432674408, 0.6666666865348816, 1.0], \"dtype\": \"float32\"}}}",
+    "e5": "{\"kind\": \"rbf\", \"mode\": \"consistent\", \"shape\": [4, 6], \"kernel\": \"gaussian\", \"epsilon\": 16.0, \"polynomial\": false, \"ridge\": 1e-06, \"points\": {\"source_points\": {\"inline\": [0.0, 0.20000000298023224, 0.4000000059604645, 0.6000000238418579, 0.800000011920929, 1.0], \"dtype\": \"float32\"}, \"target_points\": {\"inline\": [0.0, 0.3333333432674408, 0.6666666865348816, 1.0], \"dtype\": \"float32\"}}}",
+    "e6": "{\"kind\": \"rbf\", \"mode\": \"conservative\", \"shape\": [4, 6], \"kernel\": \"gaussian\", \"epsilon\": 16.0, \"polynomial\": true, \"ridge\": 1e-08, \"points\": {\"source_points\": {\"inline\": [0.0, 0.20000000298023224, 0.4000000059604645, 0.6000000238418579, 0.800000011920929, 1.0], \"dtype\": \"float32\"}, \"target_points\": {\"inline\": [0.0, 0.3333333432674408, 0.6666666865348816, 1.0], \"dtype\": \"float32\"}}}"
+   },
+   "rebuilt_weights": {
+    "a.v->b.inp": {
+     "H": {
+      "dtype": "float32",
+      "shape": [
+       6,
+       4
+      ],
+      "values": [
+       [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+       ],
+       [
+        0.5,
+        0.5,
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.0,
+        0.5,
+        0.5
+       ],
+       [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+       ]
+      ]
+     }
+    },
+    "a.v->b.inp#1": {
+     "H": {
+      "dtype": "float32",
+      "shape": [
+       6,
+       4
+      ],
+      "values": [
+       [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+       ],
+       [
+        0.5,
+        0.5,
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.0,
+        0.5,
+        0.5
+       ],
+       [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+       ]
+      ]
+     }
+    },
+    "a.v->b.inp#2": {
+     "H": {
+      "dtype": "float32",
+      "shape": [
+       6,
+       4
+      ],
+      "values": [
+       [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+       ],
+       [
+        0.5,
+        0.5,
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.5,
+        0.5,
+        0.0
+       ],
+       [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.0,
+        0.25,
+        0.75
+       ]
+      ]
+     }
+    },
+    "a.v->b.inp#3": {
+     "H": {
+      "dtype": "float32",
+      "shape": [
+       6,
+       4
+      ],
+      "values": [
+       [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+       ],
+       [
+        0.5,
+        0.5,
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.5,
+        0.5,
+        0.0
+       ],
+       [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.0,
+        0.25,
+        0.75
+       ]
+      ]
+     }
+    },
+    "b.v->a.inp": {
+     "H": {
+      "dtype": "float32",
+      "shape": [
+       4,
+       6
+      ],
+      "values": [
+       [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+       ]
+      ]
+     }
+    },
+    "b.v->a.inp#1": {
+     "H": {
+      "dtype": "float32",
+      "shape": [
+       4,
+       6
+      ],
+      "values": [
+       [
+        0.9999989867210388,
+        3.5712766077722335e-11,
+        -1.275403025548336e-15,
+        4.554814789943268e-20,
+        -1.6266544579624304e-24,
+        5.80924809324395e-29
+       ],
+       [
+        -3.765555902646156e-07,
+        0.0105440067127347,
+        0.32052987813949585,
+        -1.1434588486736175e-05,
+        4.0836184433956646e-10,
+        -1.4583767746494287e-14
+       ],
+       [
+        -1.458372370078103e-14,
+        4.083612059613273e-10,
+        -1.1434588486736175e-05,
+        0.32052987813949585,
+        0.010544017888605595,
+        -3.7655655660273624e-07
+       ],
+       [
+        5.80924809324395e-29,
+        -1.6266570217603723e-24,
+        4.554828683992619e-20,
+        -1.2754069430757171e-15,
+        3.5712821588873567e-11,
+        0.9999989867210388
+       ]
+      ]
+     }
+    },
+    "b.v->a.inp#2": {
+     "H": {
+      "dtype": "float32",
+      "shape": [
+       4,
+       6
+      ],
+      "values": [
+       [
+        1.0,
+        0.5157885551452637,
+        0.21178777515888214,
+        0.12794692814350128,
+        -0.0210484117269516,
+        -1.999999943436137e-09
+       ],
+       [
+        3.999999886872274e-09,
+        0.3473745286464691,
+        0.5043714046478271,
+        0.15589389204978943,
+        0.1578853279352188,
+        1.000000082740371e-09
+       ],
+       [
+        9.99999860695766e-10,
+        0.1578853279352188,
+        0.15589389204978943,
+        0.5043714046478271,
+        0.3473745584487915,
+        3.999999886872274e-09
+       ],
+       [
+        -1.999999943436137e-09,
+        -0.021048402413725853,
+        0.12794694304466248,
+        0.21178779006004333,
+        0.5157884955406189,
+        1.0
+       ]
+      ]
+     }
+    }
+   }
+  }
+ },
+ "vectors_with_every_kernel": {
+  "config": "{\"nodes\": [{\"type\": \"Vec\", \"name\": \"a\", \"timestep\": 1.0, \"params\": {\"n\": 4}}, {\"type\": \"Vec\", \"name\": \"b\", \"timestep\": 1.0, \"params\": {\"n\": 6}}], \"edges\": [{\"source_node\": \"a\", \"target_node\": \"b\", \"source_field\": \"v\", \"target_field\": \"inp\", \"mapping\": {\"kind\": \"rbf\", \"mode\": \"consistent\", \"shape\": [6, 4], \"kernel\": \"multiquadric\", \"epsilon\": 2.0, \"polynomial\": false, \"ridge\": 1e-08, \"points\": {\"source_points\": {\"inline\": [0.0, 0.3333333333333333, 0.6666666666666666, 1.0], \"dtype\": \"float64\"}, \"target_points\": {\"inline\": [0.0, 0.2, 0.4, 0.6000000000000001, 0.8, 1.0], \"dtype\": \"float64\"}}}}, {\"source_node\": \"a\", \"target_node\": \"b\", \"source_field\": \"v\", \"target_field\": \"inp\", \"mapping\": {\"kind\": \"rbf\", \"mode\": \"consistent\", \"shape\": [6, 4], \"kernel\": \"inverse_multiquadric\", \"epsilon\": 3.0, \"polynomial\": true, \"ridge\": 1e-08, \"points\": {\"source_points\": {\"inline\": [0.0, 0.3333333333333333, 0.6666666666666666, 1.0], \"dtype\": \"float64\"}, \"target_points\": {\"inline\": [0.0, 0.2, 0.4, 0.6000000000000001, 0.8, 1.0], \"dtype\": \"float64\"}}}, \"ordinal\": 1, \"additive\": true}, {\"source_node\": \"a\", \"target_node\": \"b\", \"source_field\": \"v\", \"target_field\": \"inp\", \"mapping\": {\"kind\": \"rbf\", \"mode\": \"conservative\", \"shape\": [6, 4], \"kernel\": \"thin_plate_spline\", \"epsilon\": 4.0, \"polynomial\": false, \"ridge\": 1e-08, \"points\": {\"source_points\": {\"inline\": [0.0, 0.3333333333333333, 0.6666666666666666, 1.0], \"dtype\": \"float64\"}, \"target_points\": {\"inline\": [0.0, 0.2, 0.4, 0.6000000000000001, 0.8, 1.0], \"dtype\": \"float64\"}}}, \"ordinal\": 2, \"additive\": true}], \"external_inputs\": []}"
+ },
+ "vectors_with_inline_and_asset_references": {
+  "config": "{\"nodes\": [{\"type\": \"Vec\", \"name\": \"a\", \"timestep\": 1.0, \"params\": {\"n\": 4}}, {\"type\": \"Vec\", \"name\": \"b\", \"timestep\": 1.0, \"params\": {\"n\": 6}}], \"edges\": [{\"source_node\": \"a\", \"target_node\": \"b\", \"source_field\": \"v\", \"target_field\": \"inp\", \"mapping\": {\"kind\": \"projection_1d\", \"mode\": \"conservative\", \"shape\": [6, 4], \"points\": {\"source_boundaries\": {\"inline\": [0.0, 0.25, 0.5, 0.75, 1.0], \"dtype\": \"float64\"}, \"target_boundaries\": {\"inline\": [0.0, 0.16666666666666666, 0.3333333333333333, 0.5, 0.6666666666666666, 0.8333333333333333, 1.0], \"dtype\": \"float64\"}}}}, {\"source_node\": \"a\", \"target_node\": \"b\", \"source_field\": \"v\", \"target_field\": \"inp\", \"mapping\": {\"kind\": \"projection_1d\", \"mode\": \"conservative\", \"shape\": [6, 4], \"points\": {\"source_boundaries\": {\"asset\": \"grids.npz\", \"key\": \"four\", \"sha256\": \"a008969b4655f484791c31c2a52b037313fa2db396b69c9ad79842944acd61ff\"}, \"target_boundaries\": {\"asset\": \"grids.npz\", \"key\": \"six\", \"sha256\": \"d505e9677a6bce5e3935e568ed9dee53c61e809f2ef2d29af3f749657769f343\"}}}, \"ordinal\": 1, \"additive\": true}, {\"source_node\": \"a\", \"target_node\": \"b\", \"source_field\": \"v\", \"target_field\": \"inp\", \"mapping\": {\"kind\": \"supermesh\", \"mode\": \"conservative\", \"shape\": [6, 4], \"label\": \"supermesh\", \"points\": {\"H\": {\"asset\": \"H.npy\", \"sha256\": \"1055e9e9b41cebc70980f9896cec35cd165ad57550fc1b702806d8f9fdfb3035\"}}}, \"ordinal\": 2, \"additive\": true}, {\"source_node\": \"a\", \"target_node\": \"b\", \"source_field\": \"v\", \"target_field\": \"inp\", \"mapping\": {\"kind\": \"matrix\", \"mode\": \"consistent\", \"shape\": [6, 4], \"points\": {\"H\": {\"asset\": \"H.npy\", \"sha256\": \"1055e9e9b41cebc70980f9896cec35cd165ad57550fc1b702806d8f9fdfb3035\"}}}, \"ordinal\": 3, \"additive\": true}, {\"source_node\": \"b\", \"target_node\": \"a\", \"source_field\": \"v\", \"target_field\": \"inp\", \"mapping\": {\"kind\": \"nearest_neighbor\", \"mode\": \"consistent\", \"shape\": [4, 6], \"points\": {\"source_points\": {\"inline\": [0.0, 0.20000000298023224, 0.4000000059604645, 0.6000000238418579, 0.800000011920929, 1.0], \"dtype\": \"float32\"}, \"target_points\": {\"inline\": [0.0, 0.3333333432674408, 0.6666666865348816, 1.0], \"dtype\": \"float32\"}}}}, {\"source_node\": \"b\", \"target_node\": \"a\", \"source_field\": \"v\", \"target_field\": \"inp\", \"mapping\": {\"kind\": \"rbf\", \"mode\": \"consistent\", \"shape\": [4, 6], \"kernel\": \"gaussian\", \"epsilon\": 16.0, \"polynomial\": false, \"ridge\": 1e-06, \"points\": {\"source_points\": {\"inline\": [0.0, 0.20000000298023224, 0.4000000059604645, 0.6000000238418579, 0.800000011920929, 1.0], \"dtype\": \"float32\"}, \"target_points\": {\"inline\": [0.0, 0.3333333432674408, 0.6666666865348816, 1.0], \"dtype\": \"float32\"}}}, \"ordinal\": 1, \"additive\": true}, {\"source_node\": \"b\", \"target_node\": \"a\", \"source_field\": \"v\", \"target_field\": \"inp\", \"mapping\": {\"kind\": \"rbf\", \"mode\": \"conservative\", \"shape\": [4, 6], \"kernel\": \"gaussian\", \"epsilon\": 16.0, \"polynomial\": true, \"ridge\": 1e-08, \"points\": {\"source_points\": {\"inline\": [0.0, 0.20000000298023224, 0.4000000059604645, 0.6000000238418579, 0.800000011920929, 1.0], \"dtype\": \"float32\"}, \"target_points\": {\"inline\": [0.0, 0.3333333432674408, 0.6666666865348816, 1.0], \"dtype\": \"float32\"}}}, \"ordinal\": 2, \"additive\": true}], \"external_inputs\": []}",
+  "rebuilt_config": "{\"nodes\": [{\"type\": \"Vec\", \"name\": \"a\", \"timestep\": 1.0, \"params\": {\"n\": 4}}, {\"type\": \"Vec\", \"name\": \"b\", \"timestep\": 1.0, \"params\": {\"n\": 6}}], \"edges\": [{\"source_node\": \"a\", \"target_node\": \"b\", \"source_field\": \"v\", \"target_field\": \"inp\", \"mapping\": {\"kind\": \"projection_1d\", \"mode\": \"conservative\", \"shape\": [6, 4], \"points\": {\"source_boundaries\": {\"inline\": [0.0, 0.25, 0.5, 0.75, 1.0], \"dtype\": \"float64\"}, \"target_boundaries\": {\"inline\": [0.0, 0.16666666666666666, 0.3333333333333333, 0.5, 0.6666666666666666, 0.8333333333333333, 1.0], \"dtype\": \"float64\"}}}}, {\"source_node\": \"a\", \"target_node\": \"b\", \"source_field\": \"v\", \"target_field\": \"inp\", \"mapping\": {\"kind\": \"projection_1d\", \"mode\": \"conservative\", \"shape\": [6, 4], \"points\": {\"source_boundaries\": {\"asset\": \"grids.npz\", \"key\": \"four\", \"sha256\": \"a008969b4655f484791c31c2a52b037313fa2db396b69c9ad79842944acd61ff\"}, \"target_boundaries\": {\"asset\": \"grids.npz\", \"key\": \"six\", \"sha256\": \"d505e9677a6bce5e3935e568ed9dee53c61e809f2ef2d29af3f749657769f343\"}}}, \"ordinal\": 1, \"additive\": true}, {\"source_node\": \"a\", \"target_node\": \"b\", \"source_field\": \"v\", \"target_field\": \"inp\", \"mapping\": {\"kind\": \"supermesh\", \"mode\": \"conservative\", \"shape\": [6, 4], \"label\": \"supermesh\", \"points\": {\"H\": {\"asset\": \"H.npy\", \"sha256\": \"1055e9e9b41cebc70980f9896cec35cd165ad57550fc1b702806d8f9fdfb3035\"}}}, \"ordinal\": 2, \"additive\": true}, {\"source_node\": \"a\", \"target_node\": \"b\", \"source_field\": \"v\", \"target_field\": \"inp\", \"mapping\": {\"kind\": \"matrix\", \"mode\": \"consistent\", \"shape\": [6, 4], \"points\": {\"H\": {\"asset\": \"H.npy\", \"sha256\": \"1055e9e9b41cebc70980f9896cec35cd165ad57550fc1b702806d8f9fdfb3035\"}}}, \"ordinal\": 3, \"additive\": true}, {\"source_node\": \"b\", \"target_node\": \"a\", \"source_field\": \"v\", \"target_field\": \"inp\", \"mapping\": {\"kind\": \"nearest_neighbor\", \"mode\": \"consistent\", \"shape\": [4, 6], \"points\": {\"source_points\": {\"inline\": [0.0, 0.20000000298023224, 0.4000000059604645, 0.6000000238418579, 0.800000011920929, 1.0], \"dtype\": \"float32\"}, \"target_points\": {\"inline\": [0.0, 0.3333333432674408, 0.6666666865348816, 1.0], \"dtype\": \"float32\"}}}}, {\"source_node\": \"b\", \"target_node\": \"a\", \"source_field\": \"v\", \"target_field\": \"inp\", \"mapping\": {\"kind\": \"rbf\", \"mode\": \"consistent\", \"shape\": [4, 6], \"kernel\": \"gaussian\", \"epsilon\": 16.0, \"polynomial\": false, \"ridge\": 1e-06, \"points\": {\"source_points\": {\"inline\": [0.0, 0.20000000298023224, 0.4000000059604645, 0.6000000238418579, 0.800000011920929, 1.0], \"dtype\": \"float32\"}, \"target_points\": {\"inline\": [0.0, 0.3333333432674408, 0.6666666865348816, 1.0], \"dtype\": \"float32\"}}}, \"ordinal\": 1, \"additive\": true}, {\"source_node\": \"b\", \"target_node\": \"a\", \"source_field\": \"v\", \"target_field\": \"inp\", \"mapping\": {\"kind\": \"rbf\", \"mode\": \"conservative\", \"shape\": [4, 6], \"kernel\": \"gaussian\", \"epsilon\": 16.0, \"polynomial\": true, \"ridge\": 1e-08, \"points\": {\"source_points\": {\"inline\": [0.0, 0.20000000298023224, 0.4000000059604645, 0.6000000238418579, 0.800000011920929, 1.0], \"dtype\": \"float32\"}, \"target_points\": {\"inline\": [0.0, 0.3333333432674408, 0.6666666865348816, 1.0], \"dtype\": \"float32\"}}}, \"ordinal\": 2, \"additive\": true}], \"external_inputs\": []}",
+  "rebuilt_weights": {
+   "a.v->b.inp": {
+    "H": {
+     "dtype": "float32",
+     "shape": [
+      6,
+      4
+     ],
+     "values": [
+      [
+       1.0,
+       0.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.5,
+       0.5,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       1.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       1.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.5,
+       0.5
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     ]
+    }
+   },
+   "a.v->b.inp#1": {
+    "H": {
+     "dtype": "float32",
+     "shape": [
+      6,
+      4
+     ],
+     "values": [
+      [
+       1.0,
+       0.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.5,
+       0.5,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       1.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       1.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.5,
+       0.5
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     ]
+    }
+   },
+   "a.v->b.inp#2": {
+    "H": {
+     "dtype": "float32",
+     "shape": [
+      6,
+      4
+     ],
+     "values": [
+      [
+       1.0,
+       0.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.5,
+       0.5,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       1.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.5,
+       0.5,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       1.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.25,
+       0.75
+      ]
+     ]
+    }
+   },
+   "a.v->b.inp#3": {
+    "H": {
+     "dtype": "float32",
+     "shape": [
+      6,
+      4
+     ],
+     "values": [
+      [
+       1.0,
+       0.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.5,
+       0.5,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       1.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.5,
+       0.5,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       1.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.25,
+       0.75
+      ]
+     ]
+    }
+   },
+   "b.v->a.inp": {
+    "H": {
+     "dtype": "float32",
+     "shape": [
+      4,
+      6
+     ],
+     "values": [
+      [
+       1.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       1.0,
+       0.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     ]
+    }
+   },
+   "b.v->a.inp#1": {
+    "H": {
+     "dtype": "float32",
+     "shape": [
+      4,
+      6
+     ],
+     "values": [
+      [
+       0.9999989867210388,
+       3.5712766077722335e-11,
+       -1.275403025548336e-15,
+       4.554814789943268e-20,
+       -1.6266544579624304e-24,
+       5.80924809324395e-29
+      ],
+      [
+       -3.765555902646156e-07,
+       0.0105440067127347,
+       0.32052987813949585,
+       -1.1434588486736175e-05,
+       4.0836184433956646e-10,
+       -1.4583767746494287e-14
+      ],
+      [
+       -1.458372370078103e-14,
+       4.083612059613273e-10,
+       -1.1434588486736175e-05,
+       0.32052987813949585,
+       0.010544017888605595,
+       -3.7655655660273624e-07
+      ],
+      [
+       5.80924809324395e-29,
+       -1.6266570217603723e-24,
+       4.554828683992619e-20,
+       -1.2754069430757171e-15,
+       3.5712821588873567e-11,
+       0.9999989867210388
+      ]
+     ]
+    }
+   },
+   "b.v->a.inp#2": {
+    "H": {
+     "dtype": "float32",
+     "shape": [
+      4,
+      6
+     ],
+     "values": [
+      [
+       1.0,
+       0.5157885551452637,
+       0.21178777515888214,
+       0.12794692814350128,
+       -0.0210484117269516,
+       -1.999999943436137e-09
+      ],
+      [
+       3.999999886872274e-09,
+       0.3473745286464691,
+       0.5043714046478271,
+       0.15589389204978943,
+       0.1578853279352188,
+       1.000000082740371e-09
+      ],
+      [
+       9.99999860695766e-10,
+       0.1578853279352188,
+       0.15589389204978943,
+       0.5043714046478271,
+       0.3473745584487915,
+       3.999999886872274e-09
+      ],
+      [
+       -1.999999943436137e-09,
+       -0.021048402413725853,
+       0.12794694304466248,
+       0.21178779006004333,
+       0.5157884955406189,
+       1.0
+      ]
+     ]
+    }
+   }
+  },
+  "weights": {
+   "a.v->b.inp": {
+    "H": {
+     "dtype": "float32",
+     "shape": [
+      6,
+      4
+     ],
+     "values": [
+      [
+       1.0,
+       0.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.5,
+       0.5,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       1.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       1.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.5,
+       0.5
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     ]
+    }
+   },
+   "a.v->b.inp#1": {
+    "H": {
+     "dtype": "float32",
+     "shape": [
+      6,
+      4
+     ],
+     "values": [
+      [
+       1.0,
+       0.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.5,
+       0.5,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       1.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       1.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.5,
+       0.5
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     ]
+    }
+   },
+   "a.v->b.inp#2": {
+    "H": {
+     "dtype": "float32",
+     "shape": [
+      6,
+      4
+     ],
+     "values": [
+      [
+       1.0,
+       0.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.5,
+       0.5,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       1.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.5,
+       0.5,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       1.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.25,
+       0.75
+      ]
+     ]
+    }
+   },
+   "a.v->b.inp#3": {
+    "H": {
+     "dtype": "float32",
+     "shape": [
+      6,
+      4
+     ],
+     "values": [
+      [
+       1.0,
+       0.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.5,
+       0.5,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       1.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.5,
+       0.5,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       1.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.25,
+       0.75
+      ]
+     ]
+    }
+   },
+   "b.v->a.inp": {
+    "H": {
+     "dtype": "float32",
+     "shape": [
+      4,
+      6
+     ],
+     "values": [
+      [
+       1.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       1.0,
+       0.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     ]
+    }
+   },
+   "b.v->a.inp#1": {
+    "H": {
+     "dtype": "float32",
+     "shape": [
+      4,
+      6
+     ],
+     "values": [
+      [
+       0.9999989867210388,
+       3.5712766077722335e-11,
+       -1.275403025548336e-15,
+       4.554814789943268e-20,
+       -1.6266544579624304e-24,
+       5.80924809324395e-29
+      ],
+      [
+       -3.765555902646156e-07,
+       0.0105440067127347,
+       0.32052987813949585,
+       -1.1434588486736175e-05,
+       4.0836184433956646e-10,
+       -1.4583767746494287e-14
+      ],
+      [
+       -1.458372370078103e-14,
+       4.083612059613273e-10,
+       -1.1434588486736175e-05,
+       0.32052987813949585,
+       0.010544017888605595,
+       -3.7655655660273624e-07
+      ],
+      [
+       5.80924809324395e-29,
+       -1.6266570217603723e-24,
+       4.554828683992619e-20,
+       -1.2754069430757171e-15,
+       3.5712821588873567e-11,
+       0.9999989867210388
+      ]
+     ]
+    }
+   },
+   "b.v->a.inp#2": {
+    "H": {
+     "dtype": "float32",
+     "shape": [
+      4,
+      6
+     ],
+     "values": [
+      [
+       1.0,
+       0.5157885551452637,
+       0.21178777515888214,
+       0.12794692814350128,
+       -0.0210484117269516,
+       -1.999999943436137e-09
+      ],
+      [
+       3.999999886872274e-09,
+       0.3473745286464691,
+       0.5043714046478271,
+       0.15589389204978943,
+       0.1578853279352188,
+       1.000000082740371e-09
+      ],
+      [
+       9.99999860695766e-10,
+       0.1578853279352188,
+       0.15589389204978943,
+       0.5043714046478271,
+       0.3473745584487915,
+       3.999999886872274e-09
+      ],
+      [
+       -1.999999943436137e-09,
+       -0.021048402413725853,
+       0.12794694304466248,
+       0.21178779006004333,
+       0.5157884955406189,
+       1.0
+      ]
+     ]
+    }
+   }
+  }
+ }
+}

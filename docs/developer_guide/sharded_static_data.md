@@ -11,13 +11,13 @@ and the {meth}`~maddening.core.node.SimulationNode.domain_integral_fields`
 API for cross-device reduction of partial-sum outputs.
 ```
 
-This page explains how to write a stencil node whose non-evolving
-arrays are *sharded* alongside state — needed when the array is
+This page explains how to write a {term}`stencil <Stencil>` {term}`node <Node>` whose non-evolving
+arrays are *{term}`sharded <Sharded>`* alongside state — needed when the array is
 big enough that replicating it per device would defeat the point of
-sharding — and how to declare outputs that are domain integrals
+{term}`sharding <Sharding>` — and how to declare outputs that are domain integrals
 over the lattice so the wrapper all-reduces them.
 
-The motivating consumer is MIME's `IBLBMFluidNode`: a D3Q19 LBM
+The motivating consumer is MIME's `IBLBMFluidNode`: a D3Q19 {term}`LBM`
 node carrying a `(nx, ny, nz)` pipe-wall mask and a
 `(19, nx, ny, nz)` "missing-link" bounce-back mask, both far too
 large to replicate on every device when the simulation is sharded
@@ -42,11 +42,30 @@ Three things happen per step:
 1. The wrapper takes each `StaticArray(replication="shard")` on
    the inner node and `device_put`s it with a `NamedSharding`
    whose `PartitionSpec` puts the matching mesh axis on the
-   array's `shard_axis` (cached by `static_data_hash`).
-2. Inside `shard_map`, each device's slab is halo-exchanged along
-   the matching spatial axis (boundary `"edge"` — static arrays
-   don't evolve, so periodic wrap is wrong even if state uses
-   periodic).
+   array's `shard_axis`.  This happens **once**, not per step: the
+   placement is cached and re-checked against the inner node's
+   `static_data` on every call, so a node that hands back a
+   different array object (a mesh rebuilt after a parameter write,
+   a `static_data_provider` reconstruction, a `replace_node`) is
+   picked up on the next `update`.  What the check cannot see is a
+   static rewritten *in place*.  `GraphManager.compile()` drops the
+   cached placement on every node (and on every node they wrap), so
+   the usual recovery is a recompile; outside a graph, call
+   `wrapper.invalidate_static_cache()` after such a rewrite.  Note
+   that a rewrite with no recompile is *not* picked up by a later
+   `step()` on its own: the graph's static-data check hashes shape
+   and dtype, never contents.
+2. Inside `shard_map`, each device's slab is {term}`halo <Halo>`-exchanged along
+   the matching spatial axis.  Between two {term}`shards <Shard>` the halo holds the
+   neighbour's cells.  At the edges of the *global* grid it follows
+   the wrapper's `boundary` when that is `"periodic"`: the cells
+   beyond a periodic edge are the opposite edge's cells, for a static
+   array as much as for the state.  Under `"edge"` and `"zero"` there
+   is no cell beyond the edge, and the static's halo repeats the edge
+   cell.  (The halo fill is a question about space, not time; until
+   0.4.0 statics were edge-filled under every mode "because they don't
+   evolve", and a periodic node that read a static in its halo stepped
+   about 3% off the unsharded node, with no error.)
 3. The inner node's `update_padded` receives the padded slab via
    `static_padded[<key>]` and uses it like any other padded array.
 
@@ -87,6 +106,7 @@ a non-zero `halo_width()` entry on that axis (otherwise there's
 no neighbour slab to exchange with).  Both invariants are checked
 at `ShardedStencilNode.__init__` time:
 
+<!-- snippet: no-run, reason: fragment: mesh is a device mesh and _build_pipe_mask the reader's helper -->
 ```python
 sharded = ShardedStencilNode(
     WallBouncebackLBM("lbm", 0.001, nx=128, ny=64, nz=64, pipe_radius=20),
@@ -134,7 +154,11 @@ def update_padded(
         wall = static_padded["pipe_wall"]
     else:
         # Unsharded path; the full wall is closure-captured on self.
-        wall = jnp.pad(self._pipe_wall, [(1, 1), (0, 0), (0, 0)], mode="edge")
+        # Pad it the way the wrapper would: this node is wrapped with
+        # boundary="periodic", so the halo beyond each x face is the
+        # opposite face ("wrap"); a node wrapped with "edge" or "zero"
+        # would use mode="edge".
+        wall = jnp.pad(self._pipe_wall, [(1, 1), (0, 0), (0, 0)], mode="wrap")
     ...
 ```
 
@@ -200,7 +224,8 @@ def update_padded(self, state_padded, boundary_inputs, dt,
     #
     # global_offset is a TRACED jax scalar:
     #   lax.axis_index(mesh_axis) * local_extent
-    # local_extent is a Python int.
+    # local_extent is a Python int: the grid's extent along the axis
+    # over the devices on its mesh axis.
     if shard_info is not None and 0 in shard_info:
         offset, extent = shard_info[0]
         # offset usable in dynamic_slice; NOT in Python int slicing
@@ -210,6 +235,36 @@ def update_padded(self, state_padded, boundary_inputs, dt,
 
 `shard_info` is `None` when the node is run outside of
 `ShardedStencilNode`.
+
+`local_extent` is worked out before the step is traced, from a grid
+field's global shape: a state field that is not a domain integral, or a
+sharded `StaticArray` split along the axis when no state field has it.  A
+domain integral carried in the state never sets it.  Before 0.4.0 the
+first local field in sorted key order did, integral or not, and a
+`HeatNode` carrying a vector energy integral named to sort before
+`temperature` was told the wrong block size and never closed its right
+rod end (MADD-ANO-056).  A node that reads `shard_info` whose grid fields
+are split into blocks of different sizes along one axis is refused: one
+`(offset, extent)` pair cannot describe both.
+
+`ShardedUnstructuredNode` passes a different `shard_info`, for a
+different layout: `{0: (offset, n_local_max), "n_local": n_owned}`.
+Each shard's block of owned cells is padded to `n_local_max`, the
+largest shard's count, so a shard that owns fewer cells has padding
+rows at the end of its block; `n_owned` (a traced int32 scalar, added
+in 0.4.0) is its own count.  A domain integral on that path masks the
+padding out:
+
+<!-- snippet: no-run, reason: fragment: lines inside update_padded -->
+```python
+_, n_local_max = shard_info[0]
+owned = jnp.arange(n_local_max) < shard_info["n_local"]
+total_partial = jnp.sum(jnp.where(owned, x_new[:n_local_max], 0.0))
+```
+
+Before 0.4.0 nothing told the node where the padding started, and a
+node that summed its block summed the padding into the integral (on a
+7-cell, 2-device partition, 36 where the answer is 35).
 
 ## Sharding policy is part of the JIT cache key
 
@@ -222,6 +277,39 @@ machinery needed in user code.  The shard_map cache inside
 *identity* changes (a user replacing `self._mask` between steps)
 invalidate cleanly even when shape and dtype are unchanged.
 
+## A static copied along a mesh axis, inside a loop (MADD-ANO-068)
+
+On jaxlib 0.10.2 to 0.11.2, {term}`XLA` compiles one kernel pattern wrongly when
+the step is traced inside a loop. The step reads a sharded static in its
+halo, reads another array through a window at a `shard_info` offset, and
+the static is copied along a mesh axis of two or more devices. A mesh
+axis the `axis_map` leaves unused copies it, and so does the other axis
+of a pencil. The result is silently wrong on the first kind of axis and
+fails to compile on the second. `jit` alone is right. {codeterm}`GraphManager`
+therefore refuses any path that loops over such a step:
+
+* `run_scan`, `run_scan_with_history`, `run_sweep`, `run_adaptive_scan`
+  and `sysid.windowed_loss`, gradients through them included;
+* every entry point, `step()` included, when the node is in a {term}`coupling group <Coupling group>`, because the group's iteration loops over the update inside the
+  step.
+
+The `RuntimeError` names the node, the static and the mesh axis.
+
+The decision comes from your `update_padded` itself. The graph traces it
+once, never compiled, and walks the jaxpr. Each of the following keeps a
+node out of the refusal:
+
+* **read the static only in its interior**, with a `slice` (or a literal
+  `dynamic_slice`) inside `[halo, n - halo)` along its shard axis;
+* **don't window another array at a shard offset**. A window into the
+  static itself is fine: taking the static's own columns at
+  `shard_info[1]` is how the multi-device validation goals' 2-D field
+  reads a full-width static on a pencil;
+* **build the mesh from the axes the node is sharded along only.**
+
+A loop you write yourself around a wrapped node, such as a `lax.scan`
+over its `update`, is not guarded. Check it against `step()`.
+
 ## What's still TODO
 
 * ~~**Partial-axis psum.**~~  Done in v0.4.0: override
@@ -229,7 +317,10 @@ invalidate cleanly even when shape and dtype are unchanged.
   is reduced over (`{"drag": ("spatial_z",)}`); the result keeps one
   leading dimension per *unreduced* mesh axis, sharded along it, and an
   empty tuple stacks the per-shard partial values without reducing.  A
-  key without an entry is still `psum`-med over the full mesh.  Both
+  key without an entry is still `psum`-med over the full mesh.  A mesh
+  axis that splits nothing (one a stencil wrapper's `axis_map` leaves
+  unused) is neither reduced nor stacked over: every device along it
+  holds the same block.  Both
   `ShardedStencilNode` and `ShardedUnstructuredNode` honour it
   (`tests/cloud/multigpu/test_partial_axis_integrals.py`).
 * **Sharded static arrays without halos.**  v0.2.1 rejects a

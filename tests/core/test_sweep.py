@@ -291,3 +291,83 @@ class TestRunSweep:
             assert jnp.allclose(result["ball"]["position"][i],
                                 ref_final["ball"]["position"], atol=1e-5), \
                 f"External input mismatch at batch index {i}"
+
+
+class TestSweepOverGraphsWithMeta:
+    """``run_sweep`` on the graph shapes that carry internal ``_meta``.
+
+    Every other entry point carries ``self._state``, which ``compile()``
+    seeds with ``_meta``; the batched carry is the caller's
+    ``initial_states``, which has none.  A multi-rate graph therefore
+    raised ``KeyError: '_meta'`` and a coupled one with diagnostics a
+    scan carry mismatch, though the docstring restricted neither.
+    """
+
+    @staticmethod
+    def _multirate():
+        gm = GraphManager()
+        gm.add_node(TableNode("table", 0.01, position=0.0))
+        gm.add_node(BallNode("ball", 0.03, initial_position=1.0))
+        gm.add_edge("table", "ball", "position", "table_position")
+        gm.compile()
+        return gm
+
+    def test_a_multirate_sweep_matches_the_serial_runs(self):
+        gm = self._multirate()
+        positions = jnp.array([1.0, 2.0, 3.0])
+        init = {
+            "table": {"position": jnp.zeros(3, dtype=jnp.float32)},
+            "ball": {"position": positions,
+                     "velocity": jnp.zeros(3, dtype=jnp.float32)},
+        }
+        out = gm.run_sweep(8, init)
+        assert "_meta" not in out
+
+        for i, pos in enumerate(positions):
+            ref = self._multirate()
+            ref.set_node_state("ball", {"position": jnp.asarray(pos),
+                                        "velocity": jnp.array(0.0)})
+            ref.set_node_state("table", {"position": jnp.array(0.0)})
+            final = ref.run_scan(8)
+            assert jnp.allclose(out["ball"]["position"][i],
+                                final["ball"]["position"], atol=1e-6)
+
+    def test_a_sweep_starts_every_simulation_from_the_graphs_phase(self):
+        """``_meta`` forks per simulation rather than being shared.
+
+        Four steps in, a sweep of eight more has to land where a serial
+        continuation of eight more lands -- which it only does if the
+        batch inherits ``step_count == 4``.
+        """
+        gm = self._multirate()
+        gm.run(4)
+        state = {n: dict(gm.get_node_state(n)) for n in ("table", "ball")}
+        ref = gm.run_scan(8)["ball"]["position"]
+
+        batched = {n: {k: jnp.stack([v, v]) for k, v in fields.items()}
+                   for n, fields in state.items()}
+        gm2 = self._multirate()
+        gm2.run(4)
+        out = gm2.run_sweep(8, batched)
+        assert jnp.allclose(out["ball"]["position"], jnp.stack([ref, ref]),
+                            atol=1e-6)
+
+    def test_a_coupled_sweep_with_diagnostics_runs(self):
+        from maddening.nodes.spring import SpringDamperNode
+
+        gm = GraphManager()
+        gm.add_node(SpringDamperNode("a", 0.01, initial_position=1.0))
+        gm.add_node(SpringDamperNode("b", 0.01, initial_position=0.0))
+        gm.add_edge("a", "b", "position", "anchor_position")
+        gm.add_edge("b", "a", "position", "anchor_position")
+        gm.add_coupling_group(["a", "b"], diagnostics=True)
+        gm.compile()
+
+        init = {
+            n: {"position": jnp.array([1.0, 2.0]),
+                "velocity": jnp.zeros(2, dtype=jnp.float32)}
+            for n in ("a", "b")
+        }
+        out = gm.run_sweep(5, init)
+        assert "_meta" not in out
+        assert out["a"]["position"].shape == (2,)

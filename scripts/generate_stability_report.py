@@ -24,21 +24,129 @@ SRC = REPO_ROOT / "src"
 sys.path.insert(0, str(SRC))
 
 # Surfaces we want enumerated.  Importing them ensures @stability fires.
-import maddening  # noqa: F401
-import maddening.core.graph_manager  # noqa: F401
-import maddening.core.node  # noqa: F401
-import maddening.core.edge  # noqa: F401
-import maddening.core.static_data  # noqa: F401
-import maddening.core.coupling  # noqa: F401
-import maddening.cloud.multigpu.sharded_node  # noqa: F401
-import maddening.cloud.multigpu.sharded_unstructured  # noqa: F401
-import maddening.cloud.multigpu.iterative_solver  # noqa: F401
-import maddening.cloud.providers  # noqa: F401
-import maddening.api.binary_encoder  # noqa: F401
-import maddening.nodes  # noqa: F401
-import maddening.surrogates  # noqa: F401
-import maddening.usd.live_stage  # noqa: F401
-import maddening.fmi  # noqa: F401
+# ``tests/compliance/test_stability.py`` checks that importing this list
+# reaches every module under ``src/maddening`` that uses ``@stability(``,
+# so a newly tagged module that is missing here fails CI instead of
+# silently dropping out of the report.
+STABILITY_MODULES: tuple[str, ...] = (
+    "maddening",
+    "maddening.core.graph_manager",
+    "maddening.core.inspection",
+    "maddening.core.node",
+    "maddening.core.edge",
+    "maddening.core.static_data",
+    "maddening.core.coupling",
+    "maddening.core.coupling.group",
+    "maddening.core.coupling.mapping",
+    "maddening.core.params",
+    "maddening.core.solver_utils",
+    "maddening.core.simulation.calibration",
+    "maddening.core.simulation.checkpoint",
+    "maddening.core.simulation.compile_cache",
+    "maddening.core.simulation.profiler",
+    "maddening.cloud.multigpu.sharded_node",
+    "maddening.cloud.multigpu.sharded_unstructured",
+    "maddening.cloud.multigpu.halo_unstructured",
+    "maddening.cloud.multigpu.iterative_solver",
+    "maddening.cloud.providers",
+    "maddening.cloud.resume",
+    "maddening.api.binary_encoder",
+    # StateRelay (the streams' snapshot buffer): not imported by a listed
+    # parent outside the server, which imports it lazily for the routes.
+    "maddening.viz.relay",
+    # Security surfaces. Neither is reached by importing a listed parent:
+    # ``maddening`` does not import ``transport_auth``, so without this line
+    # its @stability tags never fire and the report silently omits them.
+    "maddening.transport_auth",
+    "maddening.nodes",
+    # not pulled in by ``maddening.nodes``
+    "maddening.nodes.adaptive",
+    "maddening.surrogates",
+    "maddening.surrogates.training.trainer",
+    "maddening.sysid",
+    "maddening.usd.live_stage",
+    "maddening.fmi",
+    "maddening.api.auth",
+    "maddening.api.server",
+    "maddening.core.compliance.stability",
+    "maddening.core.compliance.uq",
+    "maddening.core.coupling.mapping_registry",
+    "maddening.core.coupling.mapping_spec",
+    "maddening.core.coupling.grid_mapping",
+    "maddening.core.coupling.sparse_mapping",
+    "maddening.fmi.directional_derivatives",
+    "maddening.fmi.fmu_state",
+    "maddening.fmi.model_description",
+    "maddening.fmi.package",
+    "maddening.fmi.sidecar",
+    "maddening.fmi.tcp_bridge",
+    "maddening.nodes.adaptive.base",
+    "maddening.nodes.ball",
+    "maddening.nodes.health_check",
+    "maddening.nodes.heart_pump",
+    "maddening.nodes.heat",
+    "maddening.nodes.lbm",
+    "maddening.nodes.lbm_pipe",
+    "maddening.nodes.rigid_body",
+    "maddening.nodes.rigid_body_2d",
+    "maddening.nodes.spring",
+    "maddening.nodes.table",
+    "maddening.serialization.json_codec",
+    "maddening.surrogates.architecture",
+    "maddening.surrogates.dataset",
+    "maddening.surrogates.node",
+    # The [verify] harnesses. Nothing imports maddening.testing on the way
+    # to anything else, so without these lines their tags never fire
+    # and a 31-name documented module is absent from the report.
+    "maddening.testing.coupled",
+    "maddening.testing.mapping",
+    "maddening.testing.mms",
+    "maddening.testing.strategies",
+    "maddening.testing.verification",
+    "maddening.nodes.adaptive.wavelet",
+    "maddening.nodes.adaptive.wavelets.cdd",
+    "maddening.nodes.adaptive.wavelets.dirichlet",
+    "maddening.nodes.adaptive.wavelets.operator",
+    "maddening.nodes.adaptive.wavelets.precond",
+    "maddening.nodes.adaptive.wavelets.transform",
+    # ``maddening.show_versions`` resolves lazily, so importing the package
+    # does not reach this module.
+    "maddening.info",
+)
+
+
+#: Modules from :data:`STABILITY_MODULES` that could not be imported because
+#: an optional dependency is absent (``{module: reason}``).  Filled by
+#: :func:`import_stability_surfaces`.  A report generated with a non-empty
+#: map is incomplete; :func:`main` refuses to write one unless told to.
+SKIPPED_MODULES: dict[str, str] = {}
+
+
+def import_stability_surfaces() -> dict[str, str]:
+    """Import every module in :data:`STABILITY_MODULES` (fires ``@stability``).
+
+    A module whose *optional* dependency is missing (``usd-core`` for
+    ``maddening.usd.live_stage``, say) is recorded in :data:`SKIPPED_MODULES`
+    instead of aborting the import, so the script and the compliance tests
+    that load it work in environments without every extra.  Any other
+    failure propagates: a broken module must not silently vanish from the
+    report.  Returns the skipped map.
+    """
+    import importlib
+
+    SKIPPED_MODULES.clear()
+    for name in STABILITY_MODULES:
+        try:
+            importlib.import_module(name)
+        except ImportError as exc:                       # ModuleNotFoundError included
+            missing = getattr(exc, "name", None)
+            if missing is not None and missing.startswith("maddening"):
+                raise                                    # our own module is broken
+            SKIPPED_MODULES[name] = str(exc)
+    return dict(SKIPPED_MODULES)
+
+
+import_stability_surfaces()
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import (
@@ -51,8 +159,9 @@ _HEADER = """\
 # Stability Report
 
 Generated by ``scripts/generate_stability_report.py``.  Refreshed at
-release time as part of the v0.3.0+ verification gate (see
-``plans/MADDENING_v0.3.0_PLAN.md`` §A2).
+release time as part of the verification gate; what each level promises,
+and how a promise is withdrawn, is in [the deprecation
+policy](deprecation_policy.md).
 
 Each public surface is tagged via ``@stability`` and registered at
 import time.  Levels:
@@ -61,15 +170,34 @@ import time.  Levels:
 |---|---|
 | ``stable`` | Locked at 1.0.0 — backwards-incompatible change needs a major bump. |
 | ``evolving`` | Settled wire format / signature, additions allowed. |
-| ``provisional`` | Synonym for ``evolving``, retained for pre-v0.3.0 surfaces. |
 | ``experimental`` | May break in any minor release. Opt-in only. |
-| ``internal`` | Implementation detail. Not part of the public API. |
 | ``deprecated`` | Scheduled for removal. |
+
+``provisional`` (a synonym for ``evolving``) and ``internal`` are
+deprecated since 0.4.0: they still work, and no surface carries them.
 
 """
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--allow-missing-optional", action="store_true",
+                    help="write the report even if modules were skipped for a "
+                         "missing optional dependency (the report is then incomplete; "
+                         "the release gate runs without this flag)")
+    args = ap.parse_args(argv)
+
+    if SKIPPED_MODULES:
+        for name, why in SKIPPED_MODULES.items():
+            print(f"skipped {name}: {why}", file=sys.stderr)
+        if not args.allow_missing_optional:
+            print(f"{len(SKIPPED_MODULES)} module(s) skipped for missing optional "
+                  "dependencies; install the extras or pass --allow-missing-optional "
+                  "to write an incomplete report", file=sys.stderr)
+            return 2
+
     out_dir = REPO_ROOT / "docs" / "developer_guide"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "stability_report.md"
@@ -92,10 +220,20 @@ def main() -> int:
                      if v in (StabilityLevel.EVOLVING, StabilityLevel.PROVISIONAL))
     n_experimental = sum(1 for v in _STABILITY_REGISTRY.values()
                          if v == StabilityLevel.EXPERIMENTAL)
+    # Name the modules that are NOT in the count.  --allow-missing-optional
+    # writes a deliberately incomplete report, and a headline that says only
+    # "N surfaces" reads as full coverage of a tree it did not see.
+    incomplete = ""
+    if SKIPPED_MODULES:
+        incomplete = (
+            f"; INCOMPLETE -- {len(SKIPPED_MODULES)} module(s) were skipped "
+            f"for missing optional dependencies and contribute no surfaces "
+            f"({', '.join(sorted(SKIPPED_MODULES))})"
+        )
     print(
         f"Wrote {out_path}: {n} surfaces "
         f"({n_stable} stable, {n_evolving} evolving, "
-        f"{n_experimental} experimental)"
+        f"{n_experimental} experimental){incomplete}"
     )
     return 0
 

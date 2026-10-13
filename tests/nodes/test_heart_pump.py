@@ -187,15 +187,23 @@ class TestHeartPumpPhysics:
         steps_per_cycle = int(period / dt)
         total_steps = n_cycles * steps_per_cycle
 
+        # 16,660 updates: a compiled loop, not an eager Python one (which
+        # took 170 s on CI, all of it op-by-op dispatch).  The mean below
+        # is bit-identical to the eager loop's (88.99727...).
+        def step(_, s):
+            return node.update(s, {}, dt)
+
+        def step_and_record(s, _):
+            s = node.update(s, {}, dt)
+            return s, s["arterial_pressure"]
+
         # Run to steady state
-        for _ in range(total_steps):
-            state = node.update(state, {}, dt)
+        state = jax.lax.fori_loop(0, total_steps, step, state)
 
         # Collect one more cycle for mean pressure
-        pressures = []
-        for _ in range(steps_per_cycle):
-            state = node.update(state, {}, dt)
-            pressures.append(float(state["arterial_pressure"]))
+        state, pressures = jax.lax.scan(
+            step_and_record, state, None, length=steps_per_cycle)
+        pressures = [float(p) for p in jax.device_get(pressures)]
 
         mean_pressure = sum(pressures) / len(pressures)
         mean_flow = sv * hr / 60.0  # ml/s (or whatever units)

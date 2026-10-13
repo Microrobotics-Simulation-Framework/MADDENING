@@ -50,8 +50,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from maddening.core import _matmul_precision
+from maddening.core._quiet_warnings import quiet_warnings
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
+from maddening.core.coupling.acceleration import (
+    convergence_criterion,
+    reported_converged,
+)
 
 
 @dataclass
@@ -85,7 +91,23 @@ class ProfileReport:
     # iteration per group; ``"estimated"``: real step minus the sum of
     # isolated node costs (the pre-0.4 definition); ``""``: no groups.
     coupling_overhead_method: str = ""
+    # A difference of two windows timed at *different* points of the
+    # trajectory.  See ``measure_coupling`` in :func:`profile_graph` for
+    # which points, why that is sound, and what it was measured to cost.
     coupling_overhead_ms: float = 0.0
+    # Standard error of ``coupling_overhead_ms``, propagated from the two
+    # windows' own per-step scatter.  An overhead smaller than this was
+    # certainly not resolved; the converse does not follow.  It is a
+    # *lower bound* on the uncertainty, because the two windows are timed
+    # minutes apart and it captures only the scatter within each, not
+    # drift between them -- on a shared machine that drift can dominate,
+    # and the spread over repeated runs is the better guide.  (Measured
+    # on a two-spring pair: 0.0282 ms across 30 runs against a
+    # within-window error several times smaller.)  Only defined for
+    # ``"measured"``; the estimated method has no second window to take a
+    # scatter from and leaves this 0.0, so read it together with
+    # ``coupling_overhead_method``, never on its own.
+    coupling_overhead_se_ms: float = 0.0
     one_iteration_step_ms: float = 0.0
     coupling_per_iteration_ms: float = 0.0
     # Last-step iteration count per group (kept for compatibility).
@@ -96,6 +118,10 @@ class ProfileReport:
 
     # Optional jax.profiler trace attribution (``trace=True``)
     trace: Optional["TraceSummary"] = None
+
+    # Deterministic compilation counts (``counts=True``, the default).
+    # Unlike every timing above, these reproduce exactly on any machine.
+    counts: Optional["CompileCounts"] = None
 
     # State sizes
     node_sizes: dict[str, int] = field(default_factory=dict)
@@ -139,12 +165,23 @@ class ProfileReport:
         if self.n_coupling_groups > 0:
             lines.append(f"")
             lines.append(f"  Coupling groups: {self.n_coupling_groups}")
+            measured = self.coupling_overhead_method == "measured"
+            # Below its own standard error the difference was not
+            # resolved, and saying so is the whole point of printing the
+            # error beside it: no threshold is chosen here, the
+            # comparison is against the scatter the run itself produced.
+            unresolved = (
+                measured
+                and abs(self.coupling_overhead_ms) < self.coupling_overhead_se_ms
+            )
             lines.append(
-                f"  Coupling overhead: {self.coupling_overhead_ms:.2f} ms "
-                f"({self.coupling_overhead_method or 'n/a'}"
+                f"  Coupling overhead: {self.coupling_overhead_ms:.2f} "
+                + (f"+- {self.coupling_overhead_se_ms:.2f} " if measured else "")
+                + f"ms ({self.coupling_overhead_method or 'n/a'}"
+                + ("; below resolution" if unresolved else "")
                 + (f"; one-iteration step {self.one_iteration_step_ms:.2f} ms, "
                    f"{self.coupling_per_iteration_ms:.2f} ms per extra iteration"
-                   if self.coupling_overhead_method == "measured" else "")
+                   if measured else "")
                 + ")"
             )
             for group_key, st in self.coupling_iter_stats.items():
@@ -157,6 +194,10 @@ class ProfileReport:
             for group_key, iters in self.coupling_iters.items():
                 if group_key not in self.coupling_iter_stats:
                     lines.append(f"    {group_key}: {iters} iterations")
+
+        if self.counts is not None:
+            lines.append(f"")
+            lines.extend(self.counts.lines())
 
         if self.trace is not None:
             lines.append(f"")
@@ -216,15 +257,387 @@ class TraceSummary:
         return out
 
 
-def _meta_group_keys(gm) -> list[tuple[str, str, str, float, int]]:
-    """``(group_key, iter_key, res_key, threshold, cap)`` per group."""
+# ---------------------------------------------------------------------------
+# Deterministic compilation counts
+# ---------------------------------------------------------------------------
+
+
+@stability(StabilityLevel.EVOLVING)
+@dataclass
+class CompileCounts:
+    """Compilation counts for a graph: integers, never durations.
+
+    Compile time is what a user of MADDENING feels first, and a silent
+    regression in it would ship unnoticed -- but wall-clock cannot gate
+    it.  A per-step timing comparison in this repository failed CI at
+    3.27x against a 3.0x bound on a pull request that changed no code at
+    all, because the number it read was the runner and not the solver
+    (see ``tests/core/test_coupling_while_default.py``).
+
+    These counts are what that comparison should have been measuring.
+    They are exactly reproducible: the same graph on the same JAX
+    version yields the same integers on any machine, under any load,
+    however many other jobs share the box.
+
+    Attributes
+    ----------
+    retrace_count : int
+        Python traces of the compiled step since ``compile()``
+        (:attr:`GraphManager.trace_count`).  One is healthy.  More means
+        something in the call signature keeps changing -- a weak-typed
+        leaf, a drifting dtype, a non-static argument -- and every one of
+        them is a full XLA compile the user pays for.  This is the single
+        most valuable number here: an unexpected retrace is the classic
+        silent regression, and it is the one count that does not depend
+        on the JAX version at all, because it is counted in Python.
+    jaxpr_primitive_count : int
+        Primitives in the step's jaxpr, recursing into every sub-jaxpr
+        (``scan``/``while``/``cond`` bodies are counted once, not once
+        per iteration).  A structural measure of how much work the graph
+        builder emits.
+    hlo_op_count : int
+        Operations in the lowered StableHLO module, excluding the
+        top-level ``module`` op.  Deliberately the *pre*-optimisation
+        module: it is what MADDENING hands to XLA, so it measures
+        MADDENING's own graph construction rather than the backend's
+        fusion decisions, which differ by platform and would make the
+        number machine-dependent.
+    scan_steps : int
+        Length of the ``run_scan`` program the scan counts describe;
+        ``0`` when no scan was measured.
+    scan_retrace_count : int
+        Python traces of scan programs since ``compile()``
+        (:attr:`GraphManager.scan_trace_count`).
+    scan_jaxpr_primitive_count, scan_hlo_op_count : int
+        The same two structural counts for the scan program.
+
+    Notes
+    -----
+    Not timing.  :class:`ProfileReport` carries the wall-clock numbers;
+    they are worth trending and must not gate.
+    """
+
+    retrace_count: int = 0
+    jaxpr_primitive_count: int = 0
+    hlo_op_count: int = 0
+    scan_steps: int = 0
+    scan_retrace_count: int = 0
+    scan_jaxpr_primitive_count: int = 0
+    scan_hlo_op_count: int = 0
+
+    def as_dict(self) -> dict[str, int]:
+        """The counts as a plain ``dict`` of ``int``, for serialisation.
+
+        Scan fields are omitted entirely when no scan was measured, so a
+        baseline never records a zero that could be mistaken for a
+        measured count of nothing.
+        """
+        out = {
+            "retrace_count": int(self.retrace_count),
+            "jaxpr_primitive_count": int(self.jaxpr_primitive_count),
+            "hlo_op_count": int(self.hlo_op_count),
+        }
+        if self.scan_steps:
+            out.update(
+                scan_steps=int(self.scan_steps),
+                scan_retrace_count=int(self.scan_retrace_count),
+                scan_jaxpr_primitive_count=int(self.scan_jaxpr_primitive_count),
+                scan_hlo_op_count=int(self.scan_hlo_op_count),
+            )
+        return out
+
+    def lines(self) -> list[str]:
+        """Rendered lines for :meth:`ProfileReport.__str__`."""
+        out = [
+            "  Compile counts (deterministic; no wall-clock):",
+            f"    step retraces:     {self.retrace_count:>7d}"
+            + ("" if self.retrace_count == 1 else "   <-- expected 1"),
+            f"    jaxpr primitives:  {self.jaxpr_primitive_count:>7d}",
+            f"    lowered HLO ops:   {self.hlo_op_count:>7d}",
+        ]
+        if self.scan_steps:
+            out += [
+                f"    scan ({self.scan_steps} steps) retraces: "
+                f"{self.scan_retrace_count:>3d}",
+                f"    scan jaxpr primitives: {self.scan_jaxpr_primitive_count:>7d}",
+                f"    scan lowered HLO ops:  {self.scan_hlo_op_count:>7d}",
+            ]
+        return out
+
+
+def _subjaxprs(jaxpr) -> list:
+    """Sub-jaxprs of *jaxpr*, one level down.
+
+    ``jax.extend.core.subjaxprs`` is the supported spelling; the
+    duck-typed fallback keeps this working on a JAX that moves it again
+    (``jax.core.ClosedJaxpr`` disappeared in 0.11, which is exactly the
+    breakage this fallback exists for).
+    """
+    try:
+        from jax.extend.core import subjaxprs
+    except ImportError:  # pragma: no cover - JAX layout change
+        pass
+    else:
+        return list(subjaxprs(jaxpr))
+
+    found = []  # pragma: no cover - JAX layout change
+    for eqn in jaxpr.eqns:  # pragma: no cover - JAX layout change
+        for value in eqn.params.values():
+            items = value if isinstance(value, (tuple, list)) else (value,)
+            for item in items:
+                inner = getattr(item, "jaxpr", item)
+                if hasattr(inner, "eqns"):
+                    found.append(inner)
+    return found
+
+
+@stability(StabilityLevel.EVOLVING)
+def count_jaxpr_primitives(jaxpr) -> int:
+    """Primitives in *jaxpr*, recursing into every sub-jaxpr.
+
+    Parameters
+    ----------
+    jaxpr : Jaxpr or ClosedJaxpr
+        The jaxpr to count.  A ``ClosedJaxpr`` is unwrapped.
+
+    Returns
+    -------
+    int
+        Total equation count.  A ``scan`` contributes its own primitive
+        plus the primitives of its body **once**, not once per
+        iteration, so the number describes the program's structure and
+        not the trip count -- which is what makes it comparable between
+        a 10-step and a 1000-step run of the same graph.
+    """
+    jaxpr = getattr(jaxpr, "jaxpr", jaxpr)
+    return len(jaxpr.eqns) + sum(count_jaxpr_primitives(s) for s in _subjaxprs(jaxpr))
+
+
+@stability(StabilityLevel.EVOLVING)
+def count_hlo_ops(lowered) -> int:
+    """Operations in a ``jax.stages.Lowered``'s StableHLO module.
+
+    Every MLIR operation in the module is counted, at every nesting
+    depth, excluding the top-level ``module`` op itself (``func.func``,
+    ``return`` and the bodies of ``stablehlo.while`` / ``stablehlo.case``
+    are all included).  Counting everything rather than filtering by
+    dialect keeps the number stable across JAX versions that rename or
+    re-dialect an op.
+
+    Parameters
+    ----------
+    lowered : jax.stages.Lowered
+        The result of ``jitted_fn.lower(*args)``.
+
+    Returns
+    -------
+    int
+        Operation count of the pre-optimisation module.
+    """
+    total = 0
+    stack = [lowered.compiler_ir().operation]
+    while stack:
+        op = stack.pop()
+        for region in op.regions:
+            for block in region.blocks:
+                for child in block.operations:
+                    total += 1
+                    stack.append(child)
+    return total
+
+
+@stability(StabilityLevel.EVOLVING)
+def compile_counts(
+    gm,
+    *,
+    external_inputs: Optional[dict] = None,
+    params: Optional[dict] = None,
+    scan_steps: int = 0,
+    warmup_steps: int = 4,
+) -> CompileCounts:
+    """Measure :class:`CompileCounts` for a compiled graph.
+
+    Parameters
+    ----------
+    gm : GraphManager
+        The graph.  Compiled if dirty.
+    external_inputs : dict or None
+        External inputs for the step whose compilation is measured.
+        ``None`` uses the graph's defaults.
+    params : dict or None
+        Graph parameter pytree; ``None`` uses ``gm.params``.
+    scan_steps : int
+        When positive, also build a ``run_scan`` program of this length
+        and count it.  Costs one scan compile.
+    warmup_steps : int
+        Steps to run before reading the counts.  **A single step is not
+        enough**, and the default is 4 for a specific reason: the retrace
+        bugs this repository has actually had did not retrace on the
+        first step.  The weak-typed-seed bug fixed in
+        ``tests/core/test_step_retrace.py`` traced once on step 1, again
+        on step 2 when a weak leaf came back strongly typed, and a third
+        time on step 3 for leaves that only changed later.  Measured
+        after one step it looks perfectly healthy.  Pass ``0`` when the
+        caller has already run the graph far enough, as
+        :func:`profile_graph` has.
+
+    Returns
+    -------
+    CompileCounts
+        The counts.
+
+    Notes
+    -----
+    The graph is left ``warmup_steps`` steps further on than it was
+    found: warming up is the price of a meaningful retrace count, and
+    silently rewinding it would hide that from the caller.  The scan
+    measurement is different -- it advances the graph by ``scan_steps``
+    purely as an implementation detail -- so that one *is* rolled back.
+
+    Lowering the step to read its jaxpr and its HLO re-enters
+    ``jax.jit``, which serves both from its jaxpr cache and so does not
+    retrace a warm graph.  ``_n_traces`` is nevertheless snapshotted and
+    restored around the measurement, so that measuring a graph can never
+    move the very number being measured -- on any JAX whose caching
+    differs from today's.  ``tests/core/test_compile_counts.py`` pins
+    that: it asserts ``trace_count`` is unchanged by a measurement, an
+    assertion that passes today and would be the only warning if a JAX
+    upgrade changed it.
+    """
+    gm._check_static_data_dirty()       # a node.params write, as every run method checks
+    if gm._dirty or gm._compiled_step is None:
+        gm.compile()
+
+    for _ in range(max(0, warmup_steps)):
+        gm.step(external_inputs, params=params)
+    # A graph nobody has stepped has a retrace count of 0 and no compiled
+    # program to lower; one step is the floor even when warmup is off.
+    if gm.trace_count == 0:
+        gm.step(external_inputs, params=params)
+    jax.block_until_ready(jax.tree.leaves(gm._state))
+
+    resolved_ext = gm._resolve_external_inputs(external_inputs)
+    resolved_params = gm._params_or_default(params)
+
+    counts = CompileCounts(retrace_count=int(gm.trace_count))
+
+    step_fn = gm._compiled_step
+    assert step_fn is not None  # the compile guard at the top of this function
+
+    saved_traces = gm._n_traces
+    try:
+        lowered = step_fn.lower(gm._state, resolved_ext, resolved_params)
+        counts.hlo_op_count = count_hlo_ops(lowered)
+        counts.jaxpr_primitive_count = count_jaxpr_primitives(
+            jax.make_jaxpr(step_fn)(gm._state, resolved_ext, resolved_params)
+        )
+    finally:
+        gm._n_traces = saved_traces
+
+    if scan_steps > 0:
+        counts.scan_steps = int(scan_steps)
+        saved_state = jax.tree.map(lambda x: x, gm._state)
+        # With the state goes what its last step left where the state has
+        # been written since (``GraphManager._keep_state_for_reports``):
+        # the run below drops it, and the caller's report would then be
+        # measured on the written state.
+        saved_as_reported = gm._state_as_reported
+        try:
+            # Populates ``_scan_cache``; ``scan_trace_count`` counts the
+            # Python traces, one per XLA compile of a scan program.  It
+            # is deliberately *not* restored afterwards the way
+            # ``_n_traces`` is: this call really did build a scan
+            # program, the program stays in ``_scan_cache``, and a
+            # counter rolled back below a cache that still holds the
+            # program would report 0 traces for a program that exists.
+            gm.run_scan(scan_steps, external_inputs, params=params)
+            counts.scan_retrace_count = int(gm.scan_trace_count)
+            key = (gm._compile_generation, "run_scan", int(scan_steps))
+            scan_fn = gm._scan_cache[key]
+            scan_lowered = scan_fn.lower(saved_state, resolved_ext, resolved_params)
+            counts.scan_hlo_op_count = count_hlo_ops(scan_lowered)
+            counts.scan_jaxpr_primitive_count = count_jaxpr_primitives(
+                jax.make_jaxpr(scan_fn)(saved_state, resolved_ext, resolved_params)
+            )
+        finally:
+            gm._state = saved_state
+            gm._state_as_reported = saved_as_reported
+
+    return counts
+
+
+def _meta_group_keys(gm) -> list[tuple[str, str, str, str, float, float, int]]:
+    """``(group_key, iter_key, res_key, amp_key, threshold, step_scale, cap)``.
+
+    ``amp_key`` carries the amplification ``1/(1 - rho)`` the
+    convergence flag is built from, and ``(threshold, step_scale)`` is
+    the group's criterion from
+    :func:`~maddening.core.coupling.acceleration.convergence_criterion`:
+    ``converged_fraction`` has to test the same estimated distance to the
+    fixed point that ``coupling_diagnostics()`` does, not the raw
+    residual and not the residual without the relaxation factor.
+    """
     out = []
     for g in gm._coupling_groups:
         key = "+".join(sorted(g.nodes))
-        thr = 1.0 if g.convergence_norm in ("mixed", "interface") else float(g.tolerance)
+        thr, scale = convergence_criterion(g)
         out.append((key, f"coupling_{key}_iterations", f"coupling_{key}_residual",
-                    thr, int(g.max_iterations)))
+                    f"coupling_{key}_amplification", thr, scale, int(g.max_iterations)))
     return out
+
+
+def _declared_inputs(node) -> dict:
+    """Each input ``boundary_input_spec()`` declares, at its default (zeros if none)."""
+    out = {}
+    for name, bspec in (node.boundary_input_spec() or {}).items():
+        default = getattr(bspec, "default", None)
+        out[name] = (jnp.asarray(default) if default is not None
+                     else jnp.zeros(tuple(bspec.shape), dtype=bspec.dtype or jnp.float32))
+    return out
+
+
+def _group_sweeps(gm) -> dict[str, int]:
+    """``{group_key: waveform sweeps}``: how many fixed-point solves a step runs per group.
+
+    One unless the group sub-cycles with ``waveform_iterations > 1``
+    (``maddening.core.coupling._group_layout._group_waveform_sweeps``) -- and so
+    the passes the one-iteration variant runs, one per sweep.
+    """
+    from maddening.core.coupling._group_layout import _group_waveform_sweeps  # noqa: PLC0415
+
+    return {"+".join(sorted(g.nodes)): int(_group_waveform_sweeps(g, gm._nodes))
+            for g in gm._coupling_groups}
+
+
+def _group_rate_dividers(gm) -> dict[str, int]:
+    """``{group_key: rate divider}``: every how many base steps a group solves.
+
+    ``1`` on a uniform-rate graph.  Every member of a group shares one
+    divider (a sub-cycling group is scheduled at its macro timestep).
+    """
+    if not gm.is_multirate:
+        return {}
+    dividers = gm.rate_dividers
+    return {"+".join(sorted(g.nodes)): int(dividers[sorted(g.nodes)[0]])
+            for g in gm._coupling_groups}
+
+
+def _meta_converged(meta: dict, res_key: str, amp_key: str,
+                    threshold: float, step_scale: float) -> bool:
+    """One group's ``converged`` for the step whose ``_meta`` this is.
+
+    Read from the slots by the rule ``coupling_diagnostics()`` uses
+    (:func:`~maddening.core.coupling.acceleration.reported_converged`),
+    in the dtype the slots are stored in -- which is the dtype the loop,
+    ``strict_convergence`` and the sysid mask compared in -- so
+    ``converged_fraction`` counts exactly the steps the report calls
+    converged.  It used to compare the float64 product of the slots,
+    which disagreed with the loop within half a float32 ulp of the
+    threshold.
+    """
+    residual = np.asarray(meta[res_key])
+    amp = np.asarray(meta.get(amp_key, 0.0))
+    return reported_converged(residual, amp, step_scale, threshold)
 
 
 def _time_steps(gm, external_inputs, n: int) -> np.ndarray:
@@ -253,20 +666,42 @@ def _one_iteration_variant(gm):
     def _cm():
         saved_groups = list(gm._coupling_groups)
         saved_state = jax.tree.map(lambda x: x, gm._state)
+        saved_as_reported = gm._state_as_reported
         saved_params = gm.params
         saved_step = gm._compiled_step
         try:
-            gm._coupling_groups = [
-                dataclasses.replace(g, max_iterations=1, strict_convergence=False)
-                for g in saved_groups
-            ]
-            gm.compile()
+            # ``dataclasses.replace`` re-runs ``__post_init__``, whose
+            # inert-knob rules then warn that the *user's* acceleration
+            # settings are ignored under ``max_iterations=1`` -- a cap
+            # the user never wrote -- and a ``solver="fori"`` group
+            # repeats its deprecation.  The variant is this profiler's
+            # own construction, so what its constructor says is not the
+            # caller's business; the groups were validated, and warned
+            # about, when the caller built them.
+            #
+            # The same goes for the two recompiles.  ``compile()`` re-runs
+            # ``validate()`` and re-emits every advisory it raised when the
+            # caller compiled -- a disconnected node, a knob a uniform-
+            # timestep group ignores -- each attributed to this module,
+            # and twice (the variant, then the restore).  Neither graph
+            # differs from the caller's in anything those advisories read:
+            # the variant changes ``max_iterations`` and
+            # ``strict_convergence``, the restore puts the caller's groups
+            # back.  Errors still raise: only warnings are silenced.
+            with quiet_warnings():
+                gm._coupling_groups = [
+                    dataclasses.replace(g, max_iterations=1, strict_convergence=False)
+                    for g in saved_groups
+                ]
+                gm.compile()
             gm._state = jax.tree.map(lambda x: x, saved_state)
             yield
         finally:
             gm._coupling_groups = saved_groups
-            gm.compile()
+            with quiet_warnings():
+                gm.compile()
             gm._state = saved_state
+            gm._state_as_reported = saved_as_reported
             gm.params = saved_params
             # ``compile`` rebuilt the step; the original object is fine
             # to keep for callers holding a reference (same graph).
@@ -361,6 +796,9 @@ def profile_graph(
     external_inputs: Optional[dict] = None,
     *,
     measure_coupling: bool = True,
+    n_stat_steps: Optional[int] = None,
+    counts: bool = True,
+    count_scan_steps: int = 0,
     trace: bool = False,
     trace_steps: int = 20,
     trace_dir: Optional[str] = None,
@@ -384,6 +822,77 @@ def profile_graph(
         iteration and time it, so ``coupling_overhead_ms`` is measured
         rather than inferred (costs one extra compile; the graph is
         restored afterwards).  Ignored without coupling groups.
+
+        The two windows it subtracts start at **different points of the
+        trajectory**, and stay that way on purpose.  ``mean_step_ms`` is
+        timed ``n_warmup`` steps after a ``reset_state``;
+        ``one_iteration_step_ms`` is timed from wherever the timed run
+        and the coupling-statistics pass left the state, plus another
+        ``n_warmup``.  Nothing leaks -- :func:`_one_iteration_variant`
+        saves and restores state, groups and compiled step -- but the
+        *start* is not pinned the way ``n_stat_steps`` pins the
+        statistics pass, and unlike that pass it does not need to be.
+
+        The reason is structural rather than lucky:
+        ``max_iterations <= 1`` returns straight after the single
+        staggered pass, before any ``while_loop``, accelerator or IFT
+        solve is reached, so the capped step is straight-line code on
+        fixed shapes and costs the same whatever state it starts from.
+        It runs exactly one pass per waveform sweep from every trajectory
+        position -- ``iterations`` reads one, and ``total_iterations``
+        the group's number of sweeps (one unless it sub-cycles with
+        ``waveform_iterations > 1``) -- so ``coupling_per_iteration_ms``
+        divides the overhead by the real step's ``total_iterations`` less
+        those sweeps, the passes the overhead paid for, which
+        ``test_one_iteration_variant_runs_one_pass_from_any_position``
+        pins.  Pinning both windows to the same start was measured on
+        the compute-bound ``expensive-pair`` fixture (two 1e5-cell heat
+        grids), interleaving pinned and unpinned measurements with a
+        fresh graph for each, and it moved ``coupling_overhead_ms`` by
+        less than the measurement's own scatter both times: -0.11%
+        against 8.1% run-to-run scatter over 10 repeats on a quiet
+        machine, and -7.6% against 34% scatter over 16 repeats on a
+        loaded one -- 0.03 and 0.62 standard errors of the difference.
+        The scatter tracks the machine's load, the discrepancy does not
+        resolve above it either way, and the computation is therefore
+        left as it is.  Should a cap of one ever regain a data-dependent
+        trip count, the subtraction would begin comparing two different
+        workloads and this window would have to be pinned.
+
+        ``coupling_overhead_ms`` is reported **signed**.  On a graph whose
+        step is dominated by dispatch the two windows differ by less than
+        their own scatter and the difference falls on either side of zero
+        from run to run -- measured over 30 runs of a two-spring pair,
+        +0.0051 +- 0.0282 ms, negative in 11 of them.  It used to be
+        clamped at zero, which biased the reported mean upward (+0.0135
+        ms, 2.6x the unclamped value, because only the negative half of
+        the noise was discarded) and printed a confident ``0.00 ms`` for
+        something the run had not resolved.  A negative number says
+        "below this run's resolution" in a way no non-negative one can.
+        ``coupling_overhead_se_ms`` carries the resolution alongside it.
+    n_stat_steps : int or None
+        Steps in the coupling-iteration statistics pass.  ``None``
+        keeps the historical behaviour: ``min(n_steps, 50)`` steps taken
+        from wherever the timed run left the state, which makes
+        ``coupling_iter_stats`` depend on ``n_steps`` twice over — the
+        sample count follows it, and so does the window's *position* in
+        the trajectory.  On a periodically driven graph that moves the
+        mean iteration count by tens of percent, which is a trap for
+        any caller that shortens a timing run believing the iteration
+        counts are properties of the step.  Passing a value pins both:
+        the state is reset and re-warmed first, so the statistics come
+        from the same window whatever ``n_steps`` is.  On a multi-rate
+        graph a group solves only on the base steps its rate divider
+        fires on, and it is sampled only on those: its ``"n"`` counts
+        solves, not base steps.
+    counts : bool
+        Measure :class:`CompileCounts` -- retraces, jaxpr primitives and
+        lowered HLO ops.  Cheap (no device work) and, unlike every
+        timing in the report, exactly reproducible, which is why the
+        regression gate reads these and not the clock.
+    count_scan_steps : int
+        When positive and ``counts`` is set, also build a ``run_scan``
+        program of this length and count it.  Costs one scan compile.
     trace : bool
         Record ``trace_steps`` steps with ``jax.profiler`` and attribute
         device kernel time to the graph's named scopes
@@ -396,6 +905,7 @@ def profile_graph(
     ProfileReport
         Detailed profiling results.
     """
+    gm._check_static_data_dirty()       # a node.params write, as every run method checks
     if gm._dirty or gm._compiled_step is None:
         gm.compile()
 
@@ -438,6 +948,21 @@ def profile_graph(
     if report.mean_step_ms > 0:
         report.steps_per_second = 1000.0 / report.mean_step_ms
 
+    # Compilation counts, taken here rather than at the end: the coupling
+    # measurement below recompiles the step (resetting ``trace_count``),
+    # so anywhere after it the retrace count would describe the
+    # profiler's own recompile instead of the run that was just timed.
+    if counts:
+        # ``warmup_steps=0``: the timed run above has already stepped the
+        # graph ``n_warmup + n_steps`` times, well past the point where a
+        # late retrace would have shown up, and stepping further here
+        # would move the window the coupling statistics below are taken
+        # from.
+        report.counts = compile_counts(
+            gm, external_inputs=external_inputs, scan_steps=count_scan_steps,
+            warmup_steps=0,
+        )
+
     # Dispatch floor: a jitted identity on the same pytree.
     ext = external_inputs if external_inputs is not None else gm._default_external_inputs()
     identity = jax.jit(lambda s, e, p: s)
@@ -453,25 +978,59 @@ def profile_graph(
     # _meta forces a device->host sync that must not pollute the timing).
     group_keys = _meta_group_keys(gm)
     if group_keys:
-        n_stat = min(n_steps, 50)
+        n_stat = min(n_steps, 50) if n_stat_steps is None else n_stat_steps
+        if n_stat_steps is not None:
+            # Pin the window's position as well as its length: without
+            # this the pass starts wherever the timed run happened to
+            # stop, which is n_warmup + n_steps into the trajectory.
+            gm.reset_state()
+            for _ in range(max(0, n_warmup)):
+                gm.step(external_inputs)
+            jax.block_until_ready(jax.tree.leaves(gm._state))
         iters = {k[0]: [] for k in group_keys}
+        # Every pass the step ran (``total_iterations``: summed over the
+        # waveform sweeps; the slot exists only for a group running more
+        # than one, and a one-sweep group's total is ``iterations``).
+        totals = {k[0]: [] for k in group_keys}
         conv = {k[0]: [] for k in group_keys}
+        # On a multi-rate graph a group solves only on the base steps its
+        # rate divider fires on, and its ``_meta`` slots hold that solve
+        # until the next one.  Sampled on every base step, one solve was
+        # counted ``divider`` times -- and before the slots were gated,
+        # the steps in between reported the solves the step discarded.
+        dividers = _group_rate_dividers(gm)
         for _ in range(n_stat):
+            step_count = int(gm._state.get("_meta", {}).get("step_count", 0))
             gm.step(external_inputs)
             meta = gm._state.get("_meta", {})
-            for key, iter_key, res_key, thr, cap in group_keys:
+            for key, iter_key, res_key, amp_key, thr, scale, cap in group_keys:
+                if step_count % dividers.get(key, 1) != 0:
+                    continue    # the group did not solve on this base step
                 if iter_key in meta:
                     iters[key].append(int(meta[iter_key]))
-                    conv[key].append(float(meta[res_key]) <= thr)
-        for key, _ik, _rk, _thr, cap in group_keys:
+                    totals[key].append(int(meta.get(
+                        f"coupling_{key}_total_iterations", meta[iter_key])))
+                    conv[key].append(_meta_converged(meta, res_key, amp_key, thr, scale))
+        sweeps = _group_sweeps(gm)
+        for key, _ik, _rk, _ak, _thr, _scale, cap in group_keys:
             if iters[key]:
                 a = np.asarray(iters[key])
                 report.coupling_iter_stats[key] = {
                     "mean": float(a.mean()), "min": int(a.min()), "max": int(a.max()),
                     "cap": cap,
-                    # ``iterations`` counts body iterations after the
-                    # first pass, so the cap is reached at cap - 1.
-                    "at_cap_fraction": float(np.mean(a >= cap - 1)),
+                    # Every pass the step ran, summed over its waveform
+                    # sweeps, and how many sweeps that is: the passes the
+                    # one-iteration variant runs (one per sweep), which
+                    # ``coupling_per_iteration_ms`` subtracts.
+                    "total_mean": float(np.mean(totals[key])),
+                    "sweeps": int(sweeps.get(key, 1)),
+                    # ``iterations`` counts the passes that produced the
+                    # returned state, the first staggered one included,
+                    # and equals ``max_iterations`` exactly when the
+                    # group exhausted its budget (with
+                    # ``waveform_iterations > 1``: when some sweep did)
+                    # -- see ``coupling_diagnostics()``.
+                    "at_cap_fraction": float(np.mean(a >= cap)),
                     "converged_fraction": float(np.mean(conv[key])),
                     "n": int(a.size),
                 }
@@ -479,8 +1038,14 @@ def profile_graph(
     # Per-node cost estimation: run each node's update in isolation
     for name, spec in gm._nodes.items():
         node_state = gm._state.get(name, spec.node.initial_state())
-        bi = {}  # empty boundary inputs
-        update_fn = jax.jit(spec.update_fn)
+        # Every input the node declares, at its declared default (zeros where
+        # it gives none): timed with no inputs at all, a node that indexes a
+        # declared input -- ``boundary_inputs["u"]``, as the graph always
+        # supplies it -- raised ``KeyError`` and took the profile with it.
+        bi = _declared_inputs(spec.node)
+        # Timed at the precision the graph's step runs it at
+        # (``GraphManager.matmul_precision``), not at JAX's default.
+        update_fn = jax.jit(_matmul_precision.pinned(spec.update_fn, _matmul_precision.of(gm)))
         # Warmup
         _ = update_fn(node_state, bi, spec.timestep)
         jax.block_until_ready(_)
@@ -494,6 +1059,16 @@ def profile_graph(
         report.node_times_ms[name] = float(np.mean(times))
 
     # Coupling overhead: measured (one-iteration variant) or estimated.
+    #
+    # The one-iteration window is deliberately *not* pinned to where
+    # ``mean_step_ms`` was measured -- it starts from wherever the timed
+    # run and the statistics pass left the state.  A group capped at one
+    # iteration has no data-dependent control flow, so the capped step
+    # costs the same from any state and the subtraction stays valid.
+    # Measured impact of pinning it: under one standard error of the
+    # difference in two runs (-0.11% against 8.1% run-to-run scatter;
+    # -7.6% against 34% on a loaded box).  Full reasoning on
+    # ``measure_coupling`` above.
     report.sum_node_ms = sum(report.node_times_ms.values())
     if group_keys and measure_coupling:
         with _one_iteration_variant(gm):
@@ -503,15 +1078,52 @@ def profile_graph(
                 gm.step(external_inputs)
             one = _time_steps(gm, external_inputs, n_steps)
         report.one_iteration_step_ms = float(np.mean(one))
-        report.coupling_overhead_ms = max(0.0, report.mean_step_ms - report.one_iteration_step_ms)
+        # Signed, deliberately.  This is a difference of two timing means
+        # and on a graph whose step is dominated by dispatch it is noise
+        # centred near zero: measured over 30 runs of a two-spring pair,
+        # +0.0051 +- 0.0282 ms, negative in 11 of them.  Clamping that to
+        # zero did not make it more accurate, it made it *biased* -- the
+        # clamped mean came out at +0.0135 ms, 2.6x the unclamped one,
+        # because only the negative half of the noise was discarded --
+        # and it published a confident-looking ``0.00 ms`` for a quantity
+        # the run could not resolve.  A negative value is the honest
+        # report of exactly that, and is why it travels with
+        # ``coupling_overhead_se_ms``.
+        report.coupling_overhead_ms = (
+            report.mean_step_ms - report.one_iteration_step_ms
+        )
+        # Resolution of that difference, from the two windows' own
+        # per-step scatter rather than any chosen threshold.  Both were
+        # timed ``n_steps`` times, and ``std_step_ms`` is ``np.std``
+        # (ddof=0) of the first, so the same convention is used for the
+        # second and the two combine in quadrature.
+        report.coupling_overhead_se_ms = float(
+            np.sqrt(report.std_step_ms ** 2 + float(np.std(one)) ** 2)
+            / np.sqrt(max(n_steps, 1))
+        )
         report.coupling_overhead_method = "measured"
+        # The passes the overhead paid for: every pass the real step ran
+        # (``total_iterations``) less the ones the variant still runs --
+        # one per waveform sweep.  Divided by ``iterations - 1`` -- the
+        # largest sweep's count -- it overstated the cost of a pass by
+        # nearly ``waveform_iterations`` times: 87 passes of overhead on a
+        # three-sweep group divided by 29.
         extra = sum(
-            max(st["mean"] - 1.0, 0.0) for st in report.coupling_iter_stats.values()
+            max(st.get("total_mean", st["mean"]) - st.get("sweeps", 1), 0.0)
+            for st in report.coupling_iter_stats.values()
         )
         report.coupling_per_iteration_ms = (
             report.coupling_overhead_ms / extra if extra > 0 else 0.0
         )
     elif group_keys:
+        # This clamp is left in place on purpose.  It is a different
+        # estimator -- the step minus the sum of separately jitted node
+        # timings, each carrying its own dispatch -- and it was measured
+        # not to fire: 0 negatives in 20 runs on each of a launch-bound
+        # two-spring pair and a compute-bound 2 x 1e5-cell heat pair.
+        # With no observed case of it converting anything, there is
+        # nothing here to justify changing, and unlike the measured path
+        # there is no second window to derive a resolution from.
         report.coupling_overhead_ms = max(0.0, report.mean_step_ms - report.sum_node_ms)
         report.coupling_overhead_method = "estimated"
 
@@ -542,7 +1154,9 @@ def profile_graph(
 
     # Identify bottleneck
     if report.node_times_ms:
-        worst = max(report.node_times_ms, key=report.node_times_ms.get)
+        # `dict.get` as the key function is typed as returning `float |
+        # None`, which is not orderable; subscripting says what is meant.
+        worst = max(report.node_times_ms, key=lambda k: report.node_times_ms[k])
         worst_ms = report.node_times_ms[worst]
         if worst_ms > 0.8 * report.mean_step_ms:
             report.bottleneck = (
@@ -688,6 +1302,11 @@ def profile_report_to_perfetto(report: ProfileReport) -> dict:
         })
         cursor_us += dur_us
 
+    # ``> 0`` rather than ``!= 0``: since the measured overhead is signed
+    # it can be negative, and a trace event with a negative ``dur`` is
+    # not a valid Perfetto slice.  An unresolved or negative overhead
+    # emits no slice at all, which is the right answer -- there was no
+    # measurable overhead to draw.
     if report.coupling_overhead_ms > 0:
         events.append({
             "name": "coupling_overhead",

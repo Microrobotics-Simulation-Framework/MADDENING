@@ -2,7 +2,7 @@
 
 ## Platform Positioning Statement
 
-MADDENING (Modular Automatic Differentiation and Data Enhanced Neural-network INteracting Graph) is a **general-purpose computational framework** for multi-physics simulation. It provides infrastructure for composing, coupling, and differentiating physics simulations using {term}`JAX`, with support for neural surrogates and uncertainty quantification.
+MADDENING (Modular Automatic Differentiation and Data Enhanced Neural-network INteracting Graph) is a **general-purpose computational framework** for multi-physics simulation. It provides infrastructure for composing, {term}`coupling <Coupling>`, and differentiating physics simulations using {term}`JAX`, with support for neural {term}`surrogates <Surrogate>` and uncertainty quantification.
 
 **MADDENING is not a medical device** as defined by {term}`EU MDR` (EU 2017/745) Article 2(1). It does not have a medical purpose, does not make clinical predictions, and does not provide diagnostic, therapeutic, or monitoring functionality. Per {term}`MDCG 2019-11` Section 3.2, MADDENING is a general-purpose computing tool comparable to MATLAB, NumPy, or FEniCS — it can be used to build medical device software, but is not itself a medical device.
 
@@ -14,10 +14,10 @@ When used in a regulated product, MADDENING is classified as **{term}`SOUP` (Sof
 |---|---|---|---|
 | Algorithm correctness | Verification evidence (benchmarks, tests) | Validate for specific {term}`COU` | N/A |
 | Numerical stability | Document stability conditions, hazard hints | Enforce stability conditions in integration layer | Follow IFU |
-| Parameter validation | Document validated regimes (`NodeMeta`) | Implement runtime validation for clinical parameters | Use within validated ranges |
+| Parameter validation | Document validated regimes ({codeterm}`NodeMeta`) | Implement runtime validation for clinical parameters | Use within validated ranges |
 | Clinical risk assessment | Not provided (technical hints only) | Full {term}`ISO 14971` risk management | Follow clinical guidance |
 | Regulatory submission | SOUP documentation package | Technical file, CE marking | N/A |
-| Post-market surveillance | Anomaly registry, security updates | PMS plan, PSUR, vigilance reporting | Report incidents |
+| Post-market surveillance | {term}`Anomaly registry`, security updates | PMS plan, PSUR, vigilance reporting | Report incidents |
 
 ## Commercial Boundary Statement
 
@@ -31,11 +31,11 @@ MADDENING **assumes trusted inputs**. All data passed to the framework — simul
 
 The commercial integration layer is responsible for:
 - Input sanitization and parameter validation before data reaches MADDENING
-- Graph topology validation (ensuring only intended node configurations are used)
+- Graph topology validation (ensuring only intended {term}`node <Node>` configurations are used)
 - Network security for any API endpoints (the FastAPI server is a development tool, not a production deployment surface)
 - Authentication and access control for simulation services
 
-MADDENING's {term}`SBOM` (Section 14 of the documentation architecture) provides the complete dependency tree needed for the manufacturer's cybersecurity documentation.
+MADDENING's {term}`SBOM`s (CycloneDX 1.6, `docs/validation/sbom/`; Section 14 of the documentation architecture) give the resolved dependency tree of the base install and of the `server`, `surrogates` and `usd` extras, with each package's version, purl and declared licence, for the manufacturer's cybersecurity documentation.  Each records one resolution, on the Python version, platform and date it names; `pyproject.toml` declares the ranges any install resolves within.  The environment a product actually deploys is the manufacturer's to record: `scripts/generate_sbom.py` does it for any combination of extras (`docs/validation/soup_package.md` §6).
 
 ## LGPL Replaceability Statement
 

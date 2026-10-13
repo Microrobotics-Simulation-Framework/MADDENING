@@ -1,0 +1,27 @@
+devices: 4
+
+== A. pointwise sharded vs unsharded (default axis name) ==
+  dev=1 n=12 divides=True: err=0.00e+00 OK
+  dev=1 n=17 divides=True: err=0.00e+00 OK
+  dev=2 n=12 divides=True: err=0.00e+00 OK
+/home/nick/MSF/msf/MADDENING-wt/audit/cloud-sharding/src/maddening/cloud/multigpu/sharded_node.py:121:33 (ShardedPointwiseNode.initial_state)
+  dev=2 n=17 divides=False: RAISED IndivisibleError: One of device_put args was given the sharding NamedSharding(mesh=Mesh('devices':
+  dev=3 n=12 divides=True: err=0.00e+00 OK
+/home/nick/MSF/msf/MADDENING-wt/audit/cloud-sharding/src/maddening/cloud/multigpu/sharded_node.py:121:33 (ShardedPointwiseNode.initial_state)
+  dev=3 n=17 divides=False: RAISED IndivisibleError: One of device_put args was given the sharding NamedSharding(mesh=Mesh('devices':
+  dev=4 n=12 divides=True: err=0.00e+00 OK
+/home/nick/MSF/msf/MADDENING-wt/audit/cloud-sharding/src/maddening/cloud/multigpu/sharded_node.py:121:33 (ShardedPointwiseNode.initial_state)
+  dev=4 n=17 divides=False: RAISED IndivisibleError: One of device_put args was given the sharding NamedSharding(mesh=Mesh('devices':
+
+== B. shard_axes=(1,) on a (3, 8) state, 4 devices ==
+   axis 0 = 3 (NOT divisible by 4); axis 1 = 8 (divisible by 4)
+/home/nick/MSF/msf/MADDENING-wt/audit/cloud-sharding/src/maddening/cloud/multigpu/sharded_node.py:121:33 (ShardedPointwiseNode.initial_state)
+  shard_axes=(0,): RAISED IndivisibleError: One of device_put args was given the sharding NamedSharding(mesh=Mesh('devices': 4, axis_types=(Auto
+/home/nick/MSF/msf/MADDENING-wt/audit/cloud-sharding/src/maddening/cloud/multigpu/sharded_node.py:121:33 (ShardedPointwiseNode.initial_state)
+  shard_axes=(1,): RAISED IndivisibleError: One of device_put args was given the sharding NamedSharding(mesh=Mesh('devices': 4, axis_types=(Auto
+
+== C. does ShardedPointwiseNode.update() apply any sharding? ==
+   shard_map in update(): False
+   device_put in update(): False
+   initial_state sharding: P('devices',)
+   update() on an UNSHARDED input returns sharding: SingleDeviceSharding(device=CpuDevice(id=0), memory_kind=device)

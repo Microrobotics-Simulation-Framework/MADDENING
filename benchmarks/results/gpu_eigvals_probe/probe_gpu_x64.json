@@ -1,0 +1,165 @@
+{
+ "platform": "gpu",
+ "x64": true,
+ "jax": "0.11.0",
+ "default_backend": "gpu",
+ "devices": [
+  "cuda:0"
+ ],
+ "eigvals_eager_2": {
+  "ok": true,
+  "value": 0.12508688923006284,
+  "seconds": 0.342
+ },
+ "eigvals_jit_2": {
+  "ok": true,
+  "value": 0.12508688923006284,
+  "seconds": 0.074
+ },
+ "eigvals_eager_5": {
+  "ok": true,
+  "value": 0.7798302084302591,
+  "seconds": 0.264
+ },
+ "eigvals_jit_5": {
+  "ok": true,
+  "value": 0.7798302084302591,
+  "seconds": 0.1
+ },
+ "eigvals_eager_9": {
+  "ok": true,
+  "value": 1.2581206637447575,
+  "seconds": 0.297
+ },
+ "eigvals_jit_9": {
+  "ok": true,
+  "value": 1.2581206637447575,
+  "seconds": 0.13
+ },
+ "eigvals_eager_hess9": {
+  "ok": true,
+  "value": 0.5837984972178905,
+  "seconds": 0.002
+ },
+ "eigvals_jit_hess9": {
+  "ok": true,
+  "value": 0.5837984972178905,
+  "seconds": 0.002
+ },
+ "numpy_float64_reference": {
+  "2": 0.12508688923006284,
+  "5": 0.7798302084302585,
+  "9": 1.2581206637447568,
+  "hess9": 0.5837984972178895
+ },
+ "eigvals_in_scan": {
+  "ok": true,
+  "value": [
+   0.2918992486089452,
+   0.5837984972178905,
+   0.8756977458268366
+  ],
+  "seconds": 0.219
+ },
+ "eigvals_in_vmap": {
+  "ok": true,
+  "value": [
+   0.2918992486089452,
+   0.5837984972178905,
+   0.8756977458268366
+  ],
+  "seconds": 0.283
+ },
+ "eigvals_in_cond": {
+  "ok": true,
+  "value": 0.5837984972178905,
+  "seconds": 0.139
+ },
+ "estimator_spectral_radius": {
+  "ok": true,
+  "value": 0.5837984972178905,
+  "seconds": 0.189
+ },
+ "estimator_squaring_fallback": {
+  "ok": true,
+  "value": 0.5837985476527054,
+  "seconds": 0.314
+ },
+ "pair_diagnostics_off": {
+  "ok": true,
+  "value": {
+   "first_step_s": 0.642,
+   "per_step_ms": 0.322,
+   "state": {
+    "left": {
+     "position": 2.2816641889740366,
+     "velocity": 8.540360926261291
+    },
+    "right": {
+     "position": 3.216205647829069,
+     "velocity": 9.014346578747604
+    }
+   },
+   "report": {}
+  },
+  "seconds": 0.706
+ },
+ "pair_diagnostics_on": {
+  "ok": true,
+  "value": {
+   "first_step_s": 10.537,
+   "per_step_ms": 11.237,
+   "state": {
+    "left": {
+     "position": 2.2816641889740366,
+     "velocity": 8.540360926261291
+    },
+    "right": {
+     "position": 3.216205647829069,
+     "velocity": 9.014346578747604
+    }
+   },
+   "report": {
+    "left+right": {
+     "iterations": 2,
+     "total_iterations": 2,
+     "residual": 2.8518300396787208e-08,
+     "amplification": 1.0006420029582321,
+     "error_estimate": 2.85366092300057e-08,
+     "ratio_usable": true,
+     "gradient_error_estimate": 2.85366092300057e-08,
+     "converged": true,
+     "rho_spectral": 9.00000001989587e-06,
+     "spectral_error_bound": 3.01685302491266e-08,
+     "spectral_usable": true,
+     "gradient_relative_error_bound": 5.2265488282509716e-12,
+     "gradient_bound_usable": true,
+     "precision_limited": false
+    }
+   }
+  },
+  "seconds": 12.671
+ },
+ "pair_diagnostics_on_run_scan": {
+  "ok": true,
+  "value": {
+   "left+right": {
+    "iterations": 2,
+    "total_iterations": 2,
+    "residual": 5.809858403019144e-07,
+    "amplification": 1.001064276108897,
+    "error_estimate": 5.816041696513553e-07,
+    "ratio_usable": true,
+    "gradient_error_estimate": 5.816041696513553e-07,
+    "converged": true,
+    "rho_spectral": 8.999999394909697e-06,
+    "spectral_error_bound": 8.61603479694276e-07,
+    "spectral_usable": true,
+    "gradient_relative_error_bound": 1.4387405688167306e-11,
+    "gradient_bound_usable": true,
+    "precision_limited": false
+   }
+  },
+  "seconds": 9.626
+ }
+}

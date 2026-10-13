@@ -13,7 +13,8 @@ from typing import Callable, Sequence
 import jax
 import jax.numpy as jnp
 
-from maddening.surrogates.architecture import SurrogateArchitecture
+from maddening.surrogates.architecture import PyTree, SurrogateArchitecture
+from maddening.surrogates.types import MutableStateDict, StateDict
 from maddening.surrogates.architectures._utils import (
     check_equinox,
     compute_sizes,
@@ -99,20 +100,32 @@ class DeepONetDirect(SurrogateArchitecture):
         n_basis: int = 64,
         branch_hidden: Sequence[int] = (64, 64),
         activation: Callable = jax.nn.tanh,
-    ):
+    ) -> None:
         check_equinox()
         self.n_basis = n_basis
         self.branch_hidden = tuple(branch_hidden)
         self.activation = activation
 
-    def init_params(self, rng_key, state_spec, boundary_spec):
+    def init_params(
+        self,
+        rng_key: jax.Array,
+        state_spec: dict[str, tuple[int, ...]],
+        boundary_spec: dict[str, tuple[int, ...]],
+    ) -> PyTree:
         input_size, output_size = compute_sizes(state_spec, boundary_spec)
         return _build_branch_trunk(
             rng_key, input_size, output_size,
             self.n_basis, self.branch_hidden, self.activation,
         )
 
-    def forward(self, params, state, boundary_inputs, dt):
+    # Dynamic keys (the node's own fields): an alias, not a TypedDict.
+    def forward(
+        self,
+        params: PyTree,
+        state: StateDict,
+        boundary_inputs: StateDict,
+        dt: float,
+    ) -> MutableStateDict:
         arrays, static = params
         net = eqx.combine(arrays, static)
         x = flatten_inputs(
@@ -144,20 +157,32 @@ class DeepONetDerivative(SurrogateArchitecture):
         n_basis: int = 64,
         branch_hidden: Sequence[int] = (64, 64),
         activation: Callable = jax.nn.tanh,
-    ):
+    ) -> None:
         check_equinox()
         self.n_basis = n_basis
         self.branch_hidden = tuple(branch_hidden)
         self.activation = activation
 
-    def init_params(self, rng_key, state_spec, boundary_spec):
+    def init_params(
+        self,
+        rng_key: jax.Array,
+        state_spec: dict[str, tuple[int, ...]],
+        boundary_spec: dict[str, tuple[int, ...]],
+    ) -> PyTree:
         input_size, output_size = compute_sizes(state_spec, boundary_spec)
         return _build_branch_trunk(
             rng_key, input_size, output_size,
             self.n_basis, self.branch_hidden, self.activation,
         )
 
-    def forward(self, params, state, boundary_inputs, dt):
+    # Dynamic keys (the node's own fields): an alias, not a TypedDict.
+    def forward(
+        self,
+        params: PyTree,
+        state: StateDict,
+        boundary_inputs: StateDict,
+        dt: float,
+    ) -> MutableStateDict:
         arrays, static = params
         net = eqx.combine(arrays, static)
         x = flatten_inputs(
@@ -232,14 +257,19 @@ class SDeepONetDirect(SurrogateArchitecture):
         gru_hidden_size: int = 32,
         proj_hidden: Sequence[int] = (32,),
         activation: Callable = jax.nn.tanh,
-    ):
+    ) -> None:
         check_equinox()
         self.n_basis = n_basis
         self.gru_hidden_size = gru_hidden_size
         self.proj_hidden = tuple(proj_hidden)
         self.activation = activation
 
-    def init_params(self, rng_key, state_spec, boundary_spec):
+    def init_params(
+        self,
+        rng_key: jax.Array,
+        state_spec: dict[str, tuple[int, ...]],
+        boundary_spec: dict[str, tuple[int, ...]],
+    ) -> PyTree:
         # Exclude _gru_hidden from physical state for size computation
         phys_spec = {k: v for k, v in state_spec.items() if k != "_gru_hidden"}
         input_size, output_size = compute_sizes(phys_spec, boundary_spec)
@@ -270,7 +300,14 @@ class SDeepONetDirect(SurrogateArchitecture):
         """Return the GRU hidden state size (needed for initial state)."""
         return self.gru_hidden_size
 
-    def forward(self, params, state, boundary_inputs, dt):
+    # Dynamic keys (the node's own fields): an alias, not a TypedDict.
+    def forward(
+        self,
+        params: PyTree,
+        state: StateDict,
+        boundary_inputs: StateDict,
+        dt: float,
+    ) -> MutableStateDict:
         """Forward pass with GRU hidden state.
 
         The state dict must contain a ``"_gru_hidden"`` field holding
@@ -321,14 +358,19 @@ class SDeepONetDerivative(SurrogateArchitecture):
         gru_hidden_size: int = 32,
         proj_hidden: Sequence[int] = (32,),
         activation: Callable = jax.nn.tanh,
-    ):
+    ) -> None:
         check_equinox()
         self.n_basis = n_basis
         self.gru_hidden_size = gru_hidden_size
         self.proj_hidden = tuple(proj_hidden)
         self.activation = activation
 
-    def init_params(self, rng_key, state_spec, boundary_spec):
+    def init_params(
+        self,
+        rng_key: jax.Array,
+        state_spec: dict[str, tuple[int, ...]],
+        boundary_spec: dict[str, tuple[int, ...]],
+    ) -> PyTree:
         # Exclude _gru_hidden from physical state for size computation
         phys_spec = {k: v for k, v in state_spec.items() if k != "_gru_hidden"}
         input_size, output_size = compute_sizes(phys_spec, boundary_spec)
@@ -358,7 +400,14 @@ class SDeepONetDerivative(SurrogateArchitecture):
     def hidden_size(self) -> int:
         return self.gru_hidden_size
 
-    def forward(self, params, state, boundary_inputs, dt):
+    # Dynamic keys (the node's own fields): an alias, not a TypedDict.
+    def forward(
+        self,
+        params: PyTree,
+        state: StateDict,
+        boundary_inputs: StateDict,
+        dt: float,
+    ) -> MutableStateDict:
         arrays, static = params
         net = eqx.combine(arrays, static)
 

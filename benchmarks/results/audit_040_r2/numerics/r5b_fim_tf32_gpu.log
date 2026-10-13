@@ -1,0 +1,8 @@
+# One short GPU run: /home/nick/MSF/msf/.venv-cuda/bin/python repro/r5b_fim_tf32.py
+# (nothing installed into that venv; single invocation)
+backend=gpu devices=[CudaDevice(id=0)] jax=0.11.2
+jax_default_matmul_precision=None
+cutoff max(n,sqrt(m))*eps = 7.5395e-06;  true rank = 1 of 2
+  GPU default                rank=1/2  lam0/lam_max= 0.0000e+00  ( 0.0x cutoff)  crb=[inf inf]  PrecisionLimitWarning=False
+  precision=highest          rank=1/2  lam0/lam_max=-1.3191e-16  (-0.0x cutoff)  crb=[inf inf]  PrecisionLimitWarning=False
+  precision=tensorfloat32    rank=1/2  lam0/lam_max= 0.0000e+00  ( 0.0x cutoff)  crb=[inf inf]  PrecisionLimitWarning=False

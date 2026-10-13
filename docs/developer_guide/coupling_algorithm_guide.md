@@ -1,0 +1,2179 @@
+# Choosing a coupling algorithm
+
+A `CouplingGroup` offers two iteration modes and five accelerations, plus
+`relaxation`, `convergence_norm`, `accelerated_fields` and
+`jacobian_reuse`.  Until now everything this project said about which
+combination suits which problem was extrapolated from one measured graph
+(MIME's AR4, in `benchmarks/results/ar4_*.json`) and a heat pair.  This
+page replaces that with a sweep over eight synthetic graphs chosen to
+span the four properties that actually decide the answer.
+
+Read [Profiling and benchmarking](profiling.md) first if you want to know
+how the per-step numbers are obtained; this page is about what they say.
+
+> **These numbers post-date every 0.4.0 change to how a group stops.**
+> The recorded files were re-measured on 2026-09-25, after all of:
+> Aitken's two corrections (its first pass of each timestep relaxed with
+> ω clipped to the 0.01 floor, and the loop exited on the first residual
+> below the threshold, which under Aitken is a transient dip in a
+> non-monotone sequence — on `heterogeneous` under {term}`Jacobi` that meant
+> `converged=True` at a point 15–31x the tolerance it claimed; the exit
+> now requires the threshold on two consecutive passes where one pass is
+> not enough); the error-bound criterion (a group's threshold applies to
+> an estimate of the distance to the {term}`fixed point <Fixed point>`, `ω · residual / (1 -
+> rho)`, and every norm scales each field's change by that field's own
+> magnitude); and the `HeatNode` rod-end fix, which doubled the heat
+> fixtures' interface gain (see [How the numbers were
+> produced](#how-the-numbers-were-produced)).  Against the first
+> recording (2026-09-18), which predated all but the first, the fast
+> sweep takes 9.9% more iterations in total, and 13 of its 420 rows no
+> longer converge on every step — ten of them `acceleration="fixed"`,
+> six at ω = 0.8 under Jacobi, where `jac/fixed0.8/l2` now converges
+> on 23% of `star-16` steps.  Those rows *contract slowly on these
+> fixtures*, so their error is a large multiple of their residual.  An
+> earlier wording here said ω = 0.5 "halves every step and so has the
+> largest gap between its residual and its error", which reads as a
+> floor ρ ≥ 1 − ω.  **There is no such floor, and that mechanism is
+> retracted.**  Relaxing maps an eigenvalue λ to `1 - ω + ωλ`, so a λ
+> near −1 drives ρ towards zero — damping oscillatory modes is what
+> under-relaxation is *for* — and a search over 20 000 random iteration
+> matrices at ω = 0.5 found ρ = **0.156**
+> (`benchmarks/results/convergence_error_bound/REPORT.md`, corrected
+> 2026-09-18 in `0ee18a0`).
+
+> **Where each number on this page comes from.**  Unless it says
+> otherwise, a figure is from `benchmarks/results/coupling_sweep_cpu.json`
+> (the 420-row fast sweep), `coupling_sweep_expensive_cpu.json` (the two
+> grid fixtures) or `coupling_sweep_cap16_cpu.json` (four fixtures at an
+> iteration cap of 16), all recorded **2026-09-25** on the release
+> branch with jaxlib 0.11.0, on a three-core slice of the laptop CPU
+> described below while other jobs shared the machine.  Iteration counts
+> and converged fractions are properties of the algorithm and reproduce
+> anywhere: `tests/core/test_coupling_fixture_invariants.py` re-measures
+> one row of every fixture of every file against the file (five on every
+> push, the rest in the slow lane).  Step times are that slice's, noisier
+> than the counts, and not comparable with the first recording's, which
+> was taken on the whole 24-core machine.  Figures from the first
+> recording (2026-09-18, `689d7c2`) or its re-run (2026-09-19, `c51cd6a`,
+> `benchmarks/results/audit_040_final/docs-compliance/coupling_sweep_cpu_HEAD_c51cd6a.json`)
+> appear only where a paragraph says what moved, and are named where
+> they do.
+
+## Start here
+
+Pick the row that matches the *shape* of your graph.  Every recommendation
+is `iteration_mode` / `acceleration` / `convergence_norm`.
+
+One thing to hold on to while reading it: **fewer iterations is not the
+same as a faster step.**  On the small fixtures the whole step is a
+fraction of a millisecond of kernel dispatch, and an accelerator that
+quarters the iteration count can still triple the wall time because its
+own arithmetic is not free.  The table recommends on measured step time
+where the step times are separable and on iteration count where they are
+not, and says which.
+
+| your graph | start with | why |
+|---|---|---|
+| anything, first attempt | `gauss-seidel` / `aitken` / **`l2`** | {term}`Gauss-Seidel` needs **1.7–2.1x** fewer iterations than Jacobi on every shape where both converge on every step — 1.68 on `stiff-pair-0.25` to 2.06 on `slow-drift`; the first recording read 1.69 to 1.93 and this row quoted 1.7–1.9x.  Aitken removes up to 55% of what is left under the {term}`interface norm <Interface norm>` (58% under L2), and costs up to a pass where plain iteration already converges in three or four (`slow-drift` under both norms, `stiff-pair-0.25` under the interface norm).  It is the sweep's own best configuration on thirteen of the eighteen fast fixtures (twelve under the interface norm, one under L2).  Its arithmetic is inside the dispatch floor on every launch-bound fixture; on a compute-bound one it is not free.  **The norm here is `l2`, not `interface`, and that is a change**: the interface norm is the iteration-cheaper of the two and this row used to recommend it, but it measures only the {term}`coupling <Coupling>`-{term}`edge <Edge>` fields, so a group whose interface has gone stationary can exit while the rest of its state is still moving.  Over generated graphs that is measurable at **5.2e-01** on exactly this configuration — a Jacobi three-spring group under Aitken, both solves reporting `converged`.  Switch to `interface` once you have read the accuracy caveat at the end of [Four combinations that theory says should win](#four-combinations-that-theory-says-should-win) and checked your own graph against it |
+| cheap {term}`nodes <Node>`, few interface DOFs, contraction below ~0.8 | `gauss-seidel` / `aitken` / `interface` | launch-bound: differences between configurations smaller than the dispatch floor — which is most of the step there — are not measuring the algorithm, so pick the fewest iterations and the least machinery among the rows that time the same |
+| contraction above ~0.9, or unknown and possibly divergent | `gauss-seidel` / `iqn-ils` / **`l2`** | the only family that converges *past* the limit at all, and at gain 0.95 it takes 4.0 iterations at 100% converged where `gs/none/l2` exhausts its cap of 60 on **100%** of steps and converges on **0%** (the first recording read 4.1, 98% and 2%).  Right rather than fast: 0.35 ms against 0.40 for a row that spends its whole cap and arrives nowhere.  **The norm here is `l2`, not `interface`, and that is a change**: `iqn-*` with the default `accelerated_fields=None` is the one pairing the accuracy caveat at the end of [Four combinations that theory says should win](#four-combinations-that-theory-says-should-win) names outright — the auto-detected set and the interface criterion are the same fields, so the {term}`quasi-Newton <Quasi-Newton>` step lands on exactly what the criterion then measures and every other field rides out of the last raw pass unwatched.  The interface norm also stopped being the lever here: on `stiff-pair-0.95` it cuts 2.2% of the iterations, not the first recording's 15.1%, and converges 8% of steps rather than 68% |
+| one expensive node among cheap ones | `gauss-seidel` / `iqn-imvj` / `interface`, with `accelerated_fields` naming **only the cheap nodes** | the sweep's best configuration on `heterogeneous`: 3.0 iterations at 1.85 ms, against 5.95 and 1.93 for plain iteration, and 2.0 at 96.9 ms for the same accelerator on every field.  The quasi-Newton problem needs enough degrees of freedom to model the interface response, not the grid.  Under **Jacobi** the same restriction costs convergence — see below |
+| every node expensive (grid-to-grid) | `gauss-seidel` / `none` / `interface` | the interface norm alone takes `expensive-pair` from 2.95 iterations and 7.56 ms to 1.65 and 5.15 ms; IQN buys nothing more under that norm (1.60–1.65 iterations) for 32–42x the step time and is not affordable at 2x10⁵ accelerated DOFs |
+| deep chain (information must cross many nodes) | `gauss-seidel` / `aitken` / `interface` | Gauss-Seidel's advantage is real but *flat* in depth — it does not grow with the chain length |
+| wide star (independent leaves) | `gauss-seidel` / `aitken` / `interface` | both accelerators are flat in width (Aitken 7.9 → 8.1 iterations from 2 to 16 leaves under the interface norm, IQN 3.0 → 3.0) but IQN's step cost is not: 1.89 ms against 1.02 ms at 16 leaves, for 5 fewer iterations that the dispatch floor hides |
+| ring / cycle with no natural first node | `jacobi` with `acceleration="none"` or `"fixed"` if the answer must not depend on how the graph was built, otherwise `gauss-seidel` / `aitken` | Gauss-Seidel on a ring is measurably order-dependent.  Jacobi's returned states under `"none"` and `"fixed"` do not depend on the order the members were added in -- to the bit unless a residual lands within an ulp of the threshold, since the norm sums the members in the schedule's order.  Under `"aitken"` and the IQN pair they agree to float32 round-off and not to the bit (the accelerator's dot products follow the schedule), and the spectral keys and `gradient_relative_error_bound` follow the build order too (see [the gradient bound](#gradient_relative_error_bound-the-gradient-not-the-solve)) |
+| fixed point that barely moves between steps, **and nothing else** | `gauss-seidel` / `none` / `l2`; under Jacobi, `fixed` ω = 0.8 — one of only two places a constant ω wins | `gs/none/l2` takes 3.10 passes at 100% converged on `slow-drift`, and ω = 0.8 is what brings Jacobi down to the same place: 6.40 → 3.20, also at 100%.  This row used to recommend `jacobi` / `fixed` ω = 0.8 outright, as the sweep's best configuration here; by time the picker now names `gs/none/interface` (3.66 passes), and by passes plain Gauss-Seidel was level with it in both recordings.  **Do not carry ω = 0.8 to another shape.**  `jac/fixed0.8/l2` converges on **23%** of `star-16` steps, 72% of `star-8`, 88% of `star-4`, 94% of `star-2`, 96% of `stiff-pair-0.8` and 68% of `chain-20` — a wide star under it converges one step in four.  `iqn-imvj` with `jacobian_reuse` does cut iterations further (3.1 → 2.0) but costs ~13x the plain step to do it |
+| two subsystems with different shapes | one group each, with its own settings | groups in one graph keep independent schedules, iteration counts and convergence flags |
+
+**On the `interface` norm elsewhere in this table.**  The rows above
+that still recommend it do so on *iteration count*, which is what the
+sweep measures and what they say.  The norm's accuracy caveat applies
+to every one of them, not only to the two rows that were changed: it
+sees the coupling-edge fields and nothing else.  Where the answer
+matters more than the iteration count — training, calibration, anything
+reading state that is not on an edge — start from `"l2"` or `"mixed"`
+and move to `"interface"` only after measuring your own graph's
+`fixed_point_agreement`.
+
+**What a converged step returns under each norm.**  The loop stops on
+an iterate `x` whose residual `||F(x) - x||` met the criterion, `F`
+being one plain pass of the group's schedule.  Under `"l2"` and
+`"mixed"` the residual is over every floating field, and the step
+returns `x`.  Under `"interface"` the residual is over what the internal
+edges deliver, and the members of `x` were computed from the readings of
+the iterate before it, which nothing compares.  So the step returns
+
+* a field the norm **measures whole** -- the source field of an internal
+  edge that delivers it as it is, with no mapping and no transform -- as
+  `x` holds it, bit for bit;
+* **every other floating field of every member** -- read by no internal
+  edge, or only through a gather, a tie or a transform -- as `F(x)` holds it:
+  one more evaluation of the pass, at `x`.
+
+A static mapping onto more entries than its source holds is read at its
+source (the compact-side rule, below): that reading is the source field
+itself, so the field is measured whole and kept, like one a plain edge
+reads.  A field read only through a gather, a tie or a transform is
+recomputed.
+
+One rule, whatever the schedule, the acceleration, the solver and the
+verdict (`max_iterations=1` returns its one pass as it is).  Until 0.4.0
+the step returned `x` as it was, and a one-way pair under Jacobi came
+back with its target computed from the pre-step source, `converged=True`
+at `iterations=1` (MADD-ANO-240, MADD-ANO-241).  What the rule costs:
+
+* **The report is of `x`, not of the state returned.**  `iterations`,
+  `residual`, `converged` and the bounds are the ones the loop measured.
+  The returned state's readings differ from those of `x` only on the
+  edges whose source field was recomputed, by that edge's own term of
+  the residual, so they are within the reported residual of them.  Its
+  own residual is another number: up to 4.5 times the reported one in
+  the measured draws, and above the threshold beside `converged=True` in
+  1 of 48.  `spectral_error_bound` carries over to the state returned
+  as `(bound + residual) / (1 - rtol * residual * sqrt(N))` in the norm
+  taken *at* that state, `N` the entries the norm pools: a converged
+  solve's denominator is one to within `rtol * sqrt(N)`, while at a cap
+  a recomputed reading returned near zero is divided by far less than
+  the bound's was (4.5 times `bound + residual` in the pinned case), and
+  past `rtol * residual * sqrt(N) = 1` nothing is claimed.  The
+  gradient bound carries over as it is: under `solver="ift"` every
+  returned field, recomputed or kept, has the implicit derivative of
+  `x`.
+* **A recomputed field is sometimes less accurate than `x`'s.**  27 of
+  375 recomputed fields were further from the fixed point by more than
+  1.25 times (linear relay groups, float32), one of them ending above a
+  tolerance, never by more than about one tolerance in a converged
+  solve; about three times as often where the plain pass expands (an
+  accelerated loop of gain above one).
+* **An identity mapping is still a mapping.**  A group whose edge
+  carries one recomputes that field and equals its unmapped twin within
+  the residual, no longer to the bit (it does under `"l2"` and
+  `"mixed"`).
+
+A field the interface norm does not measure still meets no criterion of
+its own: it is one pass from readings that did.  Where every field has
+to meet the tolerance itself, use `"mixed"` or `"l2"`.
+
+Three settings that are nearly always right and are not in the table:
+
+* **Leave `relaxation` alone under Gauss-Seidel.** Not one Gauss-Seidel
+  row in the sweep beats its unrelaxed counterpart, usually by a factor
+  of two in iterations, and no ω rescued a divergent case.  Under
+  *Jacobi* it is worth measuring: ω = 0.8 cuts iterations 50% on
+  `slow-drift` and 25% on `expensive-pair` (44% under L2).  See below.
+* **Cap `max_iterations` at what you actually expect.** It is not a free
+  safety margin: IQN allocates `max_iterations - 1` secant columns, so
+  the cap sets the size of its least-squares problem.
+* **Turn on `strict_convergence` for training and calibration runs.**
+  The {term}`implicit-function-theorem <Implicit function theorem>` gradient is only valid at a converged
+  fixed point.  It checks only the solves a step keeps: not a {term}`multi-rate <Multi-rate>`
+  base step on which the group does not fire, and not the step-doubling
+  estimate's full step or a rejected attempt under `run_adaptive*`, so
+  the adaptive controller can still recover by rejecting a step whose
+  coupling did not converge.
+* **Leave `linear_solver` at `"gmres"` on anything grid-shaped.** The
+  `"dense"` alternative is exact and is sometimes offered as the thing
+  to try when the adjoint struggles; on a grid it cannot run at all.
+  See [`linear_solver="dense"` is not an escape hatch on a
+  grid](#linear_solverdense-is-not-an-escape-hatch-on-a-grid).
+
+**Checking a group before you rely on it.**  Build the group from one of
+the rows above with `diagnostics=True` and `strict_convergence=True`, step
+it, and read its report by its {term}`reason codes <Reason code>` rather than by `converged`
+alone.  Here two masses joined by one spring (two `SpringDamperNode`s
+anchored on each other) use the first row:
+
+```python
+from maddening.core.coupling import reason_codes
+from maddening.core.graph_manager import GraphManager
+from maddening.nodes.spring import SpringDamperNode
+
+gm = GraphManager()
+for name, rest, start in (("A", 1.0, 0.0), ("B", -1.0, 5.0)):
+    gm.add_node(SpringDamperNode(name, 0.005, stiffness=4000.0, damping=150.0,
+                                 rest_length=rest, initial_position=start))
+gm.add_edge("A", "B", "position", "anchor_position")
+gm.add_edge("B", "A", "position", "anchor_position")
+gm.add_coupling_group(["A", "B"], iteration_mode="gauss-seidel",
+                      acceleration="aitken", convergence_norm="l2",
+                      tolerance=1e-4, diagnostics=True,
+                      strict_convergence=True)
+gm.compile()
+gm.step()          # strict_convergence: a step that does not converge raises
+
+entry = gm.coupling_diagnostics()["A+B"]
+codes = entry["reason_codes"]["spectral_usable"]
+assert not set(codes) & reason_codes.WORRY, entry["not_usable_reason"]
+if entry["spectral_usable"]:
+    print(f"{entry['iterations']} passes; distance to the fixed point "
+          f"<= {entry['spectral_error_bound']:.1e}")
+else:            # only settings, or what the group is: see the table of codes
+    print(f"{entry['iterations']} passes; no bound to read: {codes}")
+```
+
+It prints `4 passes; no bound to read: ['at_float_floor']`: Aitken takes
+this linear pair's residual to its float32 floor, where the bound is not
+certified because no stock node declares `update_evaluations()`.  That
+code is a setting, not a fault of the solve; plain Gauss-Seidel
+(`acceleration="none"`) stops at the same tolerance above the floor, and
+there `spectral_usable` is `True`.  `strict_convergence` checks that the
+step converged, not that its bounds hold: a group whose plain pass does
+not contract can converge under an accelerator and report
+`not_contracting`, a worry.  [The reason codes of
+a report](#the-reason-codes-of-a-report) says what to change for each
+code, and `python -m maddening.examples.coupling.acting_on_diagnostics_demo`
+acts on the codes of each kind: the default group's settings, a float
+floor that moves with the state, and a stiffness written after
+`compile()` that makes this pair grow every step while every step
+converges.
+
+## Reading `coupling_diagnostics()`
+
+Each group reports fourteen fields: nine for every group, and five --
+three spectral, two about the gradient -- that carry a value only under
+`solver="ift"` with `diagnostics=True`.  Three of the nine need
+reading carefully, and one of them was renamed in 0.4.0 because its old
+name said more than it checks.  A group that has not taken a step yet
+(before the first `step()`, and after `reset_state()`) has no entry at
+all: its `_meta` slots hold seeds that keep the scan carry's structure,
+and read as a report they said `converged=True` about a group that had
+never run.
+
+| field | what it is |
+|---|---|
+| `iterations` | passes used, counting the first staggered one.  Equal to `max_iterations` exactly when the group exhausted its budget.  With `waveform_iterations > 1` on a {term}`sub-cycling <Sub-cycling>` group each sweep has a budget of its own and this is the largest sweep's count, so `iterations >= max_iterations` still reads "some sweep hit the cap" — see below |
+| `total_iterations` | passes the step ran, summed over its `waveform_iterations` sweeps: the work done.  Equal to `iterations` for a group that runs one sweep |
+| `residual` | `\|F(x) - x\|` in the group's norm, for the state the step returned.  Carries a float32 noise floor |
+| `amplification` | the estimated `1 / (1 - rho)` of the mode the residual sequence reveals.  `nan` when the ratio was rejected |
+| `error_estimate` | `residual · max(ω · amplification, 1)` — **an estimate** of the distance to the fixed point, not of the last step.  Falls back to `residual` when the ratio was rejected |
+| `ratio_usable` | whether the contraction *ratio* was usable — see below.  Renamed from `bound_valid` |
+| `gradient_error_estimate` | how far the {term}`IFT` adjoint may sit from a finite difference of the same forward.  Numerically `error_estimate`, so it inherits every way that number can understate.  `inf` when `ratio_usable` is false.  Renamed from `gradient_error_bound` |
+| `converged` | the *error estimate* met the group's threshold.  **`True` on a stalled float32 iterate** — see below |
+| `rho_spectral` | the {term}`spectral radius <Spectral radius>` of `dF/dx` at the returned state, from eight Arnoldi steps on the Jacobian-vector product the IFT adjoint already builds.  Sees every mode, not only the one dominating the step.  Within 5% of `1 − rho_spectral` of the radius wherever `spectral_usable` is true, which needs one pass to depend on the previous one through at most seven independent scalars (eight where they are the whole state; see below).  NaN for `fori`, for `diagnostics=False` and at `max_iterations=1` |
+| `spectral_error_bound` | `(residual + floor) · max(‖(I − H)⁻¹‖₂, 1/(1 − rho_spectral))`, with `floor` the residual's own float resolution and `H` the Krylov-compressed Jacobian in the group's own norm — **a bound** on the distance to the fixed point for a linear `F`, whatever the accelerator did; asymptotic for a non-linear one.  See below |
+| `spectral_usable` | the bound is finite and the Arnoldi space had settled: the Krylov space closed within the eight steps, any direction the breakdown test discarded as rounding is `≤ 0.05 (1 − rho_spectral)`, and no rounding of the size one more Jacobian-vector product measures can move the radius by that much.  False where nothing was computed, where rounding can move the radius by more than that (a non-normal Jacobian), where one pass depends on the previous one through more than seven independent scalars (eight where they are the whole state: what the loop closes through under Gauss-Seidel, both directions under Jacobi), and where the residual is at its float floor (`precision_limited`) in a group with a node that has not declared `update_evaluations()` — see below |
+| `gradient_relative_error_bound` | a bound on the relative error of the IFT gradient caused by the forward stopping early: `spectral_error_bound` × the resolvent factor it applies × the change in the map's linearisation per unit distance, for the worst of one probe per floating constant.  **About the gradient, not the solve** — reads 0.0 on an affine group whose state is far off.  See below |
+| `gradient_bound_usable` | the gradient bound is finite and `spectral_usable` is true.  False where nothing was computed and where the Newton–Kantorovich check fails |
+| `reason_codes` | {term}`experimental <EXPERIMENTAL>`: why each of `spectral_usable`, `gradient_bound_usable` and `precision_limited` reads `False`, as lists of the constants of `maddening.core.coupling.reason_codes`.  A usable flag that is `False` has at least one code and the entry a `not_usable_reason` in words; a flag that is `True` has none.  See [the reason codes of a report](#the-reason-codes-of-a-report) |
+| `residual_precision_floor` | experimental: the residual's float floor at the state the step returned, in the residual's units (tolerances): the number `precision_limited` compares the residual with and `spectral_error_bound` adds.  NaN where it was not measured, and `reason_codes["precision_limited"]` then says why |
+| `precision_limited` | the residual is at or below its own float resolution: `residual` and `error_estimate` are rounding, at least half of each bound is the floor, and only a wider dtype can shrink them.  Reported for every group; clears `spectral_usable` only where a node's evaluation count is undeclared |
+
+### A stalled float32 iterate reads `converged=True`
+
+When `(1 − rho) · |x − x*|` falls below half an ulp, a pass changes
+nothing: `F(x) == x` bitwise, the residual is exactly `0.0`, and
+`converged` — and `strict_convergence` — report success although the
+state can be far from its fixed point.  Measured (jaxlib 0.11.0,
+float32): a relay contracting at 0.99999, started 0.3% short of its
+fixed point, stops after one pass with `residual=0.0` and
+`converged=True` at **38 348 ulps**, a relative distance of 4.2e-3
+against a tolerance of 1e-6.  The criterion is deliberately not changed
+for this — a {term}`precision floor <Precision floor>` in it would make a tight float32 tolerance
+unreachable and move iteration counts everywhere — so the bound keys
+are where it shows: `spectral_error_bound` adds the residual's float
+resolution before amplifying it (it read `0.0` there; it now reads
+9.4e-2, which covers the 4.2e-3), and `precision_limited` is `True`.
+On a slow group, turn on `diagnostics=True` and read those two before
+trusting `converged`.  Planned for 0.5.0, not promised by this
+release: `strict_convergence` consulting the spectral bound when
+diagnostics are on.
+
+The floor is `PRECISION_FLOOR_ULPS = 4` units of `eps · max|field|` in
+every entry the norm reads, **per evaluation**, in the norm's units —
+`4 m eps √n` under `"l2"` over its `n` entries, `4 m eps / rtol` under
+`"mixed"` and `"interface"` (`residual_precision_floor`), **every entry
+at the `eps` of the coarsest floating dtype among the group's fields and
+what its internal edges deliver** (after the mapping and the transform:
+a transform that narrows to float32 between two float64 members puts a
+float32 rounding into every pass, and such a pair stalled with residual
+0.0 and read its bound at 5e-8 to 1e-7 of the distance with both flags
+set while only the fields' dtypes were read).
+A field a node computes from a coarser neighbour's output carries that
+neighbour's rounding: a float64 field of `n` values that is a function
+of one float32 value is as far from its fixed point, relative to its own
+size, as that value is.  Taken at each field's own `eps`, as the floor
+was, those `n` entries added nothing and the pooled floor fell as
+`1/√(1+n)`: a pair stalled 500 float32 ulps short read its bound at 0.92
+of the distance at `n = 1e3` and 0.21 at `n = 2e4` with the flags set
+(under all three norms; a float16 or bfloat16 value beside 2e4 float32
+ones read 0.37 and 0.36).  The rule assumes that any field of a group
+may be downstream of its coarsest member (which fields are is inside
+the nodes), that a node's own arithmetic is no coarser than the fields
+it reads and writes (a cast down and back inside `update` cannot be seen
+from outside and is not counted), and that what enters from outside the
+group is a constant of the solve; where a fine field is in fact computed from fine
+fields alone the floor is too large, never too small.  In a group of
+one dtype nothing changes.  **A position is exempt from that rule and
+keeps its own dtype's `eps`**: a geometry field that an internal edge
+anchors a {term}`geometry-dependent mapping <Geometry-dependent mapping>` at (under `"l2"` and `"mixed"`), a
+position part read in kernel lengths (under `"interface"`), and the
+rounding `eps · r` of the positions a value was delivered through (`r`
+the larger of a position's distance from the coordinates' zero and of
+its lattice coordinate, in spacings: under `"interface"` the kernel's
+own difference from the grid's first point is where a position rounds,
+see the {term}`interface-mapping <Interface mapping>` guide).  A stored float64 position has float64 resolution, and what a
+float32 member adds to it in a pass is a rounding of the increment;
+counted at float32's `eps`, float64 positions tens of spacings from zero
+put hundreds of tolerances into the floor and read
+`precision_limited=True` where the iterate was within a thousandth of a
+tolerance of its fixed point, and float64 positions are the way out the
+float32-positions advisory names.  The corner this leaves: a float64
+position that a member *sets* within the pass purely from float32 data
+is as coarse as that data and is counted finer than it is (on a pair of
+three such markers the bound still held by hundreds, the evaluation
+count carrying the gain of the read through the scatter).  A geometry
+field anchored only by an edge from outside the group is not exempt.
+Under `"interface"` the entries are what that
+norm reads on the internal edges: what an edge delivers (mapping, then
+transform) or the source field itself where a static mapping delivers
+more entries than the source holds (see "A mapped edge is read on its
+compact side" below), each at the group's coarsest `eps` or, where it is
+coarser still, the `eps` of what the edge delivers (a transform that
+narrows).  Where an edge is read through its
+mapping, the delivered value depends on the weights the step ran with, so
+the step records the per-evaluation floor itself (`_meta`'s
+`coupling_<key>_reading_floor`) and the report reads that; a group whose
+mapped edges are all read at their source has no such slot, and its
+floor is taken from the returned state like any other group's.  Four is 2.6x the sum of the two measured
+sources of one evaluation's rounding: the evaluation error of a dense
+update `A @ u + c` near its fixed point (at most 0.72 of a unit over
+3 000 random contractions) and the disagreement between two
+compilations of the same pass (at most 0.82, the solver-equivalence
+sweep).
+
+`m` is how many evaluations one coupling pass rounds like.  Each node
+counts its sub-cycling divider times `SimulationNode.update_evaluations()`;
+under `iteration_mode="jacobi"` the pass rounds like its worst node,
+because every node reads the stored previous iterate, and under
+`"gauss-seidel"` like its longest chain of same-pass reads -- a node
+reading a member scheduled before it reads that member's output from the
+same pass, already rounded, so the roundings along the chain add up.  On
+a Gauss-Seidel ring of 32 scalar relays stalled at float32 the worst
+node's count let the bound read 0.51x the true distance with
+`spectral_usable=True` (0.30x at 64 relays; MADD-ANO-094); counted along
+the chain it reads 16x over.  Both rules assume a read passes a relative
+rounding on at most unchanged.  A squaring relay doubles it with no
+cancellation, and a node whose terms cancel (`3u - 2v` at `u ~ v`)
+amplifies its own rounding as well: a Gauss-Seidel ring of twelve squares
+read its bound at 0.20x with the flag set.  So with `diagnostics=True` the
+step measures each group-internal read's relative gain `g` at the returned
+state -- one JVP of the reading node's update along the source's own
+state, per read, every step -- scales each node's own count by
+`max(1, sum g)` over its reads, weights each same-pass read by its `g`
+along the chain, never goes below the structural count, and the report
+reads that count from the step (`coupling_<key>_pass_evaluations`), or the
+structural one `compile()` snapshotted -- never the graph as it stands when
+`coupling_diagnostics()` is called.  (One group keeps the structural count
+either way: one with a `multilinear_grid` edge under the interface norm,
+whose floor is the only number its report builds on the count in 0.4.0.
+The gain of a read of positions is taken against the positions' own
+magnitude, so it grows with their distance from the coordinates' zero,
+which that norm's floor already counts in spacings; under `"l2"` and
+`"mixed"` the same gain is in the count, and reads float64 positions
+beside float32 values as precision-limited from a hundred spacings out.)
+Magnitudes add, so the count is a
+bound and can be useless as one: a ten-link chain `3 c_(j-1) - 2 c_(j-2)
++ c` reads 1.1e7x its true distance, usable, and a {term}`sub-cycled <Sub-cycled>` member,
+counted as undamped sub-steps, 1.5e3x-9.6e4x.  A composite map's error grows with its evaluations: explicit
+Euler in `N` sub-steps, each moving its field by less than half an ulp,
+is 5.8 units off the exact map at `N = 20` and 29.4 at `N = 100`, and
+while the floor was a flat four units a stalled relay built on such a
+node read a bound 0.07–0.96x its true distance at `N` = 15–200 with
+`spectral_usable=True`.  The framework's own `subcycling=True` is
+counted without help; a node whose `update` loops over its own state
+must say so:
+
+<!-- snippet: no-run, reason: fragment: one method of a node class, excerpted -->
+```python
+class SubSteppedNode(SimulationNode):
+    def update_evaluations(self):
+        return self.n_substeps      # N explicit sub-steps per update()
+```
+
+A node that does not declare (`None`, the default) is counted as one
+evaluation, and because nothing outside `update` can check that, a
+group containing it reports `spectral_usable=False` — and so
+`gradient_bound_usable=False` — wherever its residual is at the floor,
+where that count *is* the bound.  Above the floor the count carries
+less than half of the bound, but a long undeclared loop can still
+exceed it; declare it.  The floor models the map's rounding; a node
+whose update cancels catastrophically inside itself can exceed it
+whatever it declares.
+
+**What the counted floor assumes, with numbers.**  The count trusts every
+node to declare `update_evaluations()` truthfully and not to cancel inside
+itself; nothing outside the node can check either.  Measured on 154 fixture
+configurations of the 0.4.0 floor study (float32 and float64, CPU):
+
+| what breaks the assumption | bound / true distance | `spectral_usable` |
+|---|---|---|
+| a node taking 2000 sub-steps per update, declaring one evaluation | 0.26-0.60x | `True` |
+| a node forming its output as the difference of two terms ~1000x its size | 0.02-0.65x | `True` |
+| (the other direction) mixed-sign Gauss-Seidel chains | up to 1e7x | `True` |
+| (the other direction) sub-cycled groups | 1e3-1e5x | `True` |
+
+The first two read *under* the true distance with the flag set: the flag
+says the bound is the counted floor's, not that the count is right.  The
+last two are valid and too loose to read.  A measured, opt-in
+`diagnostics="rounding"` level, which estimates the map's rounding instead
+of counting it, is planned for 0.5.0.
+
+### Fields in the subnormal range
+
+The coupling runtime's own arithmetic -- the norms, the accelerators, the
+IFT solve and the report -- works in exact power-of-two frames
+(`maddening.core._pow2_frame`), so a group gives the same passes, verdict
+and bounds at any power-of-two scale down to the subnormal range.  A node's
+`update` is not framed.  Below `finfo(dtype).tiny / finfo(dtype).eps` a
+change of one ulp of a field is smaller than the smallest normal number,
+which {term}`XLA`'s CPU backend flushes to zero: the node's arithmetic on that
+field loses resolution, and a field whose magnitude is below `tiny` itself
+reads as exactly zero in the group's norm.
+
+| dtype | `tiny / eps` (the warning threshold) | `tiny` (reads as zero below) |
+|---|---|---|
+| float32 | 9.9e-32 | 1.2e-38 |
+| bfloat16 | 1.5e-36 | 1.2e-38 |
+| float16 | 0.0625 | 6.1e-5 |
+| float64 | 1.0e-292 | 2.2e-308 |
+
+A bfloat16 or float16 field is measured in float32 (the round-6 fix,
+MADD-ANO-186): its value, widened exactly, is a normal float32 number, so
+the norm reads a float16 field below 6.1e-5, and its changes, like any
+other.  At the other end, the L2 norm's overflow rule (a scale whose
+reciprocal is not a normal number reads `inf`) applies in float32 too:
+bfloat16 shares float32's range and keeps its edge, `2**126`, while no
+finite float16 value reaches it, so a float16 field is measured up to
+65,504 under every norm (it read `inf` from `2**14` up).  For the 16-bit
+rows the table describes the node's own arithmetic on the field, which
+still rounds and flushes in the field's dtype.
+
+{codeterm}`GraphManager` checks each coupled group on the first step after every
+`compile()`, and again on the first step after every write of node states
+that is not a step's (`set_node_state`, so `load_state` and `PUT
+/graph/state/{node}`, and `reset_state`).  It reads the state that step
+starts from and the state it returns (a field already below `tiny` is
+flushed to exactly zero by the step), and issues one `UnderflowRangeWarning`
+(a `PrecisionLimitWarning`) per group, naming the field, its magnitude and
+the remedy: write the field in units where it is of order one.  An exactly
+zero field never warns, and a group is warned of once.  The check runs on
+the host and does not change the compiled step; a state that decays into the
+range through the nodes' own updates is not re-checked.  Its two reads cost
+several times a small graph's step (a three-entry pair: 45 microseconds for
+`set_node_state` and `step`, 150 with the check), so a graph that is written
+to before every step is not asked at every one: after a `compile()` the
+first eight checks that writes make due are made at the next step, and from
+then on a due check is made once 1024 stepper calls have stored a state
+since the previous one.  It fires at a step
+rather than in
+`coupling_diagnostics()` because the remedy is a decision about the model's
+units, every caller steps whether or not it reads the report, and the
+report is read in loops, where a per-call read of every group field would
+cost a device-to-host copy per step.
+
+### What `ratio_usable` checks, and what it does not
+
+`error_estimate` sums a geometric series of remaining step lengths.
+That sum is a bound on the distance to the fixed point only if **four**
+conditions hold, and `ratio_usable` reports **the fourth one alone**:
+
+1. the measure obeys the triangle inequality — **not checked**;
+2. `rho` is at least the asymptotic rate — **not checked**;
+3. the step scale is the one actually applied — checked only for
+   `acceleration="fixed"` and `"none"`, where ω is a constant;
+4. the ratio is monotone and finite — **this, and only this, is what
+   `ratio_usable` reports**.
+
+So `ratio_usable=True` means: `rho < 1`, the predecessor residual was
+non-zero, and every residual in the ratio was finite, therefore the
+criterion used the estimate rather than falling back to the raw residual
+test.  It does **not** mean the estimate bounds the error.  Each of the
+three unchecked conditions is measured broken in this release:
+
+| mechanism | measured understatement | status |
+|---|---|---|
+| a `rho` read from the mode dominating the *step*, not the remaining error | **122x** on a linear two-mode contraction, modes `(0.999, 0.2)` at `tolerance=1e-4`, with `ratio_usable=True` **and** `converged=True` | characterised, not fixable from the residual sequence: over the passes that matter that sequence and a genuine single-mode decay at 0.2 are the *same sequence* (consecutive ratios 0.2000 and 0.2024).  Needs the spectrum |
+| over-relaxation, `acceleration="fixed"` | was 1.97x at ω = 1.95 | **fixed in 0.4.0** — `est/true` now runs 0.992 to 4.53 over an 88-point (gain, ω) grid |
+| a step scale the series does not carry | 2.04x under `aitken` (its per-pass factor saturating at its 2.0 clip), 4.5x under `iqn-*` | measured, uncorrected, documented |
+
+`ratio_usable=False` is the honest case, not the alarming one: the
+criterion degrades to the pre-0.4.0 raw residual test and says so.  It
+is false on a non-monotone sequence, on a zero or non-finite
+predecessor, and at `max_iterations=1`, where there is no pair of
+residuals to take a ratio of.
+
+Read `error_estimate` as a *better* number than the residual — it is
+never smaller than it, and strictly stronger than the pre-0.4.0
+criterion in every measured case — and not as a certificate.  Where you
+need one, read `spectral_error_bound`.
+The full argument, with reproducers, is in
+`benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md`; the
+standing caveat is `MADD-ANO-005`.
+
+### `spectral_error_bound`: the spectrum, measured
+
+Under `solver="ift"` with `diagnostics=True` the group spends eight
+Jacobian-vector products per step — the same `jax.jvp` of the one-pass
+map the IFT adjoint solves with — on an Arnoldi iteration at the
+returned state, in the coordinates of the group's own norm.  Three
+things come out of it: the Ritz spectral radius `rho_spectral`, the
+Arnoldi residual `h_{k+1,k}`, and the resolvent norm `‖(I − H)⁻¹‖₂` of
+the compressed Jacobian.
+
+**What the eight steps resolve is a rank, not a size.**  What counts is
+the rank of one pass's dependence on the previous one: how many
+independent scalars of the previous iterate the pass reads.  With at most
+seven (eight where they are the whole state: the space is grown from a
+start outside the range and has to hold it too) the Krylov space closes
+within the eight steps, the non-zero spectrum is that of a matrix within
+rounding of the Jacobian and `h_{k+1,k}` is zero.  A member's update
+starts from its pre-step state, so a pass reads the previous iterate only
+through the internal edges it takes from the previous pass, and how many
+entries the members hold does not enter:
+
+* **Under Gauss-Seidel it is what the loop closes through.**  A member
+  reads the members swept before it from this pass and the others from
+  the previous one, so only the edges that close the loop carry the
+  previous iterate.  A group whose loop closes through one wrench (six
+  scalars) is within the limit whatever sits on the other side: measured
+  on linear pairs, a member of 3 or 6 scalars beside one of 3 to 3000
+  entries has `spectral_usable=True` and `rho_spectral` exact in both
+  sweep orders, and so does one of 7 scalars beside 300 entries; with
+  members that declare a parameter `gradient_bound_usable` follows it.
+* **A rigid body's full state (13 scalars) is not within it**, nor is a
+  member of 8 scalars beside a larger one, nor a field-to-field pair.
+* **Under Jacobi both directions count**: every member reads the previous
+  iterate, so the rank is the sum over the edges (a pair exchanging 6
+  scalars and 300 entries has rank 12; one exchanging 4 and 4 is the
+  whole state and closes).
+* **The order is the lever.**  Members are swept
+  [in the order they were added](#what-the-way-a-graph-is-built-can-change),
+  and which edges close the loop follows from it: in a group of three or
+  more, add first the member whose inputs are the narrow ones.
+
+`compile()` counts this structurally (the entries of the fields read from
+the previous pass, and of the members that read them, whichever is
+smaller: an upper bound on the rank), and the report uses the count to
+say which kind of unsettled estimate it holds:
+[`interface_too_wide`](#the-reason-codes-of-a-report), which is expected
+and nothing to fix, or `spectral_self_check_failed`, which is rounding
+and is worth a look.
+
+A space still growing at the cap is never reported settled.  A new Krylov direction is taken for rounding only
+below eight units of the products' own rounding (`eps` of the group's
+dtype times the Jacobian's norm), never a fixed fraction of the product,
+and the estimate then spends a ninth product on a check of itself: along
+a combination of the basis, against what the eight before it say that
+product is.  How far the disagreement moves the radius is reported with
+the Arnoldi residual, so a radius that float rounding leaves undetermined
+-- a non-normal Jacobian turns one `eps` of its norm into far more -- reads
+`spectral_usable=False` instead of a number.  For a wider pass
+the radius is an estimate -- from below for a normal Jacobian, from
+either side for a non-normal one (1.17 on a Jacobi ring of nine relays
+whose every eigenvalue has modulus 0.95) -- `spectral_usable` is false,
+and the bound carries a margin of `2 h_{k+1,k}` on the radius.
+
+For a *linear* map the error of any iterate is `(A − I)⁻¹` of its
+residual — no step sequence, relaxation factor or accelerator enters —
+so `residual · ‖(I − A)⁻¹‖` bounds the distance to the fixed point
+whatever the iteration did, with both factors in one set of weights:
+each field divided by its own `max|field|` at the returned state.  The
+loop's `residual` divides by the larger of that and the field's magnitude
+after one more pass, so the factor carries the ratio of the two weightings
+of `F(x) − x` (1 unless a field grew across the pass); without it, on a
+group still growing toward its fixed point, the bound read 0.94x the true
+distance in the returned state's weights with `spectral_usable=True`
+(round-5 audit).
+
+Under `convergence_norm="interface"` the "fields" are what that norm
+reads: the value each internal edge *delivers* -- its source value
+through the edge's interface mapping (with the weights the step ran
+with) and then its transform, exactly what the step hands the target --
+or, on an edge whose static mapping delivers more entries than its
+source field holds, that source field itself (the compact side; next
+paragraph but one), each over its own magnitude.  One function gives
+every reader that value
+(`_interface_readings` in `core/coupling/acceleration.py`, built on the
+step's own edge rule): the residual, its float floor, this analysis and
+the report.  Which edges are a group's interface, in what order, and on
+which side each is read are described once, in
+`core/coupling/_interface_plan.py`, and every reader of the edges takes a
+view of that description.  A mapping or a transform changes the weights -- an offset (a
+unit conversion's 273.15) divides a change by a far larger magnitude, a
+selection (`"extract_last"`, or a mapping that delivers one entry of a
+field) by the selected entry's rather than the
+field's -- so the spectrum is taken on that reading `y = Φ(x)`.  The pass
+reads the iterate only through those edges, `F = G ∘ Φ`, so `y` iterates
+by its own map `Φ ∘ G`, whose Jacobian `A = Φ′ G′` has `dF/dx`'s non-zero
+spectrum, and for an affine map and affine transforms `Φ(x) − Φ(x*) =
+(I − A)⁻¹ (Φ(x) − Φ(F(x)))` exactly: the resolvent of `A` in the
+reading's weights carries the residual the loop measured to the distance
+in the norm it measured it in.  `A` is applied through state tangents
+(each Krylov vector is the reading of a state tangent, and the next is
+the reading of `dF/dx` applied to it), so no transform is ever inverted.
+Taken on the raw source fields instead, the bound multiplied a residual
+in one set of coordinates by a resolvent measured in another and read
+0.0014-0.098x the true distance with `spectral_usable=True` (round-6
+audit).  The norm also counts a field once for every internal edge that
+reads it, where the state's weights count it once: on a star whose hub's
+field every leaf reads, with no mapping or transform anywhere, the
+fields' analysis read 0.26-0.73x the true distance with
+`spectral_usable=True` (2 to 16 leaves, Jacobi; MADD-ANO-213), so a group
+with a field that more than one internal edge reads is analysed on the
+reading too.  Only a group whose internal edges read each field once, as
+it is -- no transform, and no mapping but one read at its source -- keeps
+the analysis in the state's weights (`_reading_is_the_fields`
+in `core/coupling/_group_layout.py`, static): there the two are one norm, and the
+second spectrum's nine Jacobian-vector products are not spent.  And while the norm and this analysis applied the transform but
+left an edge's mapping out, a mapped edge was measured on its source
+field throughout: the bound was consistent with the residual and both
+described a value the consuming node never sees -- 0.064-0.318x the true
+distance in what the edge delivers, usable, on the same pair with the
+selection written as a `matrix_mapping`.  A transform that is not affine makes the map non-linear in the
+reading, and the bound is then asymptotic, as for a non-linear map.  The
+gradient bound below keeps the state's own analysis, in the raw fields'
+weights.
+
+**A mapped edge is read on its compact side.**  The interface norm pools
+every entry it reads into one RMS, so the side of a mapping it reads
+decides how many entries an edge weighs in with.  An internal edge whose
+*static* mapping delivers **more** entries than its source field holds
+-- a scatter: 30 marker forces spread onto a grid of `N` cells -- is read
+at its **source value**: the field itself, before the mapping and so
+before the transform (the step applies the mapping, then the transform;
+a source-side reading has been through neither).  A mapping onto fewer
+entries (a gather), **a tie** (as many entries delivered as read) and an
+edge with no mapping are read as delivered.  The side is decided in one
+place, from the two sizes the mapping declares (`_norm_side` in
+`core/coupling/_interface_plan.py`; never from the shape of its weights,
+which for a sparse layout says nothing of the two sides, and never from a
+state), and the residual, the float floor and its `eps`, the spectral
+analysis and its weights, the bounds and the report all read through it.
+What the pass computes does not change: the target still receives the
+mapped value, and the mapping's weights are still constants of the step
+that a gradient reaches.  Only the norm stops reading them on such an
+edge, so a group whose mapped edges are all read at their source records
+no `reading_floor`, and where each field is read once its report's
+analysis is the state's own.  A geometry-dependent mapping inside a group
+is refused under this norm at `compile()`, as before.
+
+Read as delivered, a scatter's `N` entries -- of which about 60 change --
+add `N` to the pool's count and almost nothing to its sum, and the
+criterion loosens as the grid grows: with the grid-sized delivered value
+in the reading the interface norm gave the mixed norm's verdict from
+`N = 1e4` up.  Measured on 30 markers coupled two ways to a line of `N`
+cells (`benchmarks/results/interface_norm_dilution`; float64,
+`solver="ift"`, `rtol=1e-4`, loop gain 0.54): the error of the marker
+forces at a `converged=True` exit, in tolerances, Gauss-Seidel / Jacobi.
+
+| N | edge-mapped, interface: read as delivered (before) | edge-mapped, interface: compact side (now) | marker-side, interface | edge-mapped, mixed |
+|---|---|---|---|---|
+| 1e3 | 23 / 12 | 3.6 / 1.9 | 3.6 / 1.9 | 12 / 12 |
+| 1e4 | 39 / 39 | 3.3 / 3.3 | 3.3 / 3.3 | 39 / 39 |
+| 1e5 | 134 / 72 | 3.3 / 3.3 | 3.3 / 3.3 | 134 / 72 |
+| 1e6 | 459 / 248 | 3.3 / 3.3 | 3.3 / 3.3 | 459 / 248 |
+
+Read on the compact side the edge-mapped pair takes the passes, reports
+the residual and leaves the error of the build that applies the scatter
+inside the grid node, to the last digit, at every `N`; the mixed norm,
+which reads the grid's whole field, still stops where the diluted
+criterion did.
+
+The claim the rule is held to (CPL-192; `tests/property/test_coupling_interface_side.py`):
+`converged=True` under the interface norm implies that the distance to
+the fixed point in the compact readings, in the norm's own weights, is at
+most `K` tolerances, with `K = ‖D (I − A)⁻¹ (I − L) D⁻¹‖₂` of the loop on
+its compact readings (`A` the pass's stationary map, `L` its same-pass
+part, `D` dividing each reading by its own magnitude): the identity the
+bound above rests on, applied to a residual at its threshold.  `K` is
+about `1 / (1 − gain)` for a normal loop and does not see `N`, **provided
+the transfer between the two sizes is on the edge**: a member handed the
+whole grid through a plain edge, which samples it inside its own
+`update`, is read at the grid's `N` entries, and the markers of such a
+pair were 4.6 (`N` = 300) to 179 (`N` = 3e5) tolerances off at
+`converged=True` (1.8 to 6.2 with the gather on the edge).  Put the
+sampling on the edge: a static gather, or `multilinear_grid` with
+`geometry=`.
+That is the iterate the loop accepted, which the report is of.  The state
+a solve returns is that iterate with every field the norm does not
+measure whole one plain pass on (the return rule above; CPL-191): a
+source field read at its source is measured whole and kept, the source of
+a gather or a tie is recomputed, and the state returned is within `K'`
+tolerances, `K' = ‖D [(I − A)⁻¹ (I − L) − P] D⁻¹‖₂` with `P` selecting the
+readings of a recomputed source (`K' = K` where both edges scatter).
+
+In either reading `1/(1 − rho)` is the resolvent's norm for a normal
+`A`; the resolvent term is what holds when `A` is not normal, which a
+Jacobi loop between a node that responds strongly and one that
+responds weakly is measured to be.  Measured `spectral_error_bound /
+true distance` (jaxlib 0.11.0, CPU):
+
+| fixture | `error_estimate` | `spectral_error_bound` |
+|---|---|---|
+| two-mode `(0.999, 0.2)`, gs / none | 0.0082 (the 122x) | 8.05 |
+| two-mode, gs / aitken and gs / {term}`iqn-ils <IQN-ILS>` | 0.50 and 0.0010 | 1.34 and 1.32 |
+| random normal contractions, n = 2–6, 80 draws, none and fixed ω ≤ 1 | 0.92–88 | 1.009–96 |
+| heterogeneous, jacobi / aitken, 20 steps | 0.008–0.71 | 2.9–95 (911 on the one precision-limited step) |
+| heterogeneous, gs / none, 20 steps, all precision-limited | 0.98–2.3 | 3.4–25 |
+
+The 95 is what a rigorous bound on a badly non-normal map costs — the
+resolvent norm is the worst direction in the space and the residual is
+rarely in it — and it is why the bound is **reported and not applied**:
+`converged`, the iteration counts and the recorded sweep rows are
+exactly what they were.  On the heterogeneous fixture the float floor of
+a 60 000-entry L2 norm, `4 eps √n = 1.2e-4`, is above the tolerance, so
+every step that meets it is precision-limited and the floor is most of
+the bound (the 911, and every gs / none row); the fixture's nodes do not
+declare `update_evaluations()`, so those rows report
+`spectral_usable=False`.  Measured on the final tree (jaxlib 0.11.0,
+the random draws the property test's generator seeded from numpy); the
+earlier recording, 1.47–119 and 0.991–1.93, predated the floor.  The
+two `heterogeneous` rows were taken with the fixture at `Fo = 0.4`,
+before its Fourier number was halved (see [How the numbers were
+produced](#how-the-numbers-were-produced)); at the default `Fo = 0.2`
+the loop contracts at 0.49 rather than 0.69 and the figures differ.
+
+Three things make the resolvent term hold where the table's rows did
+not test it:
+
+* **the residual is in the space.**  The resolvent norm bounds
+  `(I − J)⁻¹ r` only for an `r` inside the invariant space it was
+  measured on.  A Krylov space from one start vector is that vector's
+  cyclic subspace, which a repeated eigenvalue breaks down early: on
+  `A = B ⊗ I₂` it stopped at dimension 2 with a range of dimension 4,
+  the zero Arnoldi residual read as "settled", and the bound read
+  0.92x the true distance.  The residual is now passed in and the space
+  continues from its missing part at every breakdown (1.05x there);
+  whatever it never absorbs is reported as unresolved;
+* **a dead-banded field stays on the loop.**  The dead band takes a
+  field out of the *residual*, not out of the coupling loop.  Weighted
+  zero in the spectrum it cut the loop: `rho_spectral` 0.000 for a loop
+  gain of 0.9 (a displacement of 1e-9 m feeding a stiffness of 1e9),
+  and the bound 0.15–0.29x the kept field's distance.  It now keeps its
+  own magnitude's weight in the spectrum, and its share of the residual
+  — which `residual` does not contain — is measured and folded into
+  the factor (2.8–5.5x there).  That is the *bound*; the loop's own exit
+  is another matter.  A change that has to cross a dead-banded field is
+  not in the residual until it reaches a kept one, and the loop accepts
+  on the first residual it measures: a group with `atol > 0`, under
+  either schedule and with any number of members (a pair under
+  Gauss-Seidel whose loop passes its lagged read twice, and one member
+  with two edges to itself, among them), can return `converged=True`
+  after one pass thousands of tolerances from its fixed point
+  (MADD-ANO-254, open; `compile()` warns for every group that sets
+  `atol > 0`).  Leave `atol` at `0.0` in 0.4.0; a pair with one scalar
+  field a member held where it was measured and is not excepted;
+* **a non-finite state reports NaN**, not a spectral radius computed at
+  a state that has left float range.
+
+What it is not: for a non-linear `F` it is asymptotic (Ostrowski) — exact
+to float32 on a log map within tolerance of its fixed point, an estimate
+far from one; it is taken in the norm at the returned state, so the dead
+band's excluded fields are outside it; and it reads `inf` where
+`rho_spectral` (with margin) is at or above one.  `spectral_usable`
+reports what the code checked — a finite bound and a settled space — and
+not linearity, which nothing checks.
+
+It is also the distance to *that step's* fixed point, and a run is many
+steps: each starts from the state the one before returned, so their
+iteration errors can add, and what bounds a trajectory's iteration error
+is the sum of the bound over its steps (where the step does not itself
+amplify a perturbation), not the bound of the last one
+(`maddening.testing.coupled.coupling_iteration_bound` uses the last step's
+times the number of steps).  Measured on the two-rod example of
+[the verification guide](verification.md): refining the timestep at
+`tolerance=1e-4`, a first-order scheme read pairwise orders of 1.211,
+1.029 and 0.645 while the last step's bound was 1.9% of the error at the
+finest level.
+
+### `gradient_relative_error_bound`: the gradient, not the solve
+
+The IFT adjoint solves `(I − dF/dx)ᵀ λ = ∂L/∂x` at the iterate the
+forward *returned*, `x_k`, not at the fixed point `x*`.  With `t_k` the
+tangent it returns and `G(x) = J(x) t_k + F_c(x) ċ` the one-pass map's
+Jacobian-vector product along it, exactly
+
+    t_k − t* = (I − J(x*))⁻¹ [G(x_k) − G(x*)]
+
+so the error is the resolvent applied to how much the linearisation
+moves between the two points.  Each factor is bounded by something the
+group already has or measures cheaply:
+
+1. **the distance** `‖x_k − x*‖` is `spectral_error_bound`, never below
+   the Newton step `‖δ‖` — not the residual and never `error_estimate`,
+   which reads 100x short on a hidden slow mode where this bound holds;
+2. **the resolvent** is applied exactly to each probe's secant through
+   the range basis (`resolvent_apply`); until 0.4.0's round-5 fix it was
+   bounded by the factor `spectral_error_bound` applies to a residual,
+   the Arnoldi `‖(I − H)⁻¹‖₂`, which is the resolvent restricted to the
+   Krylov space `span(v0, r)` and read 8.57 where the full norm is 45.2 on
+   a three-relay ring whose secant lies outside that space (the bound was
+   0.19x the true error, usable; MADD-ANO-142);
+3. **the curvature** is a directional second difference of the
+   adjoint's own matvec: `G` evaluated by the same Jacobian-vector
+   product at `x_k` and at `x_k + δ`, `δ = (I − J)⁻¹ (F(x_k) − x_k)` the
+   Newton correction (which supplies the direction only), divided by
+   `‖δ‖`.  No Hessian is formed.  Where the residual is at its float
+   resolution it carries no direction, and a floor-sized vector's
+   resolvent image — the slow mode — stands in;
+4. **how far the linearisation reaches**, by Newton–Kantorovich: `h` is
+   the larger of `β · L · ‖δ‖` — `β` the full resolvent norm at `x_k`, `L`
+   the Jacobian's change along `δ` per unit length — and Deuflhard's
+   affine-covariant `‖(I − J(x_k))⁻¹ (J(x_k + δ) − J(x_k))‖`, an operator
+   norm on the directions the Jacobian reads (`3k` more Jacobian-vector
+   products).  Below one half the resolvent at `x*` is at most
+   `β / √(1 − 2h)` and a fixed point lies within Kantorovich's radius
+   `t*`, so the bound carries that factor and at least that distance — and
+   is `inf`, unusable, at `h ≥ ½`, where nothing measured at `x_k` bounds
+   the resolvent at the fixed point.  On a convex map at `F'(x*) = 0.99`,
+   0.65–4.5% short, the bound without it read 0.20–0.96x the true error
+   with the flag true; `h` there is 0.48–0.58, so two of those points now
+   read `inf` and two hold at 3.3–4.0x.  Along `δ` alone the Jacobian's
+   change can be far smaller than in the directions `δ` hardly moves: on a
+   bilinear pair stopped two passes in, `h` read 0.37 along `δ` and is 0.65
+   affine-covariantly, the fixed point lay 0.568 away against a radius of
+   0.552, and the bound read 0.81x the true error, usable (round-6 audit).
+   `β` times the Jacobian's operator change would have caught it too, but
+   reads 3.5–16x the directional value on a ring whose Jacobian depends on
+   one field the Newton step barely moves, withdrawing bounds that hold;
+   the resolvent in front measures the change where it lands.  `h` is
+   exactly zero on an affine map;
+5. **what the Newton step misses**: `x* − x_k = δ + e` with `‖e‖ ≤ t* −
+   ‖δ‖`, and stretching the secant to `t*` covers only the part of `e`
+   along `δ`.  Each probe adds `β ‖G(x_k + δ) − G(x_k)‖ (t* − ‖δ‖) /
+   (‖δ‖ ‖t_k‖ √(1 − 2h))` — the change of its linearisation over the
+   missed part, at the rate its own secant shows, through the resolvent at
+   `x*` — which is zero on an affine map.  With `h` along `δ` alone and
+   without this term the bound read 0.986x the true error, usable, at
+   `max_iterations=2` (`h = 0.19`).  Once `h` takes the affine-covariant
+   form (0.22 there) the leading term alone reads 1.07x, and on 294 usable
+   drawn bilinear pairs it never fell below the true error, so no measured
+   case needs this term (it adds up to 42% of the leading term); it is
+   kept because it is the part of the argument the stretch to `t*` does
+   not cover.
+
+The bound is `amplification · distance · ‖G(x_k + δ) − G(x_k)‖ / (‖δ‖ ‖t_k‖)`,
+relative to the tangent, taken for **one probe per floating constant**
+the closure-converted map reads (each parameter, the pre-step states,
+the outside states it reads) and reported for the worst.  Per constant,
+because a combined direction can cancel: one probe over every constant
+read 0.0 on the stiff spring pair while its stiffness gradient was
+0.8–4.8% off — the random signs moved each node's stiffness and mass by
+the same relative amount, and the dynamics see only their ratio.  The
+tangents and `δ` come from a Woodbury solve on an eight-vector basis of
+the Jacobian's range (`jacobian_range_basis`, `resolvent_apply`), so
+the cost is `11 + 4k + 5 n_p + 2 k n_p` Jacobian-vector products per group per step
+(`k ≤ 8`, `n_p` the probes: every entry of a floating constant of at most
+64 entries, one for a larger one) beside the spectral bound's eight, plus
+one linearisation and `k` reverse-mode products for the full resolvent
+norm where the state has more than `k` entries — which is why it shares
+its gate.  Since 0.4.0's round-5 fix the resolvent is applied exactly to
+each probe's secant (one more JVP per probe) rather than bounded by the
+Arnoldi factor, which is the resolvent restricted to the Krylov space and
+read the bound 0.19x the true error on a ring whose secant falls outside
+it; and Newton-Kantorovich takes the full-operator resolvent norm.
+
+**Which constants are in it.** A relative error divides by the tangent's
+size, so the worst is taken over the probes that have one: a probe whose
+tangent is exactly zero is left out (the fixed point does not respond to
+it), and so is a probe the pass does not *resolve* — moving the constant
+by the probe's whole size (its own magnitude; an entry that is exactly
+zero is probed at the largest magnitude among its constant's entries,
+or at 1.0 where every entry is zero) moves one pass from `x_k`
+by no more than the floor the distance carries, `‖s · F_c ċ‖ ≤ floor` in
+the bound's own norm. Its right-hand side can then be what the iterate's last rounding,
+or a cancellation inside the node's own derivative, left of it, and so is
+the tangent solved from it: the saturating `c + tanh(s (u − c)) / s` has
+`∂/∂s = d sech²(s d) / s − tanh(s d) / s²`, two terms of size `d / s`
+that cancel to `−(2/3) s d³`, which at `d = 1e-12` is 24 orders below
+either.
+The case that showed it: the centre `c` and the curve `s` of a
+nonlinearity `φ(u; c, s)` with `φ(c) = c`, `φ′(c) = 1`, evaluated where
+`u = c`. The fixed point does not respond to either, the returned iterate
+does by the rounding it is away, and the relative error of that gradient
+is of order one at any iterate (the bound read 1.09 for 1.134 on a
+converged float64 hub, usable, with right-hand sides of 2e-33 to 5e-18
+for those probes beside ones of order one; without them it reads 5.3e-12
+for an error of 5.3e-12 over the gains). Where such a constant *is*
+resolved (an iterate stopped well short of the fixed point) it is in the
+bound, which then reads above one: the relative error of that gradient
+is of order one, and the bound says so. A weak constant is left out by
+the same rule, although its tangent may be exact: a gain or a forcing
+whose whole value moves the pass by less than the pass resolves. Nothing
+the bound measures tells that case from the cancelled one (the
+sensitivity of the tangent to a floor-sized change of the state read 1.6%
+for the saturating curve above, whose relative error is 113%), so the
+rule is the magnitude's. On 108 drawn float32 and float64 rings of three
+members the bound moved on two (2.3e-5 to 6.8e-6, 1.8e-2 to 2.5e-4: a
+weak gain was its worst probe) and no flag changed.
+
+**An entry of exactly zero is in the bound; a tiny one is not.**  An
+offset that happens to sit at `0.0` has no magnitude to probe it by, so
+it is probed at its constant's largest magnitude and is in the bound
+wherever that moves the pass.  An entry of `1e-30` is probed by its own
+magnitude, which moves nothing, and is left out.  Measured on a float32
+pair whose only parameter is an offset `c` (jax 0.11.0, caps 3 and 4):
+at `c = 0.0` the bound read 1.38e-2 and 1.84e-3 for true relative errors
+of 1.25e-2 and 1.74e-3, usable; at `c = 1e-30` no probe was left and the
+bound read NaN, not usable.  With `c = (1e-30, 0.2, 0.4)` the bound read
+4.5e-3, usable: it covers the two resolved entries (4.2e-3 at most) and
+says nothing of the first, whose relative error is 1.25e-2.  Give a
+constant you want covered a value the pass resolves, or a zero.
+
+Measured `bound / true` (jaxlib 0.11.0, float32), the fixed point's
+gradient from tight `ift` and `fori` arms that agree, every point a
+fresh graph stepped through `gm.step()` and stopped early by
+construction:
+
+| fixture | `bound / true` |
+|---|---|
+| concave `a + g log(1 + u)`, caps 3–8 (26% → 0.2% from `x*`) | 1.10–3.05 for `d/da`, 9.1–12.6 for `d/dg` |
+| convex `a + g u²`, caps 3–8 (6.8% → 0.3%) | 1.17–1.22 for `d/dg`, 3.08–3.58 for `d/da` |
+| affine `a + g u`, `d/dg` (`d/da` is exact) | 1.35 at every cap |
+| spring pair (`k = 6000`, `c = 60`, `dt = 0.01`), stiffness and mass of each node, caps 2–6 | 1.19–1.70 |
+| two-mode, concave slow mode (`q = -0.014`), `converged=True` | 26 (with `error_estimate`'s distance: 40x short) |
+
+Re-measured after 0.4.0's round-6 fix (the affine-covariant Kantorovich
+term and the Newton step's second-order miss, which raise the curved
+rows -- 1.10–2.10 and 8.5–10.5 concave, 1.12–1.16 and 3.06–3.30 convex,
+25 on the two-mode case before it -- and leave the linear ones alone).
+Measured after 0.4.0's round-5 fix (the resolvent applied exactly to
+each secant, one probe per entry, full-operator Kantorovich).  Before it
+the same table read 1.21–2.37 and 9.4–11.5 (concave), 1.29–1.36 and
+3.57–3.80 (convex), 1.81 (affine) and 83 on the two-mode case at
+`q = -0.02` -- which the full-operator Kantorovich check no longer
+certifies (`h = 0.56`), so the fixture moved to `q = -0.014`; the stiff
+spring pair of the first edition (7–11x) is not in the tree, and the pair
+above, with the same stiffness-to-damping balance and stable as a coupled
+pair (MADD-ANO-098), reads 1.34–2.71x on the old bound.  The parameter
+with the larger relative error reads near the distance's own margin from
+cap 4 on, and more at cap 3 (3.05 on the concave map), where the
+Newton–Kantorovich terms are largest; the other reads its gap to
+the worst probe as well.
+
+**What it is not — read this before using it.**  It is a statement
+about the gradient, not about the solve.  On a map affine in its state
+with additive parameters the IFT gradient is the fixed point's from
+*any* iterate, so the bound truthfully reads **0.0** while the state is
+far off: on the two-mode case it is 0.0 while the state sits 1.1e-2
+from the fixed point with `converged=True`, and on the stiff spring pair
+under `iqn-ils` with the interface norm and explicit
+`accelerated_fields` it is 3.1e-7 — zero to float32 — while the
+velocities are 1.7% off.  The
+returned `(value, gradient)` pair is then **mutually inconsistent** —
+the gradient is `d(fixed point)/dθ`, the value is not the fixed point —
+and this key cannot say so.  For the health of the solve read
+`spectral_error_bound`, within its norm: under the interface norm it
+covers the interface fields only and on that spring pair reads 9.0e-3.
+Beyond that: it inherits every condition of `spectral_error_bound`; it
+is leading-order in the distance (the curvature is measured over `δ` and
+extrapolated linearly, and `h` checks the Jacobian's variation along `δ`
+only); a field-valued constant is probed along one
+random direction -- fixed-seed, but drawn per constant in the order the
+group's map reads its constants, which follows the build order, so the
+same graph built with its members added in another order probes other
+directions and reports another number -- 83.5 to 99.5 over the six
+build orders of one three-member Jacobi group, 1.48 to 1.89 on another
+draw (jaxlib 0.11.0) -- each of them still a bound: over 17
+configurations of that group (four accelerations, three norms, two caps,
+three draws) and all six orders it read 6.9-434x the largest true
+relative error of the tangent with respect to any scalar constant,
+`linear_solver="dense"` the reference;
+and it is relative to the tangent's norm, so a scalar
+loss whose gradient nearly cancels across the state can carry a larger
+relative error.  `gradient_bound_usable` reports a finite bound and a
+settled spectrum, not those conditions.  It is not spelled
+`gradient_error_bound`: that spelling is the {term}`deprecated <DEPRECATED>` alias of
+`gradient_error_estimate` (below), and code written against 0.3.x
+would read a new meaning under it as the old number.
+
+### The reason codes of a report
+
+Experimental.  A `False` flag means different things, and a test cannot
+branch on a sentence, so every entry of `coupling_diagnostics()` carries
+`reason_codes`: one list of codes for each of `spectral_usable`,
+`gradient_bound_usable` and `precision_limited`.  The codes are the
+string constants of `maddening.core.coupling.reason_codes`:
+
+<!-- snippet: no-run, reason: fragment: reads the report of a graph built and stepped elsewhere -->
+```python
+from maddening.core.coupling import reason_codes
+
+entry = gm.coupling_diagnostics()["body+field"]
+why = entry["reason_codes"]["spectral_usable"]
+if not why:
+    pass                                    # the flag is True
+elif set(why) <= reason_codes.EXPECTED | reason_codes.CONFIGURATION:
+    pass                                    # nothing is wrong with the solve
+else:
+    raise AssertionError(entry["not_usable_reason"])
+```
+
+The rules: a usable flag that is `False` has at least one code, and the
+entry a `not_usable_reason` that says each in words; a flag that is
+`True` has none; every cause that holds is listed, in the order of the
+table; the gradient flag rests on the spectral one, so its list holds the
+spectral flag's codes and then its own.  `precision_limited` has a code
+exactly where the float floor was **not measured**: the flag then reads
+`False` and says nothing of rounding, and `residual_precision_floor` is
+NaN.  Where the floor was measured that list is empty, whatever the flag
+reads.  The codes are computed on the host from what the step stored and
+what `compile()` recorded; the compiled step is the same program.  An
+entry whose numbers a geometry rule withholds lists that rule's code
+alone (with why its floor was not measured, where it says so): nothing
+would be reported for it whatever else holds.  Where two of the three
+geometry rules hold, the entry names the first of kind, norm and
+sub-cycling, in words and in code alike.
+
+| code | what it means | what to do |
+|---|---|---|
+| `solver_not_ift` | the group's solver is `"fori"`, which has no linearisation of the pass | use `solver="ift"` (the default) with `diagnostics=True` |
+| `diagnostics_off` | the group was built with `diagnostics=False` (the default): the estimates are not computed | build the group with `diagnostics=True` for a diagnostic run |
+| `single_pass` | `max_iterations=1`: no fixed point is solved | allow a second pass |
+| `state_not_finite` | the state the step returned is not finite: the iteration diverged | look at the relaxation and the node updates |
+| `estimate_not_recorded` | the state holds no estimate for a group that asks for one: it was not written by this graph's step (set by hand, or loaded from a graph without diagnostics) | step the group |
+| `written_before_save` | loaded from a {term}`checkpoint <Checkpoint>` saved after the group's state was written: the state the float floor is measured on is not in it | step the group; save before writing |
+| `floor_needs_the_step` | the float floor reads what an edge delivers at pre-step geometry, which only the step holds, and the state carries none | step the group |
+| `geometry_kind_not_diagnosed` | a geometry-dependent mapping of a kind other than `multilinear_grid` | expected in 0.4.0: no bound is reported for this group |
+| `geometry_norm_not_diagnosed` | a geometry-dependent mapping under `convergence_norm="interface"` | expected; run a diagnostic pass under `"mixed"` or `"l2"`.  The float floor is still reported |
+| `geometry_subcycled` | a geometry-dependent mapping in a sub-cycled group | expected in 0.4.0 |
+| `geometry_self_check_failed` | the step's product along the geometry disagrees with a finite difference of the pass | **a worry** where it persists: a member or mapping whose derivative is not that of its value, or a state at which the difference cannot be formed (the sentence lists them) |
+| `geometry_self_check_not_evaluated` | that check produced no number | look at the state: the pass or its product is not a number there |
+| `geometry_positions_solved` | the group solves the positions a geometry-dependent mapping reads | expected in 0.4.0 (MADD-ANO-252): the numbers are reported, uncertified |
+| `geometry_record_missing` | the step did not record that every position was fixed during its pass | step the group |
+| `bound_not_evaluated` | an estimate was recorded and `spectral_error_bound` is still not a number: the residual or its floor is not finite | look at the state |
+| `not_contracting` | `rho_spectral >= 1`, or the compressed `I − H` is singular: the linearised pass does not contract at the returned state | **a worry**: the plain iteration would not converge here; relaxation or acceleration may be carrying it |
+| `interface_too_wide` | the estimate did not settle, and one pass depends on the previous one through more scalars than the eight steps span | **expected, nothing is wrong**; no tolerance or dtype changes it.  Sweep order is the lever under Gauss-Seidel (see above) |
+| `spectral_self_check_failed` | the estimate did not settle although the eight steps span the pass: its check of itself did not pass (rounding moved the radius, or could have) | **a worry**: do not trust `rho_spectral` here; run in float64 |
+| `at_float_floor` | the residual is at its float floor and a member has not declared `update_evaluations()` | switch to float64 or loosen the tolerance; or declare the count on every member |
+| `long_mapped_row` | the residual does not stand clear of the floor a long row of a static mapping would give it (MADD-ANO-257) | a wider dtype at the same tolerance |
+| `gradient_bound_not_computed` | the gradient bound is NaN beside a computed spectrum: the Jacobian's range was not captured by eight directions, or the fixed point responds to no constant the bound probes | expected for a wide pass, and for members that declare no parameter |
+| `gradient_bound_not_certified` | the gradient bound is `inf`: its Newton–Kantorovich check did not pass | **a worry** for the gradient: iterate further (a tighter tolerance) before differentiating |
+
+**What the split between the two unsettled codes rests on.**  The step
+stores one number for an estimate that did not settle (the larger of what
+the Krylov space missed and of what the estimate's check of itself
+measured), so the report tells the two apart by `compile()`'s structural
+count and not by a measurement.  The count is an upper bound on the rank:
+a member that uses only a combination of what it reads, or a mapping that
+delivers fewer entries than its source holds, makes the pass narrower than
+counted, and such a group reads `interface_too_wide` where rounding may
+have had its part.  A group with a boundary-flux edge between members is
+counted at its whole state.  `spectral_self_check_failed` is never given
+to a pass counted wider than the steps span.
+
+### `waveform_iterations`: what the sweeps are, and which one each field describes
+
+**Experimental, and not waveform relaxation (MADD-ANO-027).**  A
+sub-cycling group with `waveform_iterations=N` runs its fixed-point
+solve `N` times per step, each sweep with a budget of `max_iterations`
+passes of its own and a freshly started accelerator.  Every sweep
+iterates the same one-pass map, starting from where the sweep before it
+stopped: a pass reads only its incoming iterate and the
+beginning-of-step state, and the residual the second sweep measures on
+its first pass is, bit for bit, the residual the first sweep reported
+for the state it handed on.  Inside a pass, a sub-cycled node's {term}`boundary input <Boundary inputs>` is interpolated between the incoming iterate and the in-pass state
+-- two estimates of the *end*-of-step value, never the beginning-of-step
+one -- so no sweep sees a waveform over the sub-step window, and
+`boundary_interpolation="quadratic"` is never given its third value.
+What that means in practice:
+
+- Every sweep starts with one pass, so after a converged first sweep
+  each later sweep still applies at least one more pass and moves the
+  state by about one residual: within the tolerance, and identical to
+  `N` = 1 only at exact stationarity.  On the spring pair below, `N` = 1,
+  2 and 3 return bit-identical states at `tolerance=1e-8`, where the
+  pair is stationary in float32, and states 6.0e-08 apart (relative)
+  after one step at `tolerance=1e-4`; on a linear pair contracting at
+  0.9025 they are 1.2e-04 apart at `tolerance=1e-3`.  When the first
+  sweep stops at the cap, the later sweeps act as extra passes toward
+  the same fixed point, so raising `max_iterations` does the same job
+  for less.  Use `waveform_iterations=1`.
+- `boundary_interpolation` has less to work with than its name says.
+  Both ends of the interpolation are end-of-step estimates, so
+  "constant" and "linear" differ only by the in-pass change of a source
+  scheduled *before* the sub-cycled node: nothing under Jacobi, nothing
+  for a source scheduled after it, and nothing at exact stationarity --
+  up to float32 round-off, since the two modes compile to different
+  programs (on sub-cycled two-node Jacobi groups, 130 of 144 node-steps
+  bit-identical and the rest within 1.8e-07 relative, two ulps).
+  On the pair at timesteps 0.001 / 0.005 with the fast node scheduled
+  first, the three modes are bit-identical over 100 macro-steps, and
+  4.458e-02 from a uniform-rate reference in every mode, at v0.1.0,
+  v0.3.1 and this release.  With the slow node first and
+  `tolerance=1e-4`, "linear" and "constant" end 2.71e-05 apart
+  (relative) after 100 steps: the in-pass change a converged but not
+  stationary step still carries, O(tolerance) per step, not a gain in
+  accuracy.  "quadratic" is "linear" to the last bit in every case,
+  because it is never given its third value.
+
+Real waveform relaxation is planned for 0.5.0, not promised by this
+release.  The report reads the sweeps as follows:
+
+- `iterations` is the **largest** sweep's count and `total_iterations`
+  the sum.  The cap check `iterations >= max_iterations` is exact: true
+  when, and only when, some sweep exhausted its budget.
+- Every other field is the **last** sweep's, which produced the
+  returned state: `residual` recomputed on that state reproduces it, and
+  `converged` is the verdict on it.  Under `solver="ift"` the gradient
+  is the last sweep's too, because the implicit-function derivative
+  ignores the initial guess.  An earlier sweep that stopped at the cap
+  shows in `iterations`, not in `converged`.
+- **`strict_convergence=True` under `solver="ift"` checks every sweep**,
+  so a step raises when an earlier sweep stops at the cap unconverged,
+  even if the last sweep -- and so the returned state and its gradient --
+  converges.  `converged` and `strict_convergence` therefore disagree on
+  such a step; which of them is right is to be decided in 0.5.0.
+
+Measured on the sub-cycled spring pair of
+`tests/core/test_phases_5_7_8.py` (timesteps 0.001 / 0.01,
+`tolerance=1e-8`, `waveform_iterations=3`), first step, jaxlib 0.11.0,
+CPU; both solvers give the same numbers:
+
+| `max_iterations` | acceleration | passes per sweep (converged) | `iterations` before the fix | `iterations` / `total_iterations` |
+|---|---|---|---|---|
+| 10 | none | 3 (yes) · 1 (yes) · 1 (yes) | 1 | 3 / 5 |
+| 2 | none | 2 (no) · 1 (yes) · 1 (yes) | 1 | 2 / 4 |
+| 10 | fixed, `relaxation=0.7` | 10 (no) · 1 (yes) · 1 (yes) | 1 | 10 / 12 |
+
+Before 0.4.0 `iterations` was the last sweep's count, which is the
+fourth column (MADD-ANO-026).  Under `strict_convergence=True` the
+second and third rows raise.  A `tolerance` of 1e-8 is below the L2
+norm's float32 resolution for these O(1) fields, so this fixture
+converges only by exact stationarity, and on later steps the two solvers
+can round to different verdicts: see the note on `residual` agreement
+between the solvers in `coupling_diagnostics()`.  The table is the
+first step, where they agree.
+
+### The old names
+
+`bound_valid` and `gradient_error_bound` still read through 0.4.x and
+emit a `DeprecationWarning` naming their replacement; they are removed
+in 0.5.0.  They are **not** in `keys()`, so `dict(diag)` and anything
+that records the report carry only the new names.
+
+## How the numbers were produced
+
+`benchmarks/coupling_fixtures.py` defines eight graph shapes, each
+isolating one property:
+
+| fixture | property | built from |
+|---|---|---|
+| `chain-N`, N ∈ {2,5,20,50} | sequential depth | spring-damper nodes in a line |
+| `star-N`, N ∈ {2,4,8,16} | width with no leaf-to-leaf path | hub plus independent leaves |
+| `ring-N`, N ∈ {4,8,16} | a cycle with no natural first node | bidirectional ring |
+| `stiff-pair-G`, G ∈ {0.25,0.5,0.8,0.95,1.2} | contraction factor, weak to divergent | two mutually anchored nodes |
+| `expensive-pair` | cost per iteration | two 10⁵-cell heat grids |
+| `heterogeneous` | one expensive node among cheap ones | 6x10⁴-cell grid plus four scalars |
+| `mixed-modes` | two groups, two schedules | Gauss-Seidel chain + Jacobi star |
+| `slow-drift` | a fixed point that barely moves | heat pair relaxing a step discontinuity |
+
+The spring fixtures are parameterised by a dimensionless **coupling gain**
+`g` rather than a stiffness.  `SpringDamperNode` integrates with
+semi-implicit Euler using its own old position and its anchor's new one,
+so the derivative of its new position with respect to its anchor is
+`dt²k/m`; fixing that at 1 and putting the coupling strength in the edge
+weight makes `g` exactly the gain the fixed-point iteration sees, with
+the remaining stiffness acting as a spring to ground.  Two mutually
+coupled nodes then contract as `g` under Jacobi and `g²` under
+Gauss-Seidel, and the line and ring shapes add the usual
+`cos(π/(N+1))`-type factor.  The heat fixtures use the Fourier number
+`Fo = α·dt/dx²` the same way, with one factor of two: `HeatNode` imposes
+its Dirichlet datum at the rod end through the ghost cell `2·T_b − T[0]`
+(MADD-ANO-007), so a slab's interface gain is `2·Fo`, and a slab pair
+contracts as `2·Fo` under Jacobi and `(2·Fo)²` under Gauss-Seidel.  Each
+heat fixture's Fourier number was halved when the datum moved to the
+rod end (`slow-drift` 0.225, `expensive-pair` and `heterogeneous` 0.2),
+so each contracts at the rate it was designed and first recorded at.
+Two slabs exchanging end-cell temperatures also have a *time-step*
+limit of their own: solved to convergence, the pair's interface mode
+leaves the unit circle at `Fo = 3/8` (−1.5 per step at 0.4, −4 at
+0.45), where one `HeatNode` with fixed data is stable to ½.  Before the
+halving, `slow-drift` (0.45) and `expensive-pair` (0.4) were past it:
+`slow-drift` exhausted its cap on every step under `gs/none/l2` and
+left float range within 90 steps.  The builders now refuse a slab-pair
+Fourier number at or above 3/8.  The module docstring explains why the
+damping has to be a function of `g` and why every spring fixture carries
+a driver node outside the group.
+
+`benchmarks/bench_coupling_sweep.py` runs the product of two iteration
+modes, five accelerations (`fixed` at ω = 0.5 and 0.8) and two
+convergence norms over each fixture, recording per row: mean / median /
+p95 step time, the dispatch floor, iterations mean and max against the
+cap, the fraction of steps that converged, the final residual, a
+fingerprint of the resulting state, and the device trace where the
+platform provides one.
+
+```
+# 420 rows, ~14 min on the whole machine, 34 min on a three-core slice
+JAX_PLATFORMS=cpu python benchmarks/bench_coupling_sweep.py \
+    --json benchmarks/results/coupling_sweep_cpu.json
+# 96 rows, 14 min on a three-core slice: the two grid fixtures, plus accelerated_fields variants
+JAX_PLATFORMS=cpu python benchmarks/bench_coupling_sweep.py \
+    --fixtures expensive-pair,heterogeneous --fields \
+    --json benchmarks/results/coupling_sweep_expensive_cpu.json
+# 48 rows, ~2 min (8 on a three-core slice): the same graphs with a tighter iteration cap
+JAX_PLATFORMS=cpu python benchmarks/bench_coupling_sweep.py \
+    --fixtures chain-20,chain-50,star-16,stiff-pair-0.8 \
+    --norms l2 --max-iterations 16 \
+    --json benchmarks/results/coupling_sweep_cap16_cpu.json
+```
+
+The grid fixtures are opt-in (`--include-slow`, or named explicitly)
+because they are minutes rather than seconds.  The third run exists
+because `max_iterations` is not a free safety margin for IQN — see
+[What IQN costs](#what-iqn-costs).
+
+`--steps` changes how many timings are averaged and nothing else.  The
+iteration counts, convergence fractions and residuals come from a
+separate statistics pass over a window that belongs to the *fixture*,
+so two runs of the same fixture at different `--steps` differ only in
+their timings.  That was not true of the first recording of these
+files: the pass ran `min(n_steps, 50)` steps from wherever the timed run
+stopped, so a shortened run moved the window as well as the sample
+size, and on fixtures driven by a 44-step oscillator the mean iteration
+count moved with it — `jac/iqn-imvj5/l2` on `chain-5` reads 4.00 at ten
+timed steps and 3.00 at twenty.  An earlier version of this page said
+those three quantities were unaffected by `--steps`; they were not, and
+the grid file was the one recorded at ten.  It has been re-recorded at
+the fixtures' own twenty.
+
+### Platform caveat — read this before quoting a step time
+
+Every recorded row was measured on a **24-core laptop CPU**; the venv has
+no CUDA jaxlib, so `jax.devices()` reports `TFRT_CPU_0` and
+`jax.profiler` reports no device kernels at all.  That has three
+consequences.
+
+* `n_kernels_per_step` and `device_busy_fraction` are **zero in every
+  recorded row**.  The `regime` column falls back to
+  `dispatch_floor_ms / mean_step_ms`, which is a defensible CPU proxy
+  and is labelled as such in `regime_from`.  On a GPU the sweep uses the
+  device-busy fraction instead, with no change to the script.
+* **Nothing here measures Jacobi's parallelism.**  Jacobi's structural
+  advantage is that its node updates are independent and can run
+  concurrently; on one CPU device they run one after another, exactly
+  like Gauss-Seidel's.  A Jacobi row's *iteration count* is exact and
+  platform-independent — that is a property of the algorithm — but its
+  *step time* is a pessimistic upper bound, because the concurrency the
+  mode exists for is not available.  The open question, and the first
+  thing to re-measure on a GPU box, is whether a wide `star-N` or a
+  {term}`sharded <Sharded>` grid recovers Jacobi's roughly 1.9x iteration penalty in wall time.
+  Nothing in this document answers it either way.
+* On the launch-bound fixtures the whole step is 0.1–2 ms and the spread
+  between configurations is tens of microseconds — inside the noise.
+  **The iteration counts are the reliable signal there**, and the sweep's
+  own "best configuration" picker ties rows whose medians differ by less
+  than the dispatch floor — on `star-8` that floor is 0.217 ms against a
+  0.410 ms step — or than the rows' own median sampling spread,
+  whichever is larger, and breaks the tie on iteration count.  It used a
+  fixed 10% band before, well inside the within-row spread these rows
+  actually record (up to 84% from median to p95), so it excluded rows
+  that were not measurably slower and named an 18.6-iteration
+  configuration as `star-8`'s best over a 7.1-iteration one.  Every
+  `best` field in the recorded files comes from the corrected rule, and
+  each one also records the fewest-iterations row, so a fixture where
+  the two disagree says so.
+
+## Where the measurement contradicted the theory
+
+Four expectations that the sweep did not support.  Each was written down
+before the fixtures were built, which is the only reason they count as
+predictions rather than commentary.
+
+**1. The Gauss-Seidel advantage does not widen with chain length.**  The
+expectation was that sequential information flow would let Gauss-Seidel
+pull further ahead as the chain grew.  It does not:
+
+| fixture | Gauss-Seidel | Jacobi | ratio | ratio (first recording, 2026-09-18) |
+|---|---|---|---|---|
+| `chain-2` | 6.1 | 11.1 | 1.83 | 1.69 |
+| `chain-5` | 15.3 | 28.7 | 1.88 | 1.77 |
+| `chain-20` | 26.4 | 47.3 | 1.79 | 1.72 |
+| `chain-50` | 33.8 | 53.9 (97% converged) | **1.59** | 1.72 |
+
+The ratio was flat because a tridiagonal coupling operator is
+*consistently ordered*, for which the Gauss-Seidel spectral radius is
+exactly the square of the Jacobi one — a constant factor of two in
+iterations at any depth, not a growing one.  What grows with N is the
+radius itself (0.40 → 0.80), and so the absolute iteration count.
+
+The prediction this paragraph tested — that the advantage *widens*
+with depth — is still refuted, and more firmly than the first recording
+showed: the ratio now *falls*, from 1.88 at N = 5 to 1.59 at N = 50,
+though part of that last figure is Jacobi steps that stopped at the cap
+(`chain-50` `jac/none/l2` converges on 97% of steps, so it is left out
+of "Start here" row 1's band).  The flatness the explanation above
+accounts for is what did not survive.  Whether the difference is the
+operator or the error-bound criterion charging the two modes
+differently has not been measured.
+
+**2. The star is one of the shapes where Gauss-Seidel wins by the most,
+not the least.**
+The expectation was that leaves which cannot see each other would leave
+Gauss-Seidel's ordering nothing to exploit, making Jacobi competitive.
+The first recording showed the star family with the *largest*
+Gauss-Seidel advantage of any shape family — 1.83–1.85 against 1.69–1.77
+on the chain — and flat in width.  The hub-to-leaf dependency alone is
+enough to give the full squared radius; ordering *among* the leaves was
+never what produced the factor.  On one device there is no shape at
+which Jacobi is competitive on iterations.
+
+Measured now, the *flat in width* half holds: 1.92–1.96 across the four
+stars, 23.1 iterations at 2 leaves and 24.8 at 16.  The **"largest of
+any shape family" half does not** — `stiff-pair-0.8` measures 1.98 and
+`slow-drift` 2.06, both above every star.  What survives is the finding the paragraph was written to test:
+a star gives Gauss-Seidel the full squared radius, so leaves that cannot
+see each other were never what produced the factor.  The ranking against
+the other families was a by-product of that, and it no longer holds.
+
+**3. Aitken helps Gauss-Seidel more than Jacobi, except on a two-node
+pair.**  The expectation was the reverse: Jacobi's error history decays
+more cleanly, which is what Aitken's scalar relaxation assumes.  That
+holds where the coupling really is a single mode —
+
+The first recording's values are in brackets.
+
+| fixture | gs/none | gs/aitken | jac/none | jac/aitken |
+|---|---|---|---|---|
+| `stiff-pair-0.5` | 8.2 (7.8) | 4.0 (4.0) | 16.2 (13.9) | 5.3 (5.0) |
+| `stiff-pair-0.8` | 22.3 (20.8) | 10.0 (9.9) | 44.1 (38.0) | 23.0 (20.7) |
+| `star-8` | 24.1 (21.7) | 10.1 (10.4) | 46.8 (40.2) | 38.3 (37.4) |
+| `star-16` | 24.8 (22.9) | 10.4 (10.7) | 47.6 (42.4) | 42.2 (42.5) |
+
+— on `stiff-pair-0.5` Aitken very nearly erases the Gauss-Seidel
+advantage, taking a 2.0x gap down to 1.3x, and on `chain-2` it closes
+it outright (4.0 against 4.3).  But as soon as the error is a mixture of
+modes with comparable magnitudes, the single Aitken ω cannot cancel them
+and Jacobi's cleaner decay stops helping: on `star-16` Aitken removes
+**11%** of Jacobi's iterations against **58%** of Gauss-Seidel's
+(47.6 → 42.2 against 24.8 → 10.4), and on `star-8` 18% against 58%.
+
+The old wording here was stronger and no longer holds: it said Aitken
+buys Jacobi "nothing at all" on `star-16`, on the recorded 42.4 → 42.5.
+That figure is gone — 42.2 from 47.6 is a real reduction, and 11% is
+not nothing.  The finding this paragraph exists to report survives on
+the *ratio*, which is what it was always about: Aitken is worth three
+to five times as much to Gauss-Seidel as to Jacobi on a wide star
+(58%/18% at 8 leaves, 58%/11% at 16), and the gap widens with width.
+One caveat on the Jacobi column: `star-16` `jac/aitken/l2` converges on
+97% of steps, not 100%, so part of its lower count is steps that
+stopped without arriving.
+
+**4. Fixed under-relaxation never helps Gauss-Seidel, and helps Jacobi
+on two fixtures out of twenty.**  The prediction was that it would lose
+everywhere, and the shape of where it does not is more useful than the
+prediction was.  Across all twenty fixtures, both norms and both ω
+values, **not one Gauss-Seidel row beats its unrelaxed counterpart on
+iterations** — it usually roughly doubles them (`chain-20`:
+26.4 → 56.5 at ω = 0.5, converging on 76% of steps; `star-16`:
+24.8 → 53.6; `slow-drift`: 3.1 → 4.2 at ω = 0.8).  Every row where
+relaxation wins is a Jacobi row:
+
+| fixture / norm | ω = 1 | ω = 0.5 | ω = 0.8 | ω = 0.8, first recording (2026-09-18) |
+|---|---|---|---|---|
+| `slow-drift`, jacobi, L2 | 6.40 | 4.08 | **3.20** | 3.46 |
+| `slow-drift`, jacobi, interface | 7.20 | 4.56 | **3.88** | 3.84 |
+| `expensive-pair`, jacobi, interface | 2.65 | 2.05 | **2.00** | 2.00 |
+| `expensive-pair`, jacobi, L2 | 5.50 | 4.10 | **3.10** | 6.90, 85% converged |
+
+All of them converge on every step.  On `slow-drift` ω = 0.8 is what
+brings Jacobi level with plain Gauss-Seidel (3.10 passes under L2), not
+past it, and the sweep's best configuration there is now
+`gs/none/interface` by time.  `expensive-pair` is the more
+interesting of the two because it is compute-bound, so its time
+follows its passes: 6.17 → 4.85 ms under the interface norm and
+12.5 → 7.07 ms under L2, which is work and not dispatch.  Its L2 row is
+new to this list: in the first recording plain Jacobi under L2 converged
+on only 85% of its steps, so no ω could be compared with it.
+
+**The scope of this finding is narrower than it looks, and narrower
+than it was when it was written.**  In the first recording
+`jac/fixed0.8/l2` converged on 100% of steps on every fixture in the
+table above and on eleven more.  It now converges on 23% of `star-16`
+steps, 72% of `star-8`, 88% of `star-4`, 94% of `star-2`, 96% of
+`stiff-pair-0.8` and 68% of `chain-20` (92% in the first recording) —
+`jac/fixed0.8` is the largest single block, six rows, of the 13 that
+stopped converging on every step between the two recordings.  The
+`slow-drift` finding itself
+stands: it still converges every step, at 6.40 → 3.20.  Read this
+finding as "on a graph whose fixed point barely moves, measure both
+ω values", never as "ω = 0.8 is a safe default under Jacobi".
+
+The split is the textbook one, and it is the same sentence as the next
+paragraph read the other way.  Under-relaxation damps an iteration that
+*overshoots*.  A Jacobi iteration matrix on these shapes has eigenvalues
+of both signs, so its error alternates and overshoots; Gauss-Seidel's is
+the square of it, positive, so the error approaches monotonically and
+damping it only slows the approach.  Read that way, "leave `relaxation`
+alone" is advice about Gauss-Seidel, and under Jacobi on a graph whose
+fixed point barely moves it is worth measuring both ω values.
+
+What under-relaxation does *not* do, under either mode, is rescue a
+divergent group.  This is arithmetic, not bad luck: relaxing maps an eigenvalue λ
+to `1 - ω + ωλ`, which for a *positive* λ > 1 stays above 1 for every
+ω > 0.  `stiff-pair-1.2` has a Gauss-Seidel eigenvalue of +1.44 and
+neither ω = 0.5 nor ω = 0.8 converged a single step of it.
+Under-relaxation is the cure for an eigenvalue outside the unit circle on
+the *negative* side, i.e. for an oscillating divergence; it is not a
+general stabiliser, and it should not be reached for first.
+
+## The finding that matters most
+
+**IQN converges problems that no fixed-point method can.**  On
+`stiff-pair-1.2`, whose coupling gain is past the convergence limit by
+construction.  Straight from the recorded rows of
+`coupling_sweep_cpu.json` (Gauss-Seidel, L2 norm, the fixture's 5 warmup
++ 10 timed + 10 statistics steps — it is deliberately short, because a
+divergent group's state grows by ρ^cap every step):
+
+| acceleration | iterations | at cap | converged | \|a.position\| |
+|---|---|---|---|---|
+| `none` | 12.0 | 100% | 0% | 3.1e+21 |
+| `aitken` | 12.0 | 100% | 0% | 9.0e+03 |
+| `fixed` ω=0.5 | 12.0 | 100% | 0% | 5.5e+11 |
+| `fixed` ω=0.8 | 12.0 | 100% | 0% | 3.5e+17 |
+| `iqn-ils` | 4.0 | 0% | 100% | 0.496 |
+| `iqn-imvj`, reuse 5 | 3.0 | 0% | 100% | 0.496 |
+
+`iterations` reads the cap, 12, on every step of every fixed-point row:
+a group that diverges exhausts its budget and reports that it did.  The
+first recording read 11.0 there — the cap check then counted
+`max_iterations - 1` — and `inf` for `none`.  The honest signal is
+`converged`, which is 0% for the whole fixed-point family and 100% for
+both quasi-Newton rows.
+
+IQN-ILS is a quasi-Newton root solver, not a contraction, so a spectral
+radius above one is not fatal to it; it solves the coupled algebraic
+system directly.  This is why the invariant is phrased as "a divergent
+group must *report itself* unconverged" rather than "must fail": the
+fixed-point family must be honest about hitting the cap, and IQN is
+allowed to succeed where they cannot.  Both are asserted in
+`tests/core/test_coupling_fixture_invariants.py`.
+
+The same effect shows at gain 0.95, which is inside the convergence
+limit but too slow to be useful: `gs/none/l2` exhausts its cap of 60 on
+every step and converges on none, while `gs/iqn-ils/l2` converges every
+step in 4.0 iterations and `gs/iqn-imvj` in 3.4.  `gs/aitken/l2` also
+converges every step there, in 37.0 — so at this gain the choice is
+between an accelerator and no useful answer, not between two speeds.
+IQN is not meaningfully *faster* here (0.35 ms against 0.40 for the row
+that runs its whole cap and does not converge); it is the one that is
+right.
+
+One property of Aitken worth knowing before reaching for it: since the
+correction it needs the convergence threshold met on **two consecutive
+passes**.  The mechanism is real — `_TWO_PASS_EXIT` in
+`core/coupling/_fixed_point.py`, argued in `_fixed_point_while`'s docstring —
+but an earlier version of this paragraph drew the wrong floor from it
+and said Aitken "cannot exit in fewer than four".  **It can, and the
+repo's own recorded baseline says so.**  The streak's first member is
+the pass that ran *before* the group's iteration loop (`first_res`,
+which is exactly why it is seeded from a measurement rather than from
+infinity), so the guard costs at most one extra pass, not three.  Four
+Aitken rows in `benchmarks/results/coupling_sweep_cpu.json` record an
+`iterations_min` of 3 — `ring-4`, `star-4` and `stiff-pair-0.25` under
+Gauss-Seidel and `stiff-pair-0.25` under Jacobi — and all four are
+**interface-norm** rows (the first recording had seven at 2 or 3).
+Where the same fixture's unaccelerated row exits sooner, it is by one
+pass: `ring-4` and `stiff-pair-0.25` at 2 against Aitken's 3,
+`slow-drift` under L2 at 3 against 4.  `gs/none/interface` on
+`stiff-pair-0.95` exits some steps in 1.  That single pass is what the
+guard is specified to cost.
+
+What the old sentence generalised from is the L2 rows it sampled, where
+Aitken does land on 4.0: on a group that already converges in three it
+costs a pass — `slow-drift` goes 3.1 → 4.0 under L2 and
+`stiff-pair-0.25` 3.6 → 4.0 under the interface norm.  The guard adds
+at most one pass to Aitken's *own* exit -- the pass before the loop is
+the streak's first member -- so it sets no floor of four.  It is not a
+bound on Aitken against
+`acceleration="none"`, which follows different iterates and can stop
+sooner or later -- on these rows a pass later, on a group that already
+converges in three.  It is an accelerator for iterations you have, not
+for iterations you do not.
+
+A second property: Aitken's single relaxation factor is derived from the
+residual *vector*, so a quantity that enters that vector twice weighs
+twice in it.  Under Jacobi that can stall it.  An identity relay put on
+one of a three-member group's internal edges (`x <- u`, the same coupled
+system with one more copy of a field) left Aitken at its cap of 400
+passes, unconverged, where the relay-free group at the same rate (0.9)
+crept under its threshold through the raw-residual fallback in 278 --
+the failure of the single-mode assumption `_fixed_point_while`
+describes, not rounding.  Under Gauss-Seidel, and for every other
+acceleration, the relayed group converges with the relay-free one
+(`tests/property/test_coupling_invariances.py`, CPL-183).  If a group
+carries the same quantity in two members, prefer Gauss-Seidel or an IQN
+acceleration to Jacobi with Aitken.
+
+## What IQN costs
+
+IQN's iteration counts are the best of any option on nearly every
+fixture.  Its *time* is not, and the reason is worth stating precisely:
+each iteration solves a least-squares problem with `jnp.linalg.pinv`
+over an `n_dof x max_cols` matrix, where `n_dof` is the number of
+accelerated degrees of freedom and **`max_cols = max_iterations - 1`**.
+
+| fixture | accelerated DOFs | gs/none | gs/iqn-ils | factor |
+|---|---|---|---|---|
+| `chain-5` | 5 | 0.428 ms | 1.04 ms | 2.4x |
+| `chain-20` | 20 | 1.25 ms | 3.69 ms | 2.9x |
+| `chain-50` | 50 | 2.76 ms | 18.8 ms | 6.8x |
+| `slow-drift` | 4 000 | 0.734 ms | 11.9 ms | 16x |
+
+`chain-50` is the cautionary row: 17.4 iterations against 33.8, and a
+step 6.8 times slower for them.  That factor is also the least
+reproducible number on this page — the same row has measured 18.8 ms
+here, and 107, 169 and 332 ms (120x in the first recording) on runs of
+code that differed in nothing that touches it, because XLA's CPU SVD
+inside a `while_loop` is erratic.  Treat it as "several times to two
+orders of magnitude", not as any one of those.  Two levers, in order:
+
+**1. Lower `max_iterations`, but size it from a measurement.**  A cap of
+60 gives IQN 59 secant columns whether or not it ever needs them, and
+the least-squares problem is that wide every pass.  Re-running the same
+graphs with `--max-iterations 16` (`coupling_sweep_cap16_cpu.json`):
+
+| fixture / config | cap 60 | cap 16 |
+|---|---|---|
+| `star-16` `gs/iqn-ils/l2` | 4.0 it, 1.66 ms, 100% converged | 4.0 it, 1.43 ms, **100%** |
+| `chain-20` `gs/iqn-ils/l2` | 15.4 it, 3.69 ms, 100% | 15.0 it, 3.13 ms, **82%** |
+| `chain-50` `gs/iqn-ils/l2` | 17.4 it, 18.8 ms, 100% | 15.9 it, 4.80 ms, **27%** |
+| `chain-50` `gs/iqn-imvj5/l2` | 17.9 it, 13.7 ms, 100% | 15.8 it, 6.44 ms, **23%** |
+
+Read the third column, not the second.  `star-16` converges in 4
+iterations, so 59 columns were pure overhead and taking them away costs
+nothing — that is the case the lever is for.  `chain-50` needs 17.4, so
+a cap of 16 cannot hold it: it sits at the cap on 87–90% of steps and
+converges on 23–27% of them.  The 3.9x saving on that row (58x in the
+first recording, whose cap-60 step was 169 ms) is real and it is bought
+by not converging.  **`max_cols = max_iterations - 1`, so the
+cap is simultaneously the secant history length and the iteration
+budget, and it is a sizing parameter in both directions** — lowering it
+shrinks the least-squares problem *and* the number of passes available
+to use it.
+
+The unaccelerated rows show the same boundary more bluntly.  At cap 16,
+`gs/none/l2` converged on **0%** of the steps of all four fixtures — it
+needs 22–34.  Set the cap
+from the iteration count you measured, not from the one you hoped for,
+and read `converged_fraction` afterwards rather than the step time.
+
+**2. Set `accelerated_fields` explicitly** so a large-state node does not
+put its whole array into the least-squares problem.  `None`
+auto-detects the fields the group's internal edges *read*, which for
+a grid node coupled on one cell is still the entire grid.
+
+## Four combinations that theory says should win
+
+**Jacobi + Aitken.** Nearly closes the gap on two-node pairs
+(`stiff-pair-0.5`: 16.2 → 5.3 against Gauss-Seidel + Aitken's 4.0;
+`chain-2`: 11.1 → 4.3 against 4.0) and buys far less on anything wider
+(`star-16`: 47.6 → 42.2, an 11% reduction, against Gauss-Seidel's 58%).
+Not a general recommendation.  An earlier version of
+this line read "does nothing on anything wider (`star-16`: 42.4 →
+42.5)"; see contradiction 3 for why that figure no longer stands.
+
+**Jacobi + IQN.** Marginally better than Gauss-Seidel + IQN on the
+chain and ring families (`chain-5` 5.3 vs 7.0, `chain-20` 13.5 vs 15.4,
+`ring-4` 5.1 vs 6.2, `chain-50` 17.1 vs 17.4) and marginally worse on
+the stars (`star-8` 4.3 vs 4.0, `star-16` 4.6 vs 4.0).  The hypothesis — a residual history from a single
+iterate spans a cleaner space — is weakly supported on the chains and
+rings only, and the effect is smaller than the noise in step time.  Worth knowing, not
+worth defaulting to.  **And it can stall where the plain Jacobi loop
+converges** (MADD-ANO-275).  Measured on a float32 pair of `tanh` nodes
+with 2 and 4 entries, each reading the other through a matrix mapping
+(default norm and solver): plain Jacobi is 5e-8 from the fixed point
+after 12 passes, while `iqn-ils` under Jacobi takes the error from 0.82
+at a cap of 3 passes to 4.0 at a cap of 5 and is still 0.18 away at a
+cap of 40.  At tolerances of 1e-4 and 1e-6 with `max_iterations=50`,
+both IQN accelerations stop at the cap with a residual of 0.18, 0.14
+from the fixed point.  The same pair converges under Gauss-Seidel with
+either IQN (6 to 10 passes), and under Jacobi with no acceleration (9 to
+12) or with Aitken (33 to 35).  The stall is occasional — 2 of 7 pairs
+drawn with those sizes, none of 36 pairs of equal sizes — and it is
+reported: `converged=False` with `iterations == max_iterations`, and
+`strict_convergence=True` raises.  So read `converged` after choosing
+this combination; where it is `False` on a group the plain Jacobi loop
+solves, use Gauss-Seidel with IQN, or stay on Jacobi with
+`acceleration="none"` or `"aitken"`.  The accelerator does not go back
+to a plain pass when its own step makes the residual grow.
+
+**Gauss-Seidel + fixed under-relaxation.** Never won.  See contradiction
+4 above.
+
+**Interface norm with `accelerated_fields` restricted to interface DOFs.**
+Half right, and the half that is wrong is the more useful half.
+
+The interface norm alone generalised from AR4.  Measured on
+`gs/none` across the eighteen fast fixtures it removes **−18% to 28%**
+of the iterations: 18–28% on the chains, the stars and the rings,
+20–28% on the stiff pairs up to gain 0.8, **2%** on `stiff-pair-0.95`,
+nothing at all on `stiff-pair-1.2` (which converges nowhere), and −18%
+on `slow-drift`, where it costs half an iteration.  The first recording
+read −5% to 31% and this paragraph quoted that; both endpoints have
+moved outside it.  A blanket "25–35%" was the top of the range quoted
+as the whole of it.  On a grid fixture, where the
+L2 residual is mostly bulk change that does not iterate, the cut is far
+larger: `expensive-pair` goes 2.95 → 1.65, a 44% reduction (6.0 → 1.5, 75%, in
+the first recording, whose Fourier number and so timestep were twice
+today's).
+
+| fixture | l2 | interface | l2 (first recording) | interface (first recording) |
+|---|---|---|---|---|
+| `chain-20` | 26.4 | 18.9 | 23.7 | 16.7 |
+| `chain-50` | 33.8 | 26.0 | 30.8 | 23.0 |
+| `star-16` | 24.8 | 18.2 | 22.9 | 15.9 |
+| `stiff-pair-0.95` | 60.0 (at cap on **100%** of steps, converged **0%**) | 58.7 (at cap on **94%**, converged **8%**) | 58.4 (at cap on 98%, converged 2%) | 49.6 (at cap on 34%, converged 68%) |
+
+**The last row reversed qualitatively and is the one to read.**  In the
+first recording the interface norm took `stiff-pair-0.95` from 98%
+at-cap to 34% — a 15.1% cut in iterations and a group that converged on
+two steps in three.  Now it takes it from 100% at-cap to 94%, a **2.2%**
+cut, and the interface arm converges on **8%** of steps.
+Near the convergence limit the interface norm is no longer the lever
+this table was written to show; `stiff-pair-0.95` is the fixture behind
+"Start here" row 3, which is why that row now recommends IQN on its own
+merits rather than on this one.
+
+"At no measurable cost" is also not quite true, and in the direction you
+would not guess: six of the eighteen fast fixtures record a *higher*
+step time under the interface norm than under L2 (`star-4` 0.281 →
+0.501 ms, `chain-20` 1.25 → 1.35 ms), while the other twelve record a
+lower one (`stiff-pair-0.5` 0.455 → 0.172 ms) — and the first
+recording split them nine and nine, with `chain-20` on the other side.  On launch-bound fixtures those
+differences are dispatch, not work.  The iteration reduction is the real
+effect; the step time is a coin flip at this scale.
+
+Combined with IQN it is better still, and there the saving is not a coin
+flip (`chain-50`: 17.4 iterations and 18.8 ms under l2, 12.5 iterations
+and 10.1 ms under the interface norm — the smaller residual vector also
+shrinks the least-squares problem).
+
+The `accelerated_fields` half did not generalise the way it was
+expected to.  The expectation was that restricting the quasi-Newton
+problem to the *expensive* node's interface would beat accelerating
+everything.  On `heterogeneous` — one 6x10⁴-cell grid plus four scalar
+nodes — restricting it to the expensive node is the **worst** of the
+four options, and restricting it to the cheap ones is the best by two
+orders of magnitude (Gauss-Seidel, `iqn-ils`, L2 norm):
+
+| `accelerated_fields` | accelerated DOFs | iterations | ms/step |
+|---|---|---|---|
+| `None` (auto: grid + scalars) | ~6x10⁴ | 4.0 | 145 |
+| everything, incl. velocities | ~6x10⁴ | 3.0 | 108 |
+| the expensive node only | 6x10⁴ | 7.25 | 237 |
+| **the four cheap nodes only** | **4** | **4.0** | **3.25** |
+| (no acceleration, for scale) | — | 7.25 | 4.03 |
+
+Two comparisons, stated separately because an earlier version of this
+page mixed them: cheap-only matches the **auto-detected** set on
+iterations exactly (4.0 against 4.0) at **1/45th** of its cost, and is
+one iteration behind accelerating **everything** (4.0 against 3.0) at
+**1/33rd** of its cost (1/85th and 1/58th in the first recording).
+Neither ratio is 1/60 or 1/76 paired with "same iteration count"; those
+were an iteration claim from one pair and a cost ratio from another.
+
+The reading is that the secant history needs enough degrees of freedom
+to model how the *interface* responds, and the four scalars carry that;
+the grid's sixty thousand cells add nothing to the model and the entire
+cost.  Restricting to the grid alone removes the degrees of freedom that
+were doing the work.
+
+Two caveats the recommendation needs.  First, the win is mostly over
+IQN's own cost, not over doing nothing: cheap-only `iqn-ils` at 3.25 ms
+is 19% under `gs/none/l2` at 4.03 ms, and `iqn-imvj` under the
+interface norm — 3.0 iterations at 1.85 ms against `gs/none/interface`'s
+5.95 at 1.93 — is level with plain iteration, inside the noise of a
+shared three-core slice (the first recording had these the other way
+round: a wash under L2 and a 12% win under the interface norm).  The
+point of `accelerated_fields` here is that it makes IQN *affordable* on
+a heterogeneous group, not that IQN is a large win on one.
+
+Second, **under Jacobi the same restriction costs convergence.**  All
+four Jacobi cheap-only rows fall short:
+
+| row | iterations | converged |
+|---|---|---|
+| `jac/iqn-ils/l2/fields-cheap` | 18.75 | 45% |
+| `jac/iqn-imvj5/l2/fields-cheap` | 17.95 | 60% |
+| `jac/iqn-ils/interface/fields-cheap` | 16.40 | 55% |
+| `jac/iqn-imvj5/interface/fields-cheap` | 15.95 | 65% |
+
+against 100% for every one of the corresponding Gauss-Seidel rows and
+for the Jacobi rows that accelerate everything.  Restricting the secant
+basis to four scalars leaves Jacobi without enough of the interface
+response to model, and unlike Gauss-Seidel it has no sequential update
+to make up the difference.
+
+The corollary for a grid-to-grid group, where there is no cheap subset
+to fall back on: IQN is simply not affordable.  On `expensive-pair` it
+costs **32–42x** the plain step for no saving at all under the
+interface norm (1.60–1.65 passes either way), and 31–42x under L2 for
+at most one pass (2.0–2.9 against 2.95).
+
+Third, and this one was an accuracy caveat rather than a cost one, **now
+closed for the state a step returns** (MADD-ANO-240, MADD-ANO-241; see
+"What a converged step returns under each norm" above).  As first
+recorded:
+**do not pair the auto-detected `accelerated_fields` with
+`convergence_norm="interface"`.**  Both are the edge source fields (the
+criterion reads them as the edges deliver them, through any transform
+and any mapping that does not expand, and as they are stored where a
+mapping delivers more entries than it reads), so
+the quasi-Newton step lands on exactly the fields the criterion then
+measures, and every other field of the group is carried out of the last
+raw pass with nothing looking at it.  Measured over the sweep, on an
+`iqn-*` row exiting on its criterion, the interface field moves by at
+most 1.0e-04 while `velocity` moves by up to **2.2**.  This is what the
+ten `_KNOWN_DISAGREEMENTS` rows in
+`tests/core/test_coupling_fixture_invariants.py` are; naming every
+field in `accelerated_fields` closes all ten at the same iteration
+count, and tightening `atol`/`rtol` — the remedy those entries first
+named — does not, because the criterion is already three decades inside
+its threshold when they stop.  Naming every field is necessary and not
+sufficient: the criterion is still over the edge fields alone, so a
+group whose interface goes stationary before the rest of its state has
+can still exit, and over generated graphs that is measurable at
+5.2e-01.  **Prefer a norm that sees the whole state** (`"l2"`,
+`"mixed"`);
+`benchmarks/results/retire_known_disagreements/REPORT.md` has the
+numbers, and `MADD-ANO-005` carries it as residual risk.
+
+The mechanism was not the accelerated set.  The interface norm returned
+the iterate it accepted, whose unmeasured fields came from the pass
+*before* the readings it stopped on; an accelerator only made that pass
+a long way off.  A step now returns those fields as one plain pass
+computes them at the accepted iterate, and the ten rows agree with plain
+Gauss-Seidel within the test's interface allowance at the fixtures' own
+`rtol`, with the auto-detected set unchanged (9.9e-06 to 2.2e-03 from
+it after 25 steps, where they were 2.6e-02 to 2.25): the
+`_KNOWN_DISAGREEMENTS` list is empty.  **The figures in the paragraph
+above and in the next section are those of the recorded sweep, taken
+before that change; the sweep has not been recorded again.**  The advice
+to prefer `"l2"` or `"mixed"` where the answer matters stands for the
+reason that remains: the interface norm holds no field it does not read
+to a criterion.
+
+## Do all these configurations agree?
+
+The sweep records `fixed_point_agreement` per fixture: the largest
+deviation between the state fingerprints of any two fully converged
+rows, measured against the first of them.  Two numbers, because one is
+not enough on a mixed-scale fixture — `max_relative_deviation` scales
+each entry by its *field's* largest magnitude across the group, and
+`max_node_relative_deviation` scales it by that entry's own amplitude,
+which is the one that catches a small node hiding behind a large one
+sharing its field name.
+
+**Most of the recorded figures are now one defect, and it is the one
+the accuracy caveat above names.**  On sixteen of the eighteen fast
+fixtures the worst row is an `iqn-*` row under the interface norm with
+the auto-detected `accelerated_fields`, and on fifteen of them it is far
+from the rest: 0.13 on `stiff-pair-0.25` up to 0.93 on
+`stiff-pair-0.95`, in a `velocity` entry every time, and 3.3x10⁵ on
+`stiff-pair-1.2`, where the interface converges and the unwatched
+velocity diverges (`ring-16`, at 1.0x10⁻³, is the exception).  The quasi-Newton step
+lands on the interface field the criterion measures, and the rest of the
+state leaves the last raw pass unmeasured (MADD-ANO-005's residual
+risk; the ten `_KNOWN_DISAGREEMENTS` rows are the same defect).  The
+first recording read at most 4.8x10⁻³ because the solvers then returned
+the update the quasi-Newton step went on to produce; since 0.4.0 they
+return the iterate whose residual was measured, which is what exposed
+it.
+
+Leave those rows out and the field-scaled figure runs from 1.0x10⁻⁷
+(`slow-drift`) to 3.1x10⁻³ (`mixed-modes`), and every fixture's worst
+row is still an interface-norm one.  That is the expected shape, but not for
+the reason an earlier version of this page gave.  It said the interface
+norm "is a *relative* criterion (`atol`/`rtol`), so it stops earlier
+than an absolute L2 tolerance".  That sentence pre-dates 0.4.0: **all
+three norms are relative now** — each divides a field's change by that
+field's own magnitude — so relativeness is not what separates them, as
+the header of this page and `CouplingGroup`'s docstring
+(`src/maddening/core/coupling/group.py`) both say.  What separates them
+is *what they look at*.  The interface norm measures only the
+coupling-edge fields, so a group whose interface has gone stationary
+stops while the rest of its state is still moving, and the trajectories
+drift correspondingly further apart.  The node-scaled figure agrees with it everywhere except
+`chain-50`, where it reports 2.2x10⁻² for `link30.velocity` — a node
+passing near zero, measured against its own small amplitude.  That is
+what the second number is for, and it is also why the fixture-level
+threshold in the test suite is per-norm rather than one band for both.
+
+Two notes on how these figures got here, because the earlier version of
+this page quoted a different one.  The headline used to be 4.2x10⁻² on
+`heterogeneous` — a number that was **not** a disagreement of 4.2x10⁻².
+It was the *sum* of a 60 000-cell grid field: an extensive quantity
+compared against a scale taken from an intensive one, so a per-cell
+difference of 7x10⁻⁷ scored 4x10⁻².  And the scale it was divided by
+came from the driver node, which sits outside every {term}`coupling group <Coupling group>` and
+carries a `position` eighty times the coupled probes', so the probes'
+own disagreement — a real 20.6%, caused by the Aitken exit criterion
+described at the top of this page — was reported as 2.6x10⁻³ and passed
+under a 5x10⁻³ threshold.  Both are fixed: the signature records each
+entry's element count and the comparison divides it out, and the
+signature covers only the nodes inside a coupling group.
+`heterogeneous` now reports 0.30 — the same `iqn-*` / interface blind
+spot, `jac/iqn-imvj5/interface` on `probe3.velocity` — and 7.2x10⁻⁴
+without those rows, and the Aitken rows are unremarkable.
+
+The practical advice is unchanged and now rests on the right numbers:
+the deviation grows with the fixture's condition number and with how
+early the criterion lets you stop, so set `rtol` deliberately rather
+than inheriting it, and read `fixed_point_agreement` for your own graph
+rather than trusting a figure from this page.
+
+## A note on the global L2 norm and large grids
+
+On a graph where one node carries a large state and the coupling touches
+a few cells of it, the global L2 residual is dominated by bulk change
+that does not iterate at all.  `expensive-pair` converges in **1.65
+iterations** under the interface norm, at 5.15 ms, because the interface
+agrees almost immediately at that tolerance; under the global L2 norm
+the same graph reports 2.95 iterations and 7.56 ms.  The two norms are measuring
+different things, and on a grid the L2 number is mostly a statement
+about the grid, not about the coupling.  Use the
+interface norm on grid couplings, and read `coupling_iter_stats` rather
+than trusting a residual whose units you have not thought about.
+
+## The adjoint solve has no absolute tolerance
+
+The IFT tangent and adjoint are one solve of `(I - dF/dx) v = b` each, and
+the matrix-free backends stop on a tolerance relative to `max|b|` only, on
+`b` rescaled by an exact power of two.  Until 0.4.0 the criterion also
+carried an absolute `1e-8`, which a small `b` met before a single step: the
+derivative of a group in small units, or of a loss near its minimum, came
+back exactly zero and "successful" (MADD-ANO-113).  An ill-conditioned
+solve now fails at every scale alike, with the error below.
+
+A `b` with a NaN or infinite entry -- a node whose derivative cannot be
+evaluated, a NaN observation in the loss -- is answered with NaN in every
+entry, on every backend.  The relative tolerance is the reason it has to
+be said: `rtol * max|b|` is NaN or `inf` there, the zero initial guess
+passed lineax's test at once, and until 0.4.0's fix the derivative came
+back exactly zero, "successful", where `"dense"` and `solver="fori"` read
+NaN (MADD-ANO-154).  The Krylov backend is now handed zeros in place of
+such a `b`, so it does not iterate on NaN, and the answer is NaN -- which
+is also what an honest Krylov iteration gives, its first basis vector
+being `b / ||b||`.  The check is per right-hand side: under `jacfwd` or
+`jacrev` only the column with the non-finite entry is NaN.
+
+## A member with a reverse-mode-only derivative
+
+The default solver differentiates a group in forward mode, whatever
+derivative you ask for.  `solver="ift"`'s rule is a `jax.custom_jvp`: it
+solves for the tangent from a forward-mode product of the members' pass,
+and `jax.grad` transposes that.  So every member of a group needs a
+forward-mode derivative that {term}`JAX` can transpose.
+
+A node whose only derivative rule is reverse mode does not have one.  That
+is a `jax.custom_vjp`, which is what a reverse-mode bridge to an external
+kernel usually provides.  Such a node works under `jax.grad` in a plain
+graph and fails inside a group.  Measured on a two-node group with one
+`custom_vjp` member under `jax.grad` (jax 0.11.0), every `solver="ift"`
+configuration raised the same error when the gradient was traced:
+`linear_solver="gmres"` and `"dense"`, Gauss-Seidel and Jacobi, and
+`acceleration="aitken"` and `"iqn-ils"`.
+
+```text
+NotImplementedError: Differentiation rule for 'custom_lin' not implemented
+```
+
+The same node outside a group gave the gradient (0.456861, against a
+central difference of 0.456810).  The deprecated `solver="fori"`, which
+differentiates through the iterates, gave it too.  `jax.jvp` fails for
+such a node everywhere: `TypeError: can't apply forward-mode autodiff (jvp)
+to a custom_vjp function`.
+
+What to do instead: give the node a `jax.custom_jvp` whose tangent is
+linear in the tangents and written in operations JAX can transpose,
+such as `jnp` arithmetic.  JAX then derives the
+reverse mode from it.  With the same function written that way, every
+configuration above, `"fori"` included, gave the same gradient
+(0.645956, against a central difference of 0.645876) and the same
+`jax.jvp`.  The tangent may use values computed from the primals by code
+JAX cannot differentiate, such as a Jacobian an external kernel returns.
+Such a rule is first order only, and `diagnostics=True` needs more (see
+"`diagnostics=True` needs second derivatives" in
+[Inspecting a graph](../user_guide/inspection.md)).  The
+[node-authoring guide](node_authoring.md#derivative-rules-and-coupling-groups)
+shows the pattern.
+
+## `linear_solver="dense"` is not an escape hatch on a grid
+
+When the GMRES adjoint fails to converge — an ill-conditioned
+`I - dF/dx`, which is what a stiff group produces — the obvious move is
+to swap the matrix-free solve for the exact one and accept the cost.
+Read the cost first.
+
+`"dense"` materialises the full `N x N` coupling Jacobian **and** the
+identity basis `jacfwd` builds it from, so both are live at once and
+the peak working set of the solve `jax.grad` runs (the transposed one)
+is `2 * N**2 * itemsize`. In float32:
+
+| coupled DOF `N` | peak working set | single Jacobian |
+|---|---|---|
+| 1,024 | 8.0 MiB | 4.0 MiB |
+| 8,000 | 0.48 GiB | 0.24 GiB |
+| 16,384 | 2.0 GiB | 1.0 GiB |
+| 65,536 | 32.0 GiB | 16.0 GiB |
+| ~3.6e5 | ~975 GiB | **523 GB** |
+
+`jax_enable_x64` doubles every row. The figures are XLA's own
+compiled-module memory analysis of the `_dense` body in
+`maddening.core.coupling._ift`, taken on CPython 3.12.3 with
+jax/jaxlib 0.11.0 on the CPU backend; nothing was allocated to produce
+them, and the analysis agrees with `2 * N**2 * 4` to within a few tens
+of kilobytes at every size from 64 DOF to 3.6e5.
+
+**Forward mode costs half as much again.**  The tangent solve
+`jax.jvp` / `jacfwd` runs -- the {term}`FMI` `FORWARD` directional derivative
+among them -- keeps `I - J` live beside the identity basis and the
+Jacobian-vector products, so a dense coupling Jacobian peaks at
+`3 * N**2 * itemsize`: 3.00 `N**2` floats at `N` = 256 and 512 in the
+same analysis (a diagonal one, which XLA simplifies, at 2.00).  Read
+the table's middle column as one and a half times larger for a forward
+derivative.
+
+The last row is the point. There is no soft edge to this curve: the
+solve does not thrash, or slow down, or lose accuracy. It does not
+start. A grid-coupled group at that size reports
+
+```text
+Out of memory allocating 523186046552 bytes
+```
+
+— a single allocation, the Jacobian, before the first matvec. And
+those are ordinary sizes for a grid coupling: one scalar field over a
+20³ volume is already 8,000 DOF, a volume coupled to a surface
+discretisation runs to 10⁵–10⁶, and the matrix-free path exists
+precisely so that `N` never appears squared.
+
+So the advice, plainly:
+
+* **Small group (N up to a few thousand):** `"dense"` is a real escape
+  hatch. It is exact, it costs megabytes, and
+  `MADDENING_IFT_DENSE_SOLVE=1` is a reasonable triage switch.
+* **Grid-coupled group:** it is not an option at any resolution you
+  would run. The remedy is to make the group less stiff — stronger
+  relaxation, a smaller timestep, or splitting the cycle — which
+  attacks `cond(A) ~ 1 / (1 - rho)` itself. Raising GMRES's `restart`
+  does not help either; it is already `min(N, 50)`.
+
+MADDENING does re-solve densely on its own, but only below
+`_DENSE_ADJOINT_FALLBACK_MAX_DOF` (50), where the Krylov space is
+already the whole space and `N**2` floats of scratch are negligible.
+Above that cap the failure is raised rather than silently paid for, and
+the message it raises now prices the dense path at your own `N`.
+
+## What the way a graph is built can change
+
+A coupled graph is written as `add_node`, `add_edge` and
+`add_coupling_group` calls, and most of what those calls fix is
+structure, not order.  What the order still reaches, and what it does
+not (rows CPL-025, CPL-077, CPL-078, CPL-180 to CPL-183 of
+`docs/validation/coupling_claims.yaml`):
+
+* **Names do not reach the solve.**  A group is keyed by its sorted node
+  names, and renaming every node gives bit-identical states, verdicts
+  and reports.
+* **A group's members are swept in the order they were added.**  That is
+  Gauss-Seidel's order by design (a ring has no natural first node), so
+  under Gauss-Seidel the members' order is part of the method; under
+  Jacobi it reaches the states only through the order the norm sums the
+  members in (an ulp, which matters only at the threshold) and the
+  accelerators' dot products (see the ring row of [Start
+  here](#start-here)).
+* **Everything that reads a group runs after it in the same step,
+  whatever order it was added in.**  Since 0.4.0 the schedule orders a
+  cycle and everything downstream of it by their strongly connected
+  components; before, a node downstream of a group that had been added
+  before the group's members was scheduled ahead of them and read their
+  previous-step output, silently.
+* **A group is one block in the schedule.**  Its members are placed
+  together at the first member's place, which is where the step runs the
+  group, and back edges are decided over that order.  Before 0.4.0's
+  round-5 fix an outside node added between two members of a group that
+  is only part of a larger loop was scheduled between them, ran after the
+  whole group all the same, and read the later member one step late
+  (MADD-ANO-144).
+* **A loop through outside nodes is closed where the build order puts
+  it.**  When a group's members and some outside nodes form one feedback
+  loop, the group does not iterate the outside part, so one of the loop's
+  edges outside the group is read from the previous step -- and which one
+  follows the order the nodes were added.  `compile()` warns
+  (`UserWarning`), naming the group, the outside nodes and the edge read
+  late; add those nodes to the group to iterate the whole loop.
+* **The edges' order does not reach a norm.**  The interface norm sums
+  its terms in an order the group fixes -- by each edge's source's place
+  in the sweep, then its target's -- which is the order the L2 and mixed
+  norms sum the members in (it summed in insertion order, and a reversed
+  build moved the residual in its last bits).
+* **Three or more additive edges into one input sum in the order they
+  were added.**  Floating-point addition does not associate, so
+  `a + b + c` and `a + c + b` can differ in the last bit, and with them
+  the input, the pass and, near a threshold, the verdict.  Two additive
+  edges commute exactly.  If an input's last bit matters, add its
+  additive edges in a fixed order.  (A non-additive edge into the same
+  input is not a rounding matter: it replaces whatever the edges before
+  it delivered, so an input fed by both kinds depends on their order
+  outright.)
+* **The gradient bound probes each entry**, so its number follows the
+  build order only by rounding -- except for a constant of more than 64
+  entries, probed along one fixed-seed direction drawn per constant in
+  the order the map reads its constants, which follows the build order;
+  it stays a bound in every order (see
+  [`gradient_relative_error_bound`](#gradient_relative_error_bound-the-gradient-not-the-solve)).
+* **How a mapping holds its weights reaches the gradient bound.**  The
+  weights are constants of the pass, so a mapping held as a dense matrix
+  of more than 64 entries is probed along one direction and the same
+  operator held sparsely is probed entry by entry.  On a pair of three
+  markers and a 30-cell grid (jax 0.11.0, float32) the two layouts gave
+  bit-identical states and spectral keys, and gradient bounds 0.63 to
+  1.17 times one another.  Both held against the true error with respect
+  to the nodes' parameters, and the sparse one with respect to each
+  weight.  For the dense layout the bound covers the derivative along its
+  probe only: it read 0.79 to 0.82 times the error with respect to the
+  weight entry worst off under Gauss-Seidel (each field weighted by its
+  own largest magnitude, as the `"l2"` norm weights it).
+
+## An edge from a node to itself
+
+`add_edge("a", "a", ...)` is accepted, and a group changes what it means.
+Outside every group the edge is a back edge: `a` reads its own value from
+the previous step.  With `a` in a coupling group it is one of the group's
+internal edges and is iterated with the rest: a pass computes `a` from its
+state at the start of the step and from what its edges deliver, and this
+edge delivers `a` as the *previous iterate* holds it.  At the fixed point
+the two agree, so `a` has read its own new value.  With `dx/dt = -k x`
+carried by the edge, one step is
+
+| | one step | at `k dt = 0.01` |
+|---|---|---|
+| no group (the term is explicit) | `x (1 - k dt)` | `0.99` |
+| `add_coupling_group(["a"])` (implicit) | `x / (1 + k dt)` | `0.990099` |
+
+A group of the one node is allowed, and is how one term of one node is
+made implicit; the
+[quickstart](../user_guide/quickstart.md#an-edge-from-a-node-to-itself)
+has the example as code.  What follows from "iterated" (row CPL-193 of
+`docs/validation/coupling_claims.yaml`; every line is read from a compiled
+graph by `tests/core/test_an_edge_from_a_node_to_itself.py`):
+
+* **Only the node's own group decides.**  Not its other edges, not a
+  neighbour's group, not the order the graph was built in; an additive
+  edge to itself is summed with the other edges into the input, each at
+  its own level.  `compile()` raises no warning for the edge in either
+  place, and `auto_couple()` groups loops of two or more nodes, so it
+  leaves the edge explicit.
+* **`validate()` says which.**  One `INFO:` line for each edge from a node
+  to itself, in the order the edges were added, after its lines for the
+  loops of two or more nodes; `format_graph()` says the same beside the
+  edge.  The line is how to learn which of the two readings an edge has:
+
+  ```text
+  INFO: edge a.x -> a.u is from node 'a' to itself. Outside a coupling group it is a back edge: the node reads its state of the previous step, so the term the edge carries is explicit.
+  INFO: edge a.x -> a.u is from node 'a' to itself. With the node in a coupling group (['a']) the edge is iterated with the group and at convergence the node reads its new value, so the term is implicit.
+  ```
+
+  The second names the group's members.  The first is also sent to the
+  `maddening.core.graph_manager` logger at `INFO`, as the line for a
+  staggered loop is.  Neither makes the graph invalid: `compile()` refuses
+  a graph for `ERROR` lines and warns for `WARNING` lines only.
+* **The term is implicit once the group has converged, and only then.**
+  The first pass reads the previous step, so `max_iterations=1` returns
+  the *explicit* value, and a cap of `n` returns the first `n` corrections
+  of `1 - k dt + (k dt)^2 - ...` (`0.99`, `0.9901`, `0.990099`).  A cap
+  that was reached is reported like any other: in `coupling_diagnostics()`
+  or by `strict_convergence`, and otherwise not at all.
+* **Past `|k dt| = 1` it takes an acceleration.**  That series is the
+  plain iteration, and it converges only for `|k dt| < 1`, a narrower
+  range than the explicit step is stable on.  So an unaccelerated group
+  does not buy a stiff term its stability.  `"aitken"` and the two IQN
+  methods solve the linear case in a few passes at any `k dt`: at
+  `k dt = 1.5` they return `0.4 = 1 / (1 + k dt)`, where the explicit
+  step gives `-0.5` and the plain group, stopped at a cap of 30, about
+  `1e5`.
+* **Every way of iterating reaches the same value**: Gauss-Seidel and
+  Jacobi, `solver="ift"` and `"fori"`, each of the five accelerations, a
+  predictor.  The gradient is the implicit scheme's
+  (`1 / (1 + k dt)` in the start value), where the ungrouped edge gives
+  the explicit one (`1 - k dt`).
+* **A sub-cycled member reads its value at the end of the group's
+  step.**  Every one of its sub-steps reads the group's iterate, which
+  holds the member as it ends the *group's* step, not the sub-step it has
+  reached (MADD-ANO-027: the sub-step interpolation runs between
+  iterates).  The term is therefore implicit over the group's step: a
+  member at half the group's timestep steps `x / (1 + k dt)` with the
+  group's `dt`, under each `boundary_interpolation`, and not
+  `(1 + k dt / 2)^-2`.
+* **On a multi-rate graph the previous step is the state the node
+  holds.**  A node with rate divider 2 that reads itself steps
+  `x (1 - 2 k dt)`, `dt` the base timestep, on the base steps it fires on
+  and keeps that value on the others; in a group of itself,
+  `x / (1 + 2 k dt)`.  `run_adaptive` takes each of the steps it tries by
+  the same rule.
+* **An edge from a node's own flux** is iterated inside a group like any
+  other.  Outside one it cannot be read: the previous step's flux is not
+  kept, and the step fails with a bare `KeyError` naming the flux
+  (MADD-ANO-157).  That entry's workaround, adding the producer before
+  its reader, does not exist for a node reading itself: put the node in a
+  group, or carry the quantity in a state field.  `validate()` does not
+  tell this edge that it reads the previous step; its line is
+
+  ```text
+  INFO: edge a.q -> a.u is from node 'a' to itself. Outside a coupling group it is a back edge, and its source is a boundary flux, which cannot be read there: the previous step's flux is not kept, and the step raises instead of reading it (MADD-ANO-157). Put the node in a group, or carry the quantity in a state field.
+  ```
+
+## Invariants
+
+`tests/core/test_coupling_fixture_invariants.py` asserts the properties
+that matter more than any timing:
+
+* every configuration of a fixture reaches the same fixed point.  Two
+  lanes: the six L2 configurations on a spring fixture and a
+  2 000-cell grid fixture run by default, and the full
+  24-configuration sweep over three spring fixtures is slow-marked.
+  The deviation is measured against the coupling group's own nodes;
+  including the driver divided it by the driver's amplitude, which on
+  `heterogeneous` is a factor of eighty.  The rows that do *not* reach
+  the common fixed point are listed in `_KNOWN_DISAGREEMENTS` with the
+  defect that explains each, and the test fails if a listed row starts
+  agreeing, so the list cannot outlive its defect (it is empty since the
+  interface norm's return rule, MADD-ANO-240);
+* Gauss-Seidel on a ring is order-dependent and Jacobi is not — the test
+  first checks that rotating the build really does rotate the schedule,
+  so it cannot pass vacuously;
+* a group whose contraction factor exceeds one reports itself unconverged
+  for every fixed-point acceleration, and IQN converges the same group;
+* IQN on a single-degree-of-freedom interface, where its least-squares is
+  rank-deficient, agrees with plain iteration rather than returning a
+  silently wrong answer.  The comparison runs over a driven trajectory
+  and is scaled by that trajectory's own amplitude: against an undriven
+  pair, whose state is ~5e-7 by step 20, the assertion was a flat 1e-3
+  absolute and an accelerator returning zero would have passed it;
+* `accelerated_fields` that names no field in the group is rejected at
+  construction;
+* the two groups of `mixed-modes` keep their own schedules and iteration
+  counts, and the graph steps deterministically.  "Keep their own
+  schedules" is asserted by building the counterfactual with one
+  group's mode flipped and requiring the iterate to move — reading
+  `iteration_mode` back off the dataclass, which is what the test did
+  before, would pass even if the solver ignored the field;
+* the sweep driver's own summary fields: the agreement metric is
+  size-invariant and ignores nodes outside every group, the best-row
+  picker prefers fewer iterations when two rows' timings overlap, and
+  the recorded JSON files share one schema;
+* the recorded files still describe the code: one row of every fixture
+  of every file (`gs/none/l2`) is re-measured over the window the file
+  records and compared with it — iterations per step within 5%,
+  converged fraction within 5 points, `predicted_rho` exactly.  Five
+  fixtures run on every push, the rest in the slow lane.  Before this
+  the guide's claims were re-derived from the JSON alone, which is how
+  `slow-drift` stayed quoted at 3.18 passes and 100% converged for the
+  five days it took its whole cap on every step;
+* the heat fixtures contract at the rate they predict (`2·Fo` and
+  `(2·Fo)²`, measured from the report's own amplification), and a slab
+  pair at or above its coupled time-step limit, `Fo = 3/8`, is refused.

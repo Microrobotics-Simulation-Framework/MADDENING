@@ -19,7 +19,7 @@ stay as warnings (units are documentation, not contract).
 ```
 
 ```{versionchanged} v0.3.0
-The deprecated `EdgeValidationWarning`, `ShapeMismatchWarning`, and
+The {term}`deprecated <DEPRECATED>` `EdgeValidationWarning`, `ShapeMismatchWarning`, and
 `DtypeMismatchWarning` aliases were **removed** per the v0.2.1
 deprecation cycle.  `UnitMismatchWarning` now roots at
 {class}`UserWarning` directly.
@@ -27,9 +27,9 @@ deprecation cycle.  `UnitMismatchWarning` now roots at
 
 In v0.2 we added compile-time validation that walks every
 {class}`~maddening.core.graph_manager.EdgeSpec` and compares the source
-field's runtime shape, dtype, and units against the target node's
+field's runtime shape, dtype, and units against the target {term}`node <Node>`'s
 {class}`~maddening.core.node.BoundaryInputSpec`.  The intent is that a
-lab newcomer wiring a 20-edge graph gets *every* mistake flagged in one
+lab newcomer wiring a 20-{term}`edge <Edge>` graph gets *every* mistake flagged in one
 {meth}`~maddening.core.graph_manager.GraphManager.compile` pass, instead
 of debugging one failure at a time at runtime.
 
@@ -52,6 +52,15 @@ All shape/dtype errors detected during a single `compile()` call are
 aggregated and raised together — the lab-newcomer "see every problem
 at once" property is preserved by the `ExceptionGroup` shape.
 
+`compile()` asks these rules of the state it is given. The shape rule is
+asked again wherever a step is traced, so a field written with another
+shape afterwards (`set_node_state`) raises the same `ExceptionGroup` of
+`ShapeMismatchError` at the next `step()` or `run_scan()` in place of
+being broadcast, and a source field dropped from the state is a
+`KeyError` naming the edge. The dtype rule is not asked there (a node's
+update may widen float32 to float64 under x64): call `validate()` after
+a write that may have changed a dtype.
+
 ## The escape hatch: any `transform=` on the edge suppresses the check
 
 When an edge has a `transform=` callable, both shape and dtype checks
@@ -59,13 +68,14 @@ are skipped — we cannot statically reason about what the transform
 will produce.  Use this when the mismatch is intentional (e.g. picking
 a boundary slice from a 1-D field).
 
+<!-- snippet: no-run, reason: fragment: an edge on a two-rod graph the guide does not build -->
 ```python
 gm.add_edge(
-    source_node="heat_rod",
-    target_node="ball",
-    source_field="temperature",        # shape (N,)
-    target_field="ambient_temperature",  # spec shape ()
-    transform=lambda T: T[N // 2],      # → scalar at midpoint
+    source="rod_a",
+    target="rod_b",
+    source_field="temperature",        # shape (n_cells,)
+    target_field="left_temperature",   # spec shape ()
+    transform=lambda T: T[-1],         # → the scalar at rod_a's right end
 )
 ```
 
@@ -74,12 +84,15 @@ reshape.
 
 ## Catching the errors
 
-`ExceptionGroup` is a builtin on Python 3.11+; MADDENING declares
-`exceptiongroup` as a backport dependency on 3.10.  Two equivalent
-ways to handle the group:
+`ExceptionGroup` is a builtin on every interpreter MADDENING supports
+(`requires-python = ">=3.12"`), so `except*` is always available.
+`maddening.warnings` re-exports `ExceptionGroup` all the same, for code
+that is also expected to run somewhere older.  Two equivalent ways to
+handle the group:
 
-### Python 3.11+ — `except*`
+### `except*`
 
+<!-- snippet: no-run, reason: fragment: gm is a graph with a mismatched edge -->
 ```python
 from maddening.warnings import ShapeMismatchError, DtypeMismatchError
 
@@ -93,8 +106,9 @@ except* DtypeMismatchError as eg:
         print("dtype:", err)
 ```
 
-### Python 3.10 (or version-agnostic) — explicit iteration
+### Version-agnostic — explicit iteration
 
+<!-- snippet: no-run, reason: fragment: gm is a graph with a mismatched edge -->
 ```python
 from maddening.warnings import (
     EdgeValidationError, ExceptionGroup,
@@ -117,6 +131,7 @@ except ExceptionGroup as eg:
 
 ### "I'm slicing a boundary from a 1-D field"
 
+<!-- snippet: no-run, reason: fragment: edges on a graph the guide does not build -->
 ```python
 # Before v0.2: silent at compile, surprise at runtime
 gm.add_edge("heat", "neighbor", "temperature", "wall_T")  # shape (N,) vs ()
@@ -131,6 +146,7 @@ gm.add_edge(
 
 ### "I'm passing kilonewtons but the target wants newtons"
 
+<!-- snippet: no-run, reason: fragment: an edge on a graph the guide does not build -->
 ```python
 gm.add_edge(
     "thruster", "body", "force", "F_external",
@@ -146,6 +162,7 @@ The transform suppresses the shape/dtype checks; the explicit
 
 ### "I have a synthetic test that needs the error"
 
+<!-- snippet: no-run, reason: fragment: gm is a graph with a mismatched edge -->
 ```python
 import pytest
 from maddening.warnings import ShapeMismatchError, ExceptionGroup
@@ -195,6 +212,7 @@ every shape/dtype mismatch into a single `ExceptionGroup`.  Unit
 mismatches still emit as warnings *before* the raise, so they show
 up in `caught` records too.
 
+<!-- snippet: no-run, reason: fragment: gm is a graph with mismatched edges -->
 ```python
 import warnings
 import pytest

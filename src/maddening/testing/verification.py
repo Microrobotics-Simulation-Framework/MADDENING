@@ -23,6 +23,13 @@ Each check is also exposed as a standalone function (``node_finite``,
 ``node_gradient_finite``, ...) for finer control, and
 :func:`node_invariant` accepts an arbitrary predicate.
 
+Every state field is sampled on its own, in a box.  A field that only
+means something under a constraint (a unit quaternion, positive
+populations, a counter used as an index, two fields that must agree)
+needs ``constrain_state=`` / ``constrain_boundary=`` (a function applied
+to every draw) or ``state_strategy=`` / ``boundary_strategy=`` (your own
+Hypothesis strategy); see :func:`verify_node`.
+
 Requires ``hypothesis >= 6.165``. Install via::
 
     pip install maddening[verify]
@@ -31,15 +38,19 @@ Requires ``hypothesis >= 6.165``. Install via::
 from __future__ import annotations
 
 import traceback
-from dataclasses import dataclass, field
+import zlib
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
-import inspect
 
 import numpy as np
+import numpy.typing as npt
 
+from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.node import _method_accepts_params, _refuse_params_no_keyword_reaches
+from maddening.core.compliance.stability import stability
 from maddening.testing.strategies import (
     boundary_inputs_for,
     bounded_dt,
@@ -58,8 +69,12 @@ except ImportError as e:  # pragma: no cover - exercised only without extra
 
 
 Bounds = dict[str, tuple[float, float]]
+#: A caller's map over a drawn state dict or boundary-input dict: the
+#: ``constrain_state`` / ``constrain_boundary`` of :func:`verify_node`.
+Constraint = Callable[[dict], dict]
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 @dataclass
 class VerificationResult:
     """Outcome of one check.
@@ -99,6 +114,111 @@ class VerificationResult:
         return f"{head} ({self.n_examples} examples)"
 
 
+class _Refused(BaseException):
+    """A refusal of a ``constrain_*`` function or a supplied strategy, on
+    its way out of a check.
+
+    Hypothesis takes any ``Exception`` raised while an example is drawn
+    for a failing example of the test: it looks for more of them, shrinks,
+    runs its "explain" phase (some two hundred further draws) and hands
+    back an exception annotated as a falsifying example, in a group when
+    the node failed elsewhere too.  A refusal says nothing about the node
+    and is none of that.  Inside the battery it therefore travels as a
+    ``BaseException``, which ends the run at the first refused draw, and
+    :func:`_run` turns it into the ``ValueError`` the caller gets.  (When
+    the run was not derandomised, Hypothesis prints its one-line seed hint
+    for a run that ends this way.)  A caller drawing from
+    :meth:`_Inputs.strategy` in their own ``@given`` test gets the
+    ``ValueError`` directly, as that test's failure.
+    """
+
+
+def _shape_and_dtype(value: Any) -> tuple[tuple[int, ...], np.dtype]:
+    shape, dtype = getattr(value, "shape", None), getattr(value, "dtype", None)
+    if shape is None or dtype is None:  # a Python scalar, a list
+        value = np.asarray(value)
+        shape, dtype = value.shape, value.dtype
+    return tuple(int(d) for d in shape), np.dtype(dtype)
+
+
+def _constraint(option: str, fn: Constraint, refused: type[BaseException]) -> Constraint:
+    """``fn`` as a map over draws that refuses, by raising ``refused``, a
+    result of another structure.
+
+    A constraint moves values, not the layout: the same fields, each with
+    the shape and dtype it was drawn with.  A function that returns
+    anything else (a float64 quaternion beside float32 fields, an index
+    turned float by a clip, a field forgotten) would have every check
+    judge a state the node is never given, so it is refused by name.
+    """
+    def apply(drawn: dict) -> dict:
+        # Read before the call: a function may edit ``drawn`` in place.
+        before = {name: _shape_and_dtype(value) for name, value in drawn.items()}
+        try:
+            out = fn(drawn)
+        except HypothesisException:  # assume() / reject() inside the function
+            raise
+        except Exception as exc:
+            raise refused(
+                f"{option} raised {type(exc).__name__} on a drawn example: {exc}"
+            ) from exc
+        if not isinstance(out, dict):
+            raise refused(
+                f"{option} must return the dict it maps (fields {sorted(before)}), "
+                f"got {type(out).__name__}"
+            )
+        dropped, added = sorted(set(before) - set(out)), sorted(set(out) - set(before))
+        if dropped or added:
+            raise refused(
+                f"{option} changed the set of fields"
+                + (f": dropped {dropped}" if dropped else "")
+                + (f": added {added}" if added else "")
+                + ".  It must return every field it was given, and no other."
+            )
+        for name, (shape, dtype) in before.items():
+            new_shape, new_dtype = _shape_and_dtype(out[name])
+            if new_shape != shape:
+                raise refused(
+                    f"{option} changed the shape of '{name}': {shape} -> {new_shape}.  "
+                    "It must return every field with the shape it was drawn with."
+                )
+            if new_dtype != dtype:
+                raise refused(
+                    f"{option} changed the dtype of '{name}': {dtype} -> {new_dtype}.  "
+                    "It must return every field with the dtype it was drawn with "
+                    "(cast the result back)."
+                )
+        return out
+    return apply
+
+
+def _as_given(
+    option: str, strategy: st.SearchStrategy, refused: type[BaseException],
+) -> st.SearchStrategy:
+    """``strategy``'s own examples, untouched.  An exception it raises while
+    generating one is refused (``refused`` is raised) rather than reported
+    as the node's failure, with the previous example as its
+    "counterexample"; so is an example that is not a dict of fields."""
+    @st.composite
+    def drawn(draw):
+        try:
+            example = draw(strategy)
+        except HypothesisException:  # rejection and the engine's control flow
+            raise
+        except Exception as exc:
+            raise refused(
+                f"{option} raised {type(exc).__name__} while generating an "
+                f"example: {exc}"
+            ) from exc
+        if not isinstance(example, dict):
+            raise refused(
+                f"{option} must yield the dict of fields the node is given, "
+                f"got {type(example).__name__}"
+            )
+        return example
+    return drawn()
+
+
 @dataclass(frozen=True)
 class _Inputs:
     node: Any
@@ -107,16 +227,83 @@ class _Inputs:
     boundary_inputs: dict | None
     dt_range: tuple[float, float]
     dtype: np.dtype
+    constrain_state: Constraint | None = None
+    constrain_boundary: Constraint | None = None
+    state_strategy: st.SearchStrategy | None = None
+    boundary_strategy: st.SearchStrategy | None = None
+    #: Set by :func:`_run`: a refusal ends the check at once (see
+    #: :class:`_Refused`) instead of being an example for Hypothesis to shrink.
+    in_battery: bool = False
+
+    def __post_init__(self) -> None:
+        for option, fn in (("constrain_state", self.constrain_state),
+                           ("constrain_boundary", self.constrain_boundary)):
+            if fn is not None and not callable(fn):
+                raise TypeError(
+                    f"{option} must be a function from the drawn dict to a dict "
+                    f"of the same fields, got {type(fn).__name__}"
+                )
+        for option, given_strategy in (("state_strategy", self.state_strategy),
+                                       ("boundary_strategy", self.boundary_strategy)):
+            if given_strategy is not None and not isinstance(given_strategy, st.SearchStrategy):
+                raise TypeError(
+                    f"{option} must be a Hypothesis strategy that yields the "
+                    f"dict, got {type(given_strategy).__name__}"
+                )
+        if self.state_strategy is not None and self.bounds:
+            raise ValueError(
+                "state_strategy replaces the sampling of every state field, so "
+                f"bounds for {sorted(self.bounds)} would be ignored.  Pass one or "
+                "the other: bounds belong inside the strategy."
+            )
+        if self.boundary_strategy is not None and self.boundary_bounds:
+            raise ValueError(
+                "boundary_strategy replaces the sampling of every boundary input, "
+                f"so boundary_bounds for {sorted(self.boundary_bounds)} would be "
+                "ignored.  Pass one or the other."
+            )
+        if self.boundary_inputs is not None and self.boundary_strategy is not None:
+            raise ValueError(
+                "boundary_inputs is one fixed dict and boundary_strategy draws "
+                "the dict: pass one or the other."
+            )
+        if self.boundary_inputs is not None and self.constrain_boundary is not None:
+            raise ValueError(
+                "constrain_boundary maps drawn boundary inputs, and boundary_inputs "
+                "is one fixed dict that reaches the node as given: nothing is "
+                "drawn.  Apply the function to the dict yourself, or drop "
+                "boundary_inputs."
+            )
 
     def strategy(self) -> st.SearchStrategy:
+        """``(state, boundary_inputs, dt)``: what every check draws.
+
+        The one place a ``constrain_*`` function is applied, so no check
+        can be given the raw draw: each check's body, whatever it
+        evaluates (eagerly, compiled, under ``jax.grad``, twice), receives
+        the mapped example, and so does the counterexample it reports.
+        """
+        refused = _Refused if self.in_battery else ValueError
         if self.boundary_inputs is not None:
             bi = st.just(self.boundary_inputs)
+        elif self.boundary_strategy is not None:
+            bi = _as_given("boundary_strategy", self.boundary_strategy, refused)
         else:
             bi = boundary_inputs_for(
                 self.node, self.boundary_bounds, dtype=self.dtype,
             )
+        if self.state_strategy is not None:
+            state = _as_given("state_strategy", self.state_strategy, refused)
+        else:
+            state = node_states(self.node, self.bounds, dtype=self.dtype)
+        if self.constrain_state is not None:
+            state = state.map(
+                _constraint("constrain_state", self.constrain_state, refused))
+        if self.constrain_boundary is not None:
+            bi = bi.map(
+                _constraint("constrain_boundary", self.constrain_boundary, refused))
         return st.tuples(
-            node_states(self.node, self.bounds, dtype=self.dtype),
+            state,
             bi,
             bounded_dt(*self.dt_range),
         )
@@ -134,9 +321,17 @@ def _run(
 
     Hypothesis replays the minimal failing example last, so the inputs
     recorded on the final call are the shrunk counterexample.
+
+    ``prop`` below is not to be edited casually: Hypothesis seeds a
+    ``derandomize=True`` run from the text of the function it is given, so
+    any change to it changes the examples every derandomised battery
+    draws (``tests/verification/test_verify_node_constrained_inputs.py``
+    holds the text).  What an example *is* belongs in
+    :meth:`_Inputs.strategy`.
     """
     last: dict[str, Any] = {}
     count = 0
+    inputs = replace(inputs, in_battery=True)
 
     @settings(
         max_examples=max_examples,
@@ -156,6 +351,10 @@ def _run(
 
     try:
         prop()
+    except _Refused as refused:
+        # The caller's function or strategy, not the node: raised (from
+        # the exception it was refused for, if any), never a FAIL.
+        raise ValueError(str(refused)) from refused.__cause__
     except AssertionError as e:
         return VerificationResult(
             name, "FAIL", detail=str(e) or "assertion failed",
@@ -270,15 +469,12 @@ _NO_PARAMS = object()
 
 
 def _produces_fluxes(node) -> bool:
-    from maddening.core.node import SimulationNode as _Base  # noqa: PLC0415
-    return type(node).compute_boundary_fluxes is not _Base.compute_boundary_fluxes
+    return _implements(node, "compute_boundary_fluxes")
 
 
 def _flux_accepts_params(node) -> bool:
-    try:
-        return "params" in inspect.signature(node.compute_boundary_fluxes).parameters
-    except (TypeError, ValueError):
-        return False
+    """The graph's question, through the one params rule."""
+    return _method_accepts_params(node, "compute_boundary_fluxes")
 
 
 def _outputs(node, state, bi, dt, params=_NO_PARAMS):
@@ -301,11 +497,247 @@ def _outputs(node, state, bi, dt, params=_NO_PARAMS):
 
 
 def _node_accepts_params(node) -> bool:
-    probe = getattr(node, "accepts_params", None)
-    return bool(probe()) if callable(probe) else False
+    """Does the graph pass ``params=`` to ``node.update``?
+
+    The graph's own rule, :func:`~maddening.core.node._method_accepts_params`.
+    This used to answer ``False`` for any node object without an
+    ``accepts_params`` method, so a duck-typed node with a ``params``
+    keyword -- which the graph injects -- had every params check
+    reported as ``SKIP``, and ``SKIP`` counts as passed.
+    """
+    return _method_accepts_params(node, "update")
 
 
-def _skip_no_params(name: str) -> VerificationResult:
+def _implements(node, method: str) -> bool:
+    """Does ``node`` have ``method`` other than the base-class default?
+
+    Read off the bound attribute, not the class, so a duck-typed node
+    (no base class to compare against) and a hook installed as an
+    instance attribute (a ``functools.partial``, a callable object) are
+    seen the way the graph sees them.
+    """
+    from maddening.core.node import SimulationNode as _Base  # noqa: PLC0415
+    fn = getattr(node, method, None)
+    if fn is None:
+        return False
+    return getattr(fn, "__func__", fn) is not getattr(_Base, method, None)
+
+
+def _same(a, b) -> bool:
+    x, y = _to_np(a), _to_np(b)
+    try:
+        return bool(np.array_equal(x, y, equal_nan=True))
+    except TypeError:  # a dtype isnan cannot take (bool, object)
+        return bool(np.array_equal(x, y))
+
+
+def _close(a, b, rtol: float, atol: float) -> bool:
+    """``allclose`` for floating fields, exact equality for the rest."""
+    x, y = _to_np(a), _to_np(b)
+    if x.shape != y.shape:
+        return False
+    if np.issubdtype(x.dtype, np.inexact) or np.issubdtype(y.dtype, np.inexact):
+        return bool(np.allclose(x.astype(np.float64), y.astype(np.float64),
+                                rtol=rtol, atol=atol, equal_nan=True))
+    return bool(np.array_equal(x, y))
+
+
+def _all_same(a: dict, b: dict) -> bool:
+    return set(a) == set(b) and all(_same(a[f], b[f]) for f in a)
+
+
+def _all_close(a: dict, b: dict, rtol: float, atol: float) -> bool:
+    return set(a) == set(b) and all(_close(a[f], b[f], rtol, atol) for f in a)
+
+
+def _max_diff(a: dict, b: dict) -> float:
+    out = 0.0
+    for f in set(a) & set(b):
+        x = _to_np(a[f]).astype(np.float64, copy=False)
+        y = _to_np(b[f]).astype(np.float64, copy=False)
+        if x.shape == y.shape and x.size:
+            out = max(out, float(np.max(np.abs(x - y))))
+    return out
+
+
+def _missing_pytree(name: str, node) -> VerificationResult | None:
+    """A node object the graph injects (its ``update`` takes ``params``) but
+    that has no ``params_pytree()`` to build its ``gm.params`` entry from."""
+    if callable(getattr(node, "params_pytree", None)):
+        return None
+    return VerificationResult(
+        name, "FAIL",
+        detail=(
+            f"update() takes params but {type(node).__name__} has no "
+            "params_pytree(): the graph cannot build this node's entry of "
+            "gm.params.  Subclass SimulationNode or define params_pytree()."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# params_effective: the paths, the perturbations and the references
+# ---------------------------------------------------------------------------
+
+#: Largest number of elements of one leaf the value probes perturb one at a
+#: time; a larger leaf gets this many, evenly spaced.  A vector leaf is
+#: probed per element because "some element acts" is not "every element
+#: acts": a node reading ``g[0]`` from the injected params and ``g[1:]``
+#: from ``self.params`` has a non-zero gradient wrt ``g``.
+_MAX_PROBED_ELEMENTS = 8
+#: The value probes (two extra evaluations per path and element) run on the
+#: first this-many examples; the gradient screen runs on all of them.
+_VALUE_PROBE_EXAMPLES = 20
+#: A (path, element) pair seen consistent, with a visible effect, on this
+#: many examples is not probed again.
+_CONFIRMATIONS = 3
+#: Examples kept for the post-run rebuild probe.
+_KEPT_EXAMPLES = 8
+
+
+def _probe_indices(size: int) -> list[int]:
+    if size <= _MAX_PROBED_ELEMENTS:
+        return list(range(size))
+    return sorted({int(i) for i in np.linspace(0, size - 1, _MAX_PROBED_ELEMENTS)})
+
+
+def _element_label(key: str, shape: tuple, idx: int) -> str:
+    if not shape:
+        return key
+    return f"{key}[{', '.join(str(int(i)) for i in np.unravel_index(idx, shape))}]"
+
+
+def _perturbed_scalar(old: float, spec) -> float:
+    """A visibly different value inside the leaf's ``ParamSpec`` bounds:
+    x1.5, else x0.5 (0.5 / -0.5 at zero), else half-way to a bound."""
+    lo, hi = spec.bounds if spec is not None else (None, None)
+
+    def inside(v):
+        return v != old and (lo is None or v > lo) and (hi is None or v < hi)
+
+    for v in ((old * 1.5, old * 0.5) if old != 0 else (0.5, -0.5)):
+        if inside(v):
+            return v
+    if hi is not None and old < hi:
+        return old + (hi - old) / 2
+    if lo is not None and old > lo:
+        return old - (old - lo) / 2
+    return old + 1.0
+
+
+def _as_constructor_value(old, new: np.ndarray):
+    """``new`` in the container type of the constructor value ``old``, or
+    ``None`` when there is no faithful spelling (the reference is then
+    unavailable for this leaf).  Built from the *float32* leaf, so the
+    constructed and the injected value are the same number."""
+    if isinstance(old, bool):
+        return None
+    if isinstance(old, (int, float)) and not isinstance(old, np.generic):
+        return float(new) if new.ndim == 0 else None
+    if isinstance(old, (list, tuple)):
+        return type(old)(np.asarray(new, dtype=np.float64).tolist())
+    if isinstance(old, np.generic):
+        kind = old.dtype if np.issubdtype(old.dtype, np.floating) else np.float64
+        return np.asarray(new, dtype=kind)[()]
+    if isinstance(old, np.ndarray):
+        kind = old.dtype if np.issubdtype(old.dtype, np.floating) else np.float64
+        return np.asarray(new, dtype=kind).reshape(old.shape)
+    if hasattr(old, "dtype") and hasattr(old, "shape"):
+        kind = old.dtype if jnp.issubdtype(old.dtype, jnp.floating) else jnp.zeros(()).dtype
+        return jnp.asarray(new, dtype=kind).reshape(old.shape)
+    return None
+
+
+def _rebuilder(node) -> Callable[[dict], Any] | None:
+    """``overrides -> type(node)(name, timestep, **{**params, **overrides})``
+    from ``node.to_dict()`` -- the rebuild the config round trip already
+    relies on -- or ``None`` when the node does not describe itself that
+    way.  Whether the rebuild is *faithful* is checked against the node
+    before it is trusted (see :func:`node_params_effective`)."""
+    to_dict: Callable[..., Any] | None = getattr(node, "to_dict", None)
+    if not callable(to_dict):
+        return None
+    try:
+        d = to_dict()
+        name, timestep, params = d["name"], d["timestep"], dict(d["params"])
+    except Exception:  # noqa: BLE001 - no usable self-description
+        return None
+    cls = type(node)
+
+    def build(overrides: dict):
+        return cls(name, timestep, **{**params, **overrides})
+    return build
+
+
+def _flatten_corrections(out) -> dict:
+    return {
+        f"{field}@{idx}": value
+        for field, pairs in (out or {}).items()
+        for idx, value in pairs
+    }
+
+
+def _path_functions(node) -> dict[str, Callable]:
+    """``name -> fn(target, state, bi, dt, params_or_None) -> dict``, for the
+    paths through which the graph and the integrators read the node's
+    constants: :meth:`update`, :meth:`compute_boundary_fluxes` (what a flux
+    edge delivers), :meth:`derivatives` and :meth:`implicit_residual`
+    (``integrate_node`` / ``implicit_euler_step``) and
+    :meth:`compute_interface_correction` (a coupled interface).  Each is its
+    own path: a summed objective let one path's sensitivity mask another's
+    dead read."""
+    def call(method, *args, p, target):
+        fn = getattr(target, method)
+        return fn(*args) if p is None else fn(*args, params=p)
+
+    paths: dict[str, Callable] = {
+        "update": lambda t, s, bi, dt, p: dict(call("update", s, bi, dt, p=p, target=t)),
+    }
+    if _produces_fluxes(node):
+        paths["compute_boundary_fluxes"] = lambda t, s, bi, dt, p: dict(
+            call("compute_boundary_fluxes", s, bi, dt, p=p, target=t))
+    if _implements(node, "derivatives"):
+        paths["derivatives"] = lambda t, s, bi, dt, p: dict(
+            call("derivatives", s, bi, p=p, target=t))
+    if _implements(node, "implicit_residual"):
+        # x_new = x_old = state: R = -dt * f(state; params), whose
+        # sensitivity to a constant is dt times f's.
+        paths["implicit_residual"] = lambda t, s, bi, dt, p: dict(
+            call("implicit_residual", s, s, bi, dt, p=p, target=t))
+    iface = getattr(node, "interface_dof_indices", None)
+    if _implements(node, "compute_interface_correction") and callable(iface) and iface():
+        paths["compute_interface_correction"] = lambda t, s, bi, dt, p: _flatten_corrections(
+            call("compute_interface_correction", s, bi, dt, p=p, target=t))
+    return paths
+
+
+#: What each path's missing ``params`` keyword costs, for the refusal.
+_WITHOUT_KEYWORD = {
+    "derivatives": ("integrate_node / implicit_euler_step refuse a calibrated "
+                    "params for this node rather than integrate the "
+                    "constructor's constants while update() uses the "
+                    "calibrated ones"),
+    "implicit_residual": ("implicit_euler_step refuses a calibrated params for "
+                          "this node rather than solve with the constructor's "
+                          "constants while update() uses the calibrated ones"),
+    "compute_boundary_fluxes": ("a calibrated constant would change the node's "
+                                "integration but not the flux it delivers over "
+                                "an edge"),
+    "compute_interface_correction": ("a coupled interface would be corrected "
+                                     "with the constructor's constants while "
+                                     "update() uses the calibrated ones"),
+}
+
+
+def _skip_no_params(name: str, node) -> VerificationResult:
+    """The result for a node whose ``update`` is not passed ``params``:
+    ``SKIP`` -- or ``FAIL`` when a hook names ``params`` where no keyword
+    reaches it (``params=None, /``, ``*params``).  The graph refuses that
+    node when it is added, and ``SKIP`` counts as passed."""
+    try:
+        _refuse_params_no_keyword_reaches(node)
+    except ValueError as exc:
+        return VerificationResult(name, "FAIL", detail=str(exc))
     return VerificationResult(
         name, "SKIP",
         detail="update() does not take a params keyword (constants are "
@@ -331,7 +763,7 @@ def node_params_consistent(
     """
     node = inputs.node
     if not _node_accepts_params(node):
-        return _skip_no_params("params_consistent")
+        return _skip_no_params("params_consistent", node)
     if _produces_fluxes(node) and not _flux_accepts_params(node):
         return VerificationResult(
             "params_consistent", "FAIL",
@@ -343,6 +775,9 @@ def node_params_consistent(
                 "params=None) and read constants from params."
             ),
         )
+    missing = _missing_pytree("params_consistent", node)
+    if missing is not None:
+        return missing
     injected = node.params_pytree()
 
     def body(state, bi, dt):
@@ -370,7 +805,10 @@ def node_params_gradient_finite(inputs: _Inputs, **kw) -> VerificationResult:
     """
     node = inputs.node
     if not _node_accepts_params(node):
-        return _skip_no_params("params_gradient_finite")
+        return _skip_no_params("params_gradient_finite", node)
+    missing = _missing_pytree("params_gradient_finite", node)
+    if missing is not None:
+        return missing
     base = node.params_pytree()
     if not base:
         return VerificationResult(
@@ -391,57 +829,441 @@ def node_params_gradient_finite(inputs: _Inputs, **kw) -> VerificationResult:
     return _run("params_gradient_finite", inputs, body, **kw)
 
 
-def node_params_effective(inputs: _Inputs, **kw) -> VerificationResult:
-    """Every *trainable* parameter influences the output.
+#: Seed of the fixed random projection ``params_effective`` differentiates
+#: (see :func:`_projected`).  Combined with the CRC-32 of the field name so
+#: two fields of the same shape get different weights.
+_PROBE_SEED = 20260922
 
-    A leaf of :meth:`params_pytree` that ``update`` reads from
-    ``self.params`` instead of the injected ``params`` is a silent trap:
-    the graph passes a value, an optimiser moves it, nothing changes and
-    the gradient is identically zero.  ``params_consistent`` cannot see
-    that (both paths read the same constant), so this check aggregates
-    over the sampled inputs and fails if some trainable leaf had a zero
-    gradient on *every* example.  A leaf that only matters on some
-    inputs (a restitution coefficient without a collision) passes as
-    long as one sample exercised it.  ``SKIP`` for nodes without
+
+def _projection_weights(name: str, shape: tuple[int, ...]) -> np.ndarray:
+    """One weight per element of output field ``name``: magnitude in
+    ``[0.5, 1.5]``, random sign, fixed by ``_PROBE_SEED`` and the name."""
+    rng = np.random.default_rng([_PROBE_SEED, zlib.crc32(name.encode())])
+    magnitude = rng.uniform(0.5, 1.5, size=shape)
+    sign = rng.choice(np.array([-1.0, 1.0]), size=shape)
+    return magnitude * sign
+
+
+def _projected(out: dict) -> Any:
+    """``sum_f <w_f, out_f>`` over the floating fields of ``out`` -- the
+    scalar whose gradient ``params_effective`` inspects.
+
+    A plain ``sum(jnp.sum(v))`` is annihilated by any conservation law
+    with equal coefficients (mass moving between two compartments at an
+    injected rate has ``d(sum)/d(rate) == 0`` exactly), which made the
+    check FAIL a correct node.  Per-element weights of distinct
+    magnitude and random sign leave no such law standing.
+    """
+    total = None
+    for name, v in out.items():
+        if not jnp.issubdtype(v.dtype, jnp.floating):
+            continue
+        w = jnp.asarray(_projection_weights(name, tuple(v.shape)), dtype=v.dtype)
+        term = jnp.sum(v * w)
+        total = term if total is None else total + term
+    return jnp.zeros(()) if total is None else total
+
+
+def node_params_effective(
+    inputs: _Inputs, rtol: float = 1e-5, atol: float = 1e-6, **kw,
+) -> VerificationResult:
+    """Every *trainable* parameter acts through the injected params -- on
+    every path, and the way a constructed value acts.
+
+    A leaf of :meth:`params_pytree` that a path reads from ``self.params``
+    (or from a copy made in ``__init__``) instead of the injected
+    ``params`` is a silent trap: the graph passes a value, an optimiser
+    moves it, nothing changes.  ``params_consistent`` cannot see it (at
+    the constructor value both spellings read the same number), so this
+    check perturbs each leaf and compares.
+
+    Paths
+    -----
+    Each path the graph or an integrator reads the node's constants
+    through is probed **on its own**: :meth:`update`,
+    :meth:`compute_boundary_fluxes` (what a flux edge delivers),
+    :meth:`derivatives` and :meth:`implicit_residual` (what
+    ``integrate_node`` / ``implicit_euler_step`` integrate) and
+    :meth:`compute_interface_correction` (a coupled interface; probed when
+    the node declares interface DOFs).  Until 0.4.0 shipped ``update`` and
+    the fluxes were summed into one objective, so a flux that read the
+    injected value masked an ``update`` that did not, and the interface
+    correction was never probed.  A path whose override has no ``params``
+    keyword is a ``FAIL``; a ``derivatives`` / ``implicit_residual`` that
+    raises ``NotImplementedError`` (a discrete node) is not applicable.
+
+    Per sample, per path
+    --------------------
+    * a **gradient screen**: the gradient of a fixed random projection
+      of the path's outputs (see :func:`_projected`; a plain sum is
+      annihilated by any equal-coefficient conservation law) with respect
+      to every injected leaf, element by element;
+    * a **value test**, on the first ``_VALUE_PROBE_EXAMPLES`` samples:
+      each element of each trainable leaf (up to ``_MAX_PROBED_ELEMENTS``
+      per leaf, evenly spaced) is moved to a perturbed value inside its
+      ``ParamSpec`` bounds, once through the injected params and once
+      through ``node.params`` (swapped in place and restored).  Where the
+      constructed value moves the output, the injected one must move it
+      to the same place (``rtol`` / ``atol`` as in
+      ``params_consistent``).  A difference test rather than a gradient,
+      so a leaf the path reads only through a comparison (a dead-zone
+      threshold, zero gradient) is not mistaken for a ``self.params``
+      read, and ``0.5 * p["k"] + 0.5 * self.params["k"]`` -- non-zero
+      gradient, half the effect -- is not mistaken for a correct read.
+
+    After the run, every probed element is compared once more, on each
+    path and on the first ``_KEPT_EXAMPLES`` samples, against a node
+    **rebuilt** from ``to_dict()`` with the perturbed value (when the node
+    rebuilds, and a rebuild with no override reproduces it on that path):
+    wherever the rebuilt node's output moves, the injected value must move
+    it to the same place.  A path that moves for the rebuilt node and
+    never for the injected value reads a copy made at construction; one
+    that moves, but elsewhere, splits the value between the injected
+    params and such a copy (``0.5 * p["k"] + 0.5 * self._k0``, which the
+    in-place ``node.params`` swap cannot see).  Until 0.4.0 shipped only
+    the first kind was probed, and only for an element that moved nothing
+    on the path.  Cost: one extra construction per element and two
+    evaluations per path, element and kept sample -- at most
+    ``_KEPT_EXAMPLES / _VALUE_PROBE_EXAMPLES`` of the value test's own.
+
+    Verdicts
+    --------
+    ``FAIL`` for: a path that reads an element from ``self.params``
+    (constructed value moves it, injected never does); a path that
+    applies the injected value differently from a constructed one; a
+    path that reads a copy made at construction, wholly or in part
+    (rebuild probe); a
+    trainable leaf that moved nothing on any path on any sample (read
+    nowhere -- or declare it ``ParamSpec(trainable=False)`` -- or the
+    sampled envelope never exercises it); and, failing closed, a non-
+    ``update`` path on which a leaf that acts through ``update`` never
+    moves, when neither ``node.params`` nor a rebuild can provide a
+    reference.  ``detail`` names the paths checked and, on a ``PASS``,
+    the elements each path does not consume.  ``SKIP`` for nodes without
     ``params`` and for leaves declared ``trainable=False``.
+
+    Limitations
+    -----------
+    Closed in 0.4.0: all five false ``PASS``es and the false ``FAIL`` the
+    release audit planted.  Still open, and documented rather than
+    guessed at: a copy made at construction is caught only when the node
+    rebuilds faithfully from ``to_dict()`` (a node that cannot is
+    reported "not consumed" on that path, as before), and only for a leaf
+    with a plain constructor spelling (a ``node.params`` entry whose
+    container type :func:`_as_constructor_value` can reproduce); the
+    rebuild comparison runs on the first ``_KEPT_EXAMPLES`` samples and the
+    value test on the first ``_VALUE_PROBE_EXAMPLES``, so a split read
+    confined to a region of the envelope those samples miss can pass; and
+    a leaf larger than ``_MAX_PROBED_ELEMENTS`` is value-probed on that
+    many evenly spaced elements (the gradient screen still sees all of
+    them).
     """
     node = inputs.node
     if not _node_accepts_params(node):
-        return _skip_no_params("params_effective")
+        return _skip_no_params("params_effective", node)
+    missing = _missing_pytree("params_effective", node)
+    if missing is not None:
+        return missing
     base = node.params_pytree()
-    specs = node.param_specs() if hasattr(node, "param_specs") else {}
+    specs = node.param_specs() if callable(getattr(node, "param_specs", None)) else {}
     trainable = [k for k in base if specs.get(k) is None or specs[k].trainable]
     if not trainable:
         return VerificationResult(
             "params_effective", "SKIP", detail="no trainable parameters",
         )
-    seen_nonzero: set[str] = set()
+
+    paths = _path_functions(node)
+    accepts = {name: _method_accepts_params(node, name) for name in paths if name != "update"}
+    shapes = {k: tuple(np.shape(_to_np(base[k]))) for k in trainable}
+    sizes = {k: int(np.prod(shapes[k], dtype=np.int64)) for k in trainable}
+    elements = [(k, i) for k in trainable for i in _probe_indices(sizes[k])]
+    labels = {el: _element_label(el[0], shapes[el[0]], el[1]) for el in elements}
+    ctor_params = getattr(node, "params", None)
+    injected_for: dict = {}
+    ctor_value: dict = {}
+    for k, i in elements:
+        leaf = _to_np(base[k])
+        flat = np.array(leaf, copy=True).reshape(-1)
+        flat[i] = _perturbed_scalar(float(flat[i]), specs.get(k))
+        new = flat.reshape(leaf.shape).astype(leaf.dtype)
+        injected_for[(k, i)] = {**base, k: jnp.asarray(new, dtype=jnp.asarray(base[k]).dtype)}
+        ctor_value[(k, i)] = (
+            _as_constructor_value(ctor_params[k], new)
+            if isinstance(ctor_params, dict) and k in ctor_params else None
+        )
+
+    grad_any = {name: {k: np.zeros(sizes[k], dtype=bool) for k in trainable} for name in paths}
+    inj_moved: dict[str, set] = {name: set() for name in paths}
+    ref_moved: dict[str, set] = {name: set() for name in paths}
+    confirmed: dict[str, dict] = {name: {} for name in paths}
+    mismatch: dict[str, dict] = {name: {} for name in paths}
+    not_applicable: set[str] = set()
+    kept: list = []
+    count = 0
 
     def body(state, bi, dt):
-        def loss(p):
-            out = _outputs(node, state, bi, dt, params=p)
-            return sum(jnp.sum(v) for v in out.values()
-                       if jnp.issubdtype(v.dtype, jnp.floating))
-
-        g = jax.grad(loss)(base)
-        for k in trainable:
-            if k not in seen_nonzero and bool(jnp.any(g[k] != 0)):
-                seen_nonzero.add(k)
+        nonlocal count
+        count += 1
+        if len(kept) < _KEPT_EXAMPLES:
+            kept.append((state, bi, dt))
+        for name, fn in paths.items():
+            if name in not_applicable:
+                continue
+            try:
+                baseline = fn(node, state, bi, dt, None)
+            except NotImplementedError:
+                if name in ("derivatives", "implicit_residual"):
+                    not_applicable.add(name)
+                    continue
+                raise
+            if name != "update" and not accepts[name]:
+                raise AssertionError(
+                    f"update() takes params but {name}() does not: "
+                    f"{_WITHOUT_KEYWORD[name]}.  Declare {name}(..., *, "
+                    "params=None) and read constants from "
+                    "{**self.params, **params}."
+                )
+            g = jax.grad(lambda p, fn=fn: _projected(fn(node, state, bi, dt, p)))(base)
+            for k in trainable:
+                grad_any[name][k] |= (_to_np(g[k]) != 0).reshape(-1)
+            if count > _VALUE_PROBE_EXAMPLES:
+                continue
+            injected_base = fn(node, state, bi, dt, base)
+            for el in elements:
+                if el in mismatch[name] or confirmed[name].get(el, 0) >= _CONFIRMATIONS:
+                    continue
+                inj = fn(node, state, bi, dt, injected_for[el])
+                moved_inj = not _all_same(inj, injected_base)
+                if moved_inj:
+                    inj_moved[name].add(el)
+                value = ctor_value[el]
+                if value is None:
+                    continue
+                assert isinstance(ctor_params, dict)  # value is None otherwise
+                key = el[0]
+                old = ctor_params[key]
+                ctor_params[key] = value
+                try:
+                    try:
+                        ref = fn(node, state, bi, dt, None)
+                    except Exception:  # noqa: BLE001 - a different value broke it: it reads it
+                        ref = None
+                finally:
+                    ctor_params[key] = old
+                if ref is None:
+                    ref_moved[name].add(el)
+                    if not moved_inj:
+                        mismatch[name][el] = (float("nan"), float("nan"), False)
+                    continue
+                if _all_same(ref, baseline):
+                    continue
+                ref_moved[name].add(el)
+                if _all_close(inj, ref, rtol, atol):
+                    confirmed[name][el] = confirmed[name].get(el, 0) + 1
+                else:
+                    mismatch[name][el] = (_max_diff(inj, ref), _max_diff(baseline, ref), moved_inj)
 
     r = _run("params_effective", inputs, body, **kw)
     if r.status != "PASS":
         return r
-    dead = sorted(set(trainable) - seen_nonzero)
+
+    checked = [name for name in paths if name not in not_applicable]
+
+    def acts(name, el) -> bool:
+        k, i = el
+        return bool(grad_any[name][k][i]) or el in inj_moved[name] or el in ref_moved[name]
+
+    # Post-run: the rebuild probe.  Every probed element with a constructor
+    # spelling is compared, on each path, between the injected value and a
+    # node rebuilt from to_dict() with that value.  Until 0.4.0 shipped it
+    # ran only for an element that moved nothing on the path, so a node
+    # splitting a constant between the injected params and a copy made in
+    # __init__ (``0.5 * p["k"] + 0.5 * self._k0``) passed: the injected value
+    # moves the output (half as far) and the in-place node.params swap
+    # moves nothing, so neither the value test nor the old probe objected.
+    rebuilt_moved: dict[str, set] = {name: set() for name in paths}
+    rebuilt_split: dict[str, dict] = {name: {} for name in paths}
+    build = _rebuilder(node)
+    rebuilt0 = None
+    faithful: dict[str, bool] = {}
+    rebuilt_for: dict = {}
+    if build is not None and kept:
+        try:
+            rebuilt0 = build({})
+        except Exception:  # noqa: BLE001 - the node does not rebuild
+            rebuilt0 = None
+    for name in checked:
+        fn = paths[name]
+        candidates = [
+            el for el in elements
+            if ctor_value[el] is not None and el not in mismatch[name]
+        ]
+        if not candidates or rebuilt0 is None or build is None:
+            continue
+        try:
+            reference = [fn(rebuilt0, s, bi, dt, None) for s, bi, dt in kept]
+            faithful[name] = all(
+                _all_close(ref0, fn(node, s, bi, dt, None), rtol, atol)
+                for ref0, (s, bi, dt) in zip(reference, kept)
+            )
+        except Exception:  # noqa: BLE001 - the rebuilt node cannot run this path
+            faithful[name] = False
+        if not faithful[name]:
+            continue
+        for el in candidates:
+            if el not in rebuilt_for:
+                try:
+                    rebuilt_for[el] = build({el[0]: ctor_value[el]})
+                except Exception:  # noqa: BLE001 - that value does not construct
+                    rebuilt_for[el] = None
+            rebuilt1 = rebuilt_for[el]
+            if rebuilt1 is None:
+                continue
+            moved = False
+            miss, effect = 0.0, 0.0
+            try:
+                for ref0, (s, bi, dt) in zip(reference, kept):
+                    ref1 = fn(rebuilt1, s, bi, dt, None)
+                    if _all_same(ref1, ref0):
+                        continue
+                    moved = True
+                    inj = fn(node, s, bi, dt, injected_for[el])
+                    if not _all_close(inj, ref1, rtol, atol):
+                        miss = max(miss, _max_diff(inj, ref1))
+                        effect = max(effect, _max_diff(ref0, ref1))
+            except Exception:  # noqa: BLE001 - a different value broke it: it reads it
+                if not acts(name, el):
+                    rebuilt_moved[name].add(el)
+                continue
+            if not moved:
+                continue
+            if not acts(name, el):
+                rebuilt_moved[name].add(el)
+            elif miss > 0.0:
+                rebuilt_split[name][el] = (miss, effect)
+
+    def names(els) -> list[str]:
+        return [labels[el] for el in sorted(els, key=lambda e: (trainable.index(e[0]), e[1]))]
+
+    problems: list[str] = []
+    for name in checked:
+        where = f"{name}()"
+        never = [el for el, (_, _, moved) in mismatch[name].items()
+                 if not moved and el not in inj_moved[name]
+                 and not grad_any[name][el[0]][el[1]]]
+        split = [el for el in mismatch[name] if el not in never]
+        if never:
+            problems.append(
+                f"{where} reads {names(never)} from self.params, not from the "
+                "injected params: the constructor value moves its output and "
+                "the injected value never does, so "
+                + _CONSEQUENCE[name]
+                + ".  Read them from {**self.params, **params}."
+            )
+        if split:
+            worst = max(
+                (mismatch[name][el][0] / mismatch[name][el][1]
+                 for el in split if mismatch[name][el][1] > 0),
+                default=float("nan"),
+            )
+            problems.append(
+                f"{where} does not apply the injected {names(split)} the way a "
+                "constructed value is applied: at a perturbed value the injected "
+                "output misses the constructed one by up to "
+                f"{worst:.2f} of the perturbation's own effect (a read split "
+                "between the injected params and self.params?), so "
+                + _CONSEQUENCE[name] + "."
+            )
+        if rebuilt_moved[name]:
+            problems.append(
+                f"{where} ignores the injected {names(rebuilt_moved[name])}: a node "
+                "constructed with a different value gives a different output and "
+                "the injected value never does -- it reads a copy made at "
+                "construction.  Read them from {**self.params, **params} at call "
+                "time."
+            )
+        if rebuilt_split[name]:
+            els = rebuilt_split[name]
+            worst = max(
+                (miss / effect for miss, effect in els.values() if effect > 0),
+                default=float("nan"),
+            )
+            problems.append(
+                f"{where} does not apply the injected {names(els)} the way a node "
+                "constructed with that value does: at a perturbed value the "
+                "injected output misses the rebuilt node's by up to "
+                f"{worst:.2f} of the perturbation's own effect (a read split "
+                "between the injected params and a copy made at construction?), "
+                "so " + _CONSEQUENCE[name] + "."
+            )
+        if name != "update":
+            blind = [
+                el for el in elements
+                if ctor_value[el] is None and not acts(name, el)
+                and el not in rebuilt_moved[name] and acts("update", el)
+            ]
+            if blind:
+                problems.append(
+                    f"{where}: the injected {names(blind)} never move its output "
+                    "while update()'s do, and the constructor value could not be "
+                    "varied to tell an unused constant from an ignored one (not a "
+                    "plain node.params entry); failing closed"
+                )
+    dead = [
+        k for k in trainable
+        if not any(grad_any[name][k].any() for name in checked)
+        and not any(acts(name, (k, i)) or (k, i) in rebuilt_moved[name]
+                    for name in checked for i in _probe_indices(sizes[k]))
+    ]
     if dead:
+        problems.append(
+            f"zero gradient on every sample wrt trainable param(s) {dead}, and "
+            "neither the injected nor the constructed value moves any output: "
+            "no path reads them (declare them ParamSpec(trainable=False)), or "
+            "the sampled envelope never exercises them"
+        )
+    if problems:
         return VerificationResult(
             "params_effective", "FAIL", n_examples=r.n_examples,
-            detail=(
-                f"zero gradient on every sample wrt trainable param(s) {dead}: "
-                "update() probably reads them from self.params instead of "
-                "the injected params (or declare them ParamSpec(trainable=False))"
-            ),
+            detail="; ".join(problems),
         )
-    return r
+
+    notes = [f"paths checked: {', '.join(checked)}"]
+    for name in paths:
+        if name in not_applicable:
+            notes.append(f"{name}(): not applicable (raises NotImplementedError)")
+    for name in checked:
+        unused: list[str] = []
+        for k in trainable:
+            idx = _probe_indices(sizes[k])
+            quiet = [i for i in idx if not acts(name, (k, i))]
+            if not quiet:
+                continue
+            if len(quiet) == len(idx) and not grad_any[name][k].any():
+                unused.append(k)
+            elif shapes[k]:
+                # A vector leaf the path reads only part of: name the rest.
+                unused.extend(labels[(k, i)] for i in quiet)
+        if unused:
+            notes.append(f"not consumed by {name}(): {unused}")
+    return VerificationResult(
+        "params_effective", "PASS", n_examples=r.n_examples, detail="; ".join(notes),
+    )
+
+
+#: What a path that ignores the injected value does to a calibration.
+_CONSEQUENCE = {
+    "update": "the graph would step the constructor's constant while an optimiser moves the injected one",
+    "compute_boundary_fluxes": "a flux edge would deliver the constructor's flux while update() uses the calibrated constant",
+    "derivatives": ("integrate_node(..., params=...) / implicit_euler_step(..., params=...) "
+                    "would integrate the constructor's constant while update() used the "
+                    "calibrated one"),
+    "implicit_residual": ("implicit_euler_step(..., params=...) would solve with the "
+                          "constructor's constant while update() used the calibrated one"),
+    "compute_interface_correction": ("a coupled interface would be corrected with the "
+                                     "constructor's constant while update() uses the "
+                                     "calibrated one"),
+}
 
 
 def node_boundedness(
@@ -498,6 +1320,7 @@ DEFAULT_CHECKS = (
 )
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 def make_inputs(
     node,
     bounds: Bounds | None = None,
@@ -505,15 +1328,28 @@ def make_inputs(
     boundary_bounds: Bounds | None = None,
     boundary_inputs: dict | None = None,
     dt_range: tuple[float, float] = (1e-4, 0.01),
-    dtype: np.dtype = np.float32,
+    dtype: npt.DTypeLike = np.float32,
+    constrain_state: Constraint | None = None,
+    constrain_boundary: Constraint | None = None,
+    state_strategy: st.SearchStrategy | None = None,
+    boundary_strategy: st.SearchStrategy | None = None,
 ) -> _Inputs:
-    """Bundle the sampling envelope for the standalone ``node_*`` checks."""
+    """Bundle the sampling envelope for the standalone ``node_*`` checks.
+
+    The arguments are :func:`verify_node`'s, with the same meaning and the
+    same refusals; ``.strategy()`` of the result is the strategy every
+    check draws ``(state, boundary_inputs, dt)`` from, with
+    ``constrain_state`` / ``constrain_boundary`` already applied.
+    """
     return _Inputs(
         node, bounds or {}, boundary_bounds or {}, boundary_inputs,
         dt_range, np.dtype(dtype),
+        constrain_state=constrain_state, constrain_boundary=constrain_boundary,
+        state_strategy=state_strategy, boundary_strategy=boundary_strategy,
     )
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 def verify_node(
     node,
     bounds: Bounds | None = None,
@@ -522,12 +1358,16 @@ def verify_node(
     boundary_bounds: Bounds | None = None,
     boundary_inputs: dict | None = None,
     dt_range: tuple[float, float] = (1e-4, 0.01),
-    dtype: np.dtype = np.float32,
+    dtype: npt.DTypeLike = np.float32,
     output_bounds: Bounds | None = None,
     energy_fn: Callable[[dict], Any] | None = None,
     invariants: dict[str, Callable[[dict, dict, dict, float], bool]] | None = None,
     max_examples: int = 200,
     derandomize: bool = False,
+    constrain_state: Constraint | None = None,
+    constrain_boundary: Constraint | None = None,
+    state_strategy: st.SearchStrategy | None = None,
+    boundary_strategy: st.SearchStrategy | None = None,
 ) -> dict[str, VerificationResult]:
     """Run a battery of property checks on ``node.update``.
 
@@ -563,14 +1403,62 @@ def verify_node(
     derandomize : bool
         Seed Hypothesis from the check's own structure so repeated runs
         draw identical samples (reproducible CI, weaker exploration).
+    constrain_state : callable, optional
+        ``fn(state) -> state``, applied to every drawn state before any
+        check uses it.  Every state field is otherwise drawn on its own
+        in a box, which a field with a constraint does not survive:
+        normalise a quaternion, make populations positive, clip a counter
+        used as an index, recompute a field derived from another.  Every
+        check sees the mapped state and only that -- the eager and the
+        compiled evaluation, the point a gradient is taken at,
+        ``energy_fn``, ``invariants`` -- and it is the state a
+        counterexample reports.  The function must return the fields it
+        was given, each with the shape and dtype it was drawn with;
+        ``bounds`` still set the box the raw draw comes from.
+    constrain_boundary : callable, optional
+        The same for every drawn boundary-input dict.  Not with a fixed
+        ``boundary_inputs``, where nothing is drawn.
+    state_strategy : hypothesis.strategies.SearchStrategy, optional
+        A strategy that yields whole state dicts, used instead of the
+        per-field sampling: for what a map cannot express, such as fields
+        that must agree with each other or a state taken from a short
+        trajectory.  Its examples reach the node exactly as drawn
+        (``dtype`` is not applied to them; ``constrain_state``, if also
+        given, is).  Not with ``bounds``, which it would ignore.
+    boundary_strategy : hypothesis.strategies.SearchStrategy, optional
+        The same for the boundary-input dict.  Not with
+        ``boundary_bounds`` or ``boundary_inputs``.
 
     Returns
     -------
     dict[str, VerificationResult]
+
+    Raises
+    ------
+    ValueError
+        An unknown name in ``checks``; sampling options that contradict
+        each other (as marked "not with" above); a ``constrain_*``
+        function that changes a field's shape or dtype or the set of
+        fields (the message names the field), or that raises; a supplied
+        strategy that raises while generating an example.  None of these
+        is a verdict on the node, so none is reported as a ``FAIL``.
+    TypeError
+        A ``constrain_*`` argument that is not callable, a ``*_strategy``
+        argument that is not a Hypothesis strategy.
+
+    See Also
+    --------
+    maddening.testing.mms.verify_node_order : the order-of-accuracy half
+        of the battery.  Every check here compares the node to itself,
+        so none of them can see a wrong discretisation — a stencil with
+        the wrong weight is finite, deterministic, JIT-consistent and
+        differentiable.  That one compares it to the mathematics.
     """
     inputs = make_inputs(
         node, bounds, boundary_bounds=boundary_bounds,
         boundary_inputs=boundary_inputs, dt_range=dt_range, dtype=dtype,
+        constrain_state=constrain_state, constrain_boundary=constrain_boundary,
+        state_strategy=state_strategy, boundary_strategy=boundary_strategy,
     )
     kw = dict(max_examples=max_examples, derandomize=derandomize)
     battery = {
@@ -602,6 +1490,7 @@ def verify_node(
     return results
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 def assert_node_verified(node, bounds: Bounds | None = None, **kwargs) -> None:
     """``verify_node`` that raises ``AssertionError`` listing every failure.
 
@@ -609,6 +1498,15 @@ def assert_node_verified(node, bounds: Bounds | None = None, **kwargs) -> None:
 
         def test_my_node():
             assert_node_verified(my_node, bounds={"T": (200.0, 5000.0)})
+
+    Every keyword of :func:`verify_node` is accepted and passed on,
+    ``constrain_state`` and the other sampling options included.
+
+    See Also
+    --------
+    maddening.testing.mms.assert_node_order_verified : the same one-line
+        shape for the node's order of accuracy, which this battery
+        cannot see.
     """
     results = verify_node(node, bounds, **kwargs)
     bad = [r for r in results.values() if not r.passed]

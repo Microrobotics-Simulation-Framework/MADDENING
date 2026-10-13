@@ -39,15 +39,22 @@ wall_mask_update : grid_shape bool
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from numpy.typing import ArrayLike
 
 from maddening.core.node import BoundaryInputSpec, SimulationNode
-from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
+from maddening.core.compliance.metadata import (
+    DiscretizationOrder,
+    NodeMeta,
+    StabilityLevel,
+    ValidatedRegime,
+)
 from maddening.core.compliance.stability import stability
+from maddening.core._size_estimate import AllocationEstimate, as_count
 from maddening.core.params import ParamSpec
 
 
@@ -193,9 +200,13 @@ def _equilibrium(density, velocity, e, w, cs2):
     -------
     f_eq : (*grid_shape, Q) float32
     """
+    # Every lattice product in this module passes precision=HIGHEST: an NVIDIA
+    # GPU runs a float32 matrix product at reduced precision under JAX's
+    # default (MADD-ANO-290).  tests/nodes/test_lbm_matmul_precision.py holds
+    # each product here to it; do not write them with @.
     e_f = e.astype(np.float64)
     # e_dot_u: (*grid_shape, Q)
-    e_dot_u = velocity @ e_f.T
+    e_dot_u = jnp.matmul(velocity, e_f.T, precision=jax.lax.Precision.HIGHEST)
     u_sq = jnp.sum(velocity ** 2, axis=-1, keepdims=True)  # (..., 1)
 
     f_eq = w * density[..., None] * (
@@ -233,7 +244,7 @@ def _compute_macroscopic(f, e, force=None):
     """
     density = jnp.sum(f, axis=-1)
     e_f = e.astype(np.float64)
-    momentum = f @ e_f  # (*grid_shape, D)
+    momentum = jnp.matmul(f, e_f, precision=jax.lax.Precision.HIGHEST)  # (*grid_shape, D)
     if force is not None:
         momentum = momentum + 0.5 * force
     velocity = momentum / jnp.maximum(density[..., None], 1e-10)
@@ -334,7 +345,7 @@ def _guo_forcing(density, velocity, force, tau, e, w, cs2):
     # Build extra dimensions for broadcasting: prepend len(grid_shape) Nones
     # We use explicit expansion: e_f -> (1,...,1, Q, D), etc.
     # Simpler approach: compute per-q and stack.
-    e_dot_u = velocity @ e_f.T  # (*grid_shape, Q)
+    e_dot_u = jnp.matmul(velocity, e_f.T, precision=jax.lax.Precision.HIGHEST)  # (*grid_shape, Q)
 
     # (e_q - u): (*grid_shape, Q, D)
     # Expand e_f: (Q, D) -> broadcast with velocity (..., 1, D)
@@ -423,12 +434,84 @@ def _classify_directions(e, face_axis, face_side):
     return known, unknown, tangential
 
 
+def _zou_he_face_closure(e, w, cs2, face_axis, face_side):
+    """Static (numpy) data of the Zou-He closure on one flat face.
+
+    Classifies the lattice directions for the face and checks, at trace
+    time, the lattice identities the closure in
+    :func:`_zou_he_pressure_face` relies on.  Each one holds for D2Q9 and
+    D3Q19 on every face; a velocity set for which one fails would make
+    the closure impose a density or a tangential velocity other than the
+    one it claims, so it is refused instead of run.
+
+    Returns
+    -------
+    known, unknown, tangential : list of int
+        As :func:`_classify_directions`.
+    sigma : int
+        ``+1`` on a ``"min"`` face, ``-1`` on a ``"max"`` face: the sign of
+        the face-normal component of every *unknown* direction, i.e. the
+        direction pointing into the domain.
+    tang_axes : list of int
+        The spatial axes other than ``face_axis``.
+    tang_weight : dict[int, float]
+        ``1 / sum_{q in unknown} e_{q,t}^2`` for each tangential axis
+        ``t`` -- the transverse-momentum coefficient (``1/2`` for both
+        supported lattices).
+    opp : numpy.ndarray
+        Opposite-direction map.
+    """
+    e = np.asarray(e)
+    w = np.asarray(w, dtype=np.float64)
+    ndim = e.shape[1]
+    known, unknown, tangential = _classify_directions(e, face_axis, face_side)
+    sigma = 1 if face_side == "min" else -1
+    opp = _get_opp_map(e)
+    tang_axes = [a for a in range(ndim) if a != face_axis]
+
+    problems = []
+    if sorted(int(opp[q]) for q in unknown) != sorted(known):
+        problems.append("the opposites of the unknown directions are not "
+                        "exactly the known directions")
+    if np.any(np.abs(e) > 1):
+        problems.append("a velocity component exceeds one lattice unit")
+    e_u = e[unknown].astype(np.float64)
+    w_u = w[unknown]
+    # Normal-momentum bounce-back term sums to rho * u_n over the unknowns.
+    if not np.isclose(2.0 * np.sum(w_u * e_u[:, face_axis] ** 2) / cs2, 1.0):
+        problems.append("2 sum_{unknown} w_q e_qn^2 / cs2 != 1")
+    tang_weight: dict[int, float] = {}
+    for t in tang_axes:
+        # The transverse correction must leave density and normal momentum
+        # alone and act on one tangential axis at a time.
+        if not np.isclose(np.sum(e_u[:, t]), 0.0):
+            problems.append(f"sum_{{unknown}} e_q{t} != 0")
+        if not np.isclose(np.sum(w_u * e_u[:, face_axis] * e_u[:, t]), 0.0):
+            problems.append(f"sum_{{unknown}} w_q e_qn e_q{t} != 0")
+        for t2 in tang_axes:
+            if t2 != t and not np.isclose(np.sum(e_u[:, t] * e_u[:, t2]), 0.0):
+                problems.append(f"sum_{{unknown}} e_q{t} e_q{t2} != 0")
+        s_tt = float(np.sum(e_u[:, t] ** 2))
+        if s_tt <= 0.0:
+            problems.append(f"no unknown direction has a component on axis {t}")
+        else:
+            tang_weight[t] = 1.0 / s_tt
+    if problems:
+        raise ValueError(
+            "the Zou-He pressure closure does not apply to this velocity set "
+            f"on face (axis {face_axis}, {face_side}): " + "; ".join(problems)
+        )
+    return known, unknown, tangential, sigma, tang_axes, tang_weight, opp
+
+
 def _zou_he_pressure_face(f, prescribed_density, e, w, cs2,
                           face_axis, face_side, wall_mask):
-    """Apply Zou-He pressure BC on a flat face.
+    """Apply the Zou-He pressure (density) boundary condition on a flat face.
 
-    Non-equilibrium bounce-back method: set unknown distributions so that
-    the prescribed density (pressure / cs2) is satisfied.
+    After this call every fluid cell of the face has exactly the
+    prescribed density ``rho_p`` (to rounding) and zero tangential
+    velocity; the known and tangential populations are not modified, and
+    wall cells on the face are left untouched.
 
     Parameters
     ----------
@@ -444,12 +527,42 @@ def _zou_he_pressure_face(f, prescribed_density, e, w, cs2,
     Returns
     -------
     f_updated : (*grid_shape, Q) float32
+
+    Notes
+    -----
+    The closure of Zou & He (1997) for D2Q9 and Hecht & Harting (2010)
+    for D3Q19.  With ``n`` the face axis, ``sigma = +1`` on a ``"min"`` face and
+    ``-1`` on a ``"max"`` face, the unknown set ``U`` (directions with
+    ``e_qn = sigma``, arriving from outside), the known set ``K``
+    (``e_qn = -sigma``, streamed out of the interior) and the tangential
+    set ``T`` (``e_qn = 0``, rest included)::
+
+        rho_p        = S_T + S_K + S_U
+        rho_p * u_n  = sigma * (S_U - S_K)
+        =>  u_n      = sigma * (1 - (S_T + 2 S_K) / rho_p)
+
+    and, for each unknown ``q`` with opposite ``qbar``, non-equilibrium
+    bounce-back of the normal part plus the transverse-momentum
+    correction that makes the tangential velocity zero::
+
+        f_q = f_qbar + (2 w_q / cs2) * rho_p * e_qn * u_n
+                     - sum_{t != n} e_qt * N_t / (sum_{p in U} e_pt^2),
+        N_t = sum_{p in T} f_p e_pt.
+
+    On D2Q9 ``x_min`` (this module's numbering) that is
+    ``f1 = f2 + 2/3 rho u``, ``f5 = f8 + 1/6 rho u - 1/2 (f3 - f4)``,
+    ``f7 = f6 + 1/6 rho u + 1/2 (f3 - f4)``: Zou & He's equations with
+    ``u_y = 0``.  The factor 2 on ``S_K`` is what makes the rebuilt
+    density equal ``rho_p``; without it the face density comes out as
+    ``rho_p + S_K`` (MADD-ANO-020).  The lattice identities the closure
+    rests on are checked by :func:`_zou_he_face_closure`.
     """
     ndim = e.shape[1]
-    known, unknown, tangential = _classify_directions(e, face_axis, face_side)
+    (known, unknown, tangential, sigma, tang_axes, tang_weight,
+     opp_map) = _zou_he_face_closure(e, w, cs2, face_axis, face_side)
 
     # Build slice for the face
-    face_slices = [slice(None)] * ndim
+    face_slices: list[Any] = [slice(None)] * ndim
     if face_side == "min":
         face_slices[face_axis] = 0
     else:
@@ -460,7 +573,7 @@ def _zou_he_pressure_face(f, prescribed_density, e, w, cs2,
     f_face = f[face_sl]
     wall_face = wall_mask[face_sl]
 
-    # Sum of known and tangential distributions at the face
+    # Sums of the known and tangential populations at the face.
     sum_known = jnp.zeros_like(f_face[..., 0])
     for q in known:
         sum_known = sum_known + f_face[..., q]
@@ -468,40 +581,34 @@ def _zou_he_pressure_face(f, prescribed_density, e, w, cs2,
     for q in tangential:
         sum_tang = sum_tang + f_face[..., q]
 
-    # Normal velocity from known distributions
-    # For min face: u_n = 1 - (sum_known + sum_tangential) / rho_prescribed
-    # For max face: u_n = -1 + (sum_known + sum_tangential) / rho_prescribed
-    # (sign convention: velocity pointing into the domain is positive for min,
-    #  negative for max)
+    # Face-normal velocity (component along +face_axis) from the density
+    # and normal-momentum moments.  Known populations count twice: once in
+    # the density and once, reflected, in the momentum.
     rho_p = prescribed_density
-    if face_side == "min":
-        u_normal = 1.0 - (sum_known + sum_tang) / jnp.maximum(rho_p, 1e-10)
-    else:
-        u_normal = -1.0 + (sum_known + sum_tang) / jnp.maximum(rho_p, 1e-10)
-
-    # Non-equilibrium bounce-back for each unknown direction
-    # f_q = f_{opp(q)} + (f_eq_q - f_eq_{opp(q)}) at the prescribed state
-    # Simplified: for each unknown q, its opposite opp_q is known.
-    # The non-equilibrium part: f_q = f_{opp(q)} + rho_p * w_q * (e_q . u) / cs2 * 2
-    # This is the standard Zou-He non-equilibrium bounce-back.
-
-    # Build the velocity vector on the face (only normal component from Zou-He)
-    vel_face = jnp.zeros(f_face.shape[:-1] + (ndim,), dtype=f_face.dtype)
-    vel_face = vel_face.at[..., face_axis].set(u_normal)
-
-    # Compute equilibrium at the face for known velocity/density
-    f_eq_face = _equilibrium(
-        jnp.full_like(f_face[..., 0], rho_p), vel_face, e, w, cs2,
+    u_normal = sigma * (
+        1.0 - (sum_tang + 2.0 * sum_known) / jnp.maximum(rho_p, 1e-10)
     )
 
-    # For unknown directions, use non-equilibrium bounce-back:
-    # f_q = f_opp(q) + f_eq(q) - f_eq(opp(q))
-    opp_map = _get_opp_map(e)
+    # Tangential momentum carried by the tangential populations; the
+    # unknowns are corrected so that the face's tangential momentum is 0.
+    n_t = {}
+    for t in tang_axes:
+        acc = jnp.zeros_like(f_face[..., 0])
+        for q in tangential:
+            if int(e[q, t]) != 0:
+                acc = acc + float(e[q, t]) * f_face[..., q]
+        n_t[t] = acc
 
     f_face_new = f_face
     for q in unknown:
-        opp_q = opp_map[q]
-        f_q_new = f_face[..., opp_q] + f_eq_face[..., q] - f_eq_face[..., opp_q]
+        opp_q = int(opp_map[q])
+        f_q_new = (
+            f_face[..., opp_q]
+            + (2.0 * float(w[q]) / cs2) * rho_p * float(e[q, face_axis]) * u_normal
+        )
+        for t in tang_axes:
+            if int(e[q, t]) != 0:
+                f_q_new = f_q_new - float(e[q, t]) * tang_weight[t] * n_t[t]
         # Only apply to fluid cells, not wall cells
         f_q_corrected = jnp.where(wall_face, f_face[..., q], f_q_new)
         f_face_new = f_face_new.at[..., q].set(f_q_corrected)
@@ -522,6 +629,14 @@ _FACE_MAP = {
     "y_max": (1, "max"),
     "z_min": (2, "min"),
     "z_max": (2, "max"),
+}
+
+#: The face across the domain from each face: where a channel's outlet
+#: goes when its inlet is the key.
+_OPPOSITE_FACE = {
+    "x_min": "x_max", "x_max": "x_min",
+    "y_min": "y_max", "y_max": "y_min",
+    "z_min": "z_max", "z_max": "z_min",
 }
 
 
@@ -550,19 +665,58 @@ class LBMNode(SimulationNode):
         ``tau = 0.5 + viscosity / cs2``.
     lattice : str
         Lattice type: ``"D3Q19"`` (default) or ``"D2Q9"``.
-    wall_mask : numpy.ndarray or None
+    wall_mask : array-like of bool, or None
         Boolean array of shape ``grid_shape``, True = wall.  If None, no walls.
+        Any array-like is accepted (a NumPy or JAX array, or the nested
+        lists a saved config carries) and read as ``bool``.  It is kept in
+        ``params`` as nested lists of ``bool``, so a saved graph
+        (:meth:`~maddening.core.graph_manager.GraphManager.to_dict`, a USD
+        stage) rebuilds the same walls; with no mask the key is absent.
     inlet_face : str
         Face for pressure inlet BC: ``"x_min"`` (default), ``"x_max"``, etc.
     outlet_face : str
-        Face for pressure outlet BC: ``"x_max"`` (default).
+        Face for pressure outlet BC: ``"x_max"`` (default).  Must differ
+        from ``inlet_face``.
     geometry_source : str or None
         USD prim path for geometry sourcing.
+
+    Raises
+    ------
+    ValueError
+        For an unknown lattice or face, a face on an axis the lattice does
+        not have, ``grid_shape`` or ``wall_mask`` of the wrong rank or
+        shape, a non-finite ``viscosity`` or ``tau <= 0.5``, or
+        ``inlet_face == outlet_face``.
+
+    Notes
+    -----
+    **Faces.**  ``inlet_face`` and ``outlet_face`` must be different faces:
+    one face carries one pressure, and the outlet closure, applied second,
+    would overwrite the inlet's on every cell of it, silently dropping
+    ``inlet_pressure``.  Perpendicular faces are allowed; they share the
+    cells along their common edge (one corner cell in 2-D, a line of cells
+    in 3-D), and because the inlet closure runs first and the outlet
+    closure second, those shared cells carry the **outlet** pressure.
+
+    **Sharding.**  Under
+    :class:`~maddening.cloud.multigpu.sharded_node.ShardedStencilNode` the
+    node must be wrapped with ``boundary="periodic"`` (:meth:`halo_boundary`),
+    which is what its unsharded streaming does; any other fill, the
+    wrapper's default ``"edge"`` included, is refused at construction.  A
+    pressure face must not
+    lie on a sharded axis: the first sharded step that imposes a pressure
+    on such a face raises, naming the axis to shard instead (see
+    :meth:`update_padded`).
     """
 
     meta = NodeMeta(
-        algorithm_id="MADD-NODE-007",
-        algorithm_version="1.0.0",
+        # MADD-NODE-011 from 0.4.0.  0.1.0 to 0.3.1 carried MADD-NODE-007,
+        # which RigidBodyNode also carried (and keeps); the algorithm is
+        # unchanged by the renumbering.  scripts/check_impl_mapping.py now
+        # refuses a duplicate algorithm ID.
+        algorithm_id="MADD-NODE-011",
+        # 1.1.0: Zou-He closure corrected (MADD-ANO-020); see the guide.
+        algorithm_version="1.1.0",
         stability=StabilityLevel.EXPERIMENTAL,
         description=(
             "General LBM node with BGK collision, Zou-He pressure BCs, "
@@ -573,30 +727,66 @@ class LBMNode(SimulationNode):
             "streaming: f_i(x+e_i, t+1) = f_i(x, t)"
         ),
         discretization="Lattice Boltzmann (D3Q19/D2Q9, explicit, 2nd-order)",
+        discretization_order=DiscretizationOrder(
+            spatial=2.0,
+            temporal=None,
+            notes=(
+                "2nd order in the grid spacing under diffusive scaling "
+                "(lattice viscosity held fixed, velocity scaled with 1/N), "
+                "measured by MADD-VER-007.  No temporal order is declared "
+                "because there is no independent timestep: the lattice fixes "
+                "dx = dt = 1 and ``update`` ignores its ``dt`` argument, so "
+                "refining time *is* refining the grid.  Degrades to 1st "
+                "order at bounce-back walls (see ``limitations``); "
+                "the measurement is on a wall-free periodic domain."
+            ),
+        ),
         assumptions=(
             "Incompressible flow (Mach number << 1)",
             "BGK single-relaxation-time collision operator",
-            "Rigid, impermeable walls (mid-link bounce-back)",
-            "Zou-He pressure boundary conditions at inlet/outlet",
+            "Rigid, impermeable walls (bounce-back in wall cells)",
+            "Zou-He pressure boundary conditions at inlet/outlet: the face "
+            "carries the prescribed density and zero tangential velocity",
         ),
         limitations=(
             "Compressibility errors at high Mach number (Ma > 0.1)",
             "BGK is less stable than MRT for high Reynolds numbers",
             "No turbulence model",
-            "Wall bounce-back is 1st-order at curved boundaries",
+            "Wall bounce-back is 1st order, straight walls included: wall "
+            "cells collide as well as reflect, and the hydrodynamic wall sits "
+            "about 0.1 lattice units from the wall node rather than mid-link "
+            "(measured by MADD-VER-016)",
+            "Pressure faces reflect acoustic waves, so a pressure-driven flow "
+            "settles more slowly than its viscous time scale",
         ),
         validated_regimes=(
             ValidatedRegime(
-                "tau", 0.501, 2.0,
-                notes="tau > 0.5 required; tau >> 1 causes numerical diffusion",
+                "tau", 0.8, 1.0,
+                notes=(
+                    "The values the benchmarks run at: tau = 0.8 (nu = 0.1; "
+                    "MADD-VER-003, MADD-VER-007) and tau = 1 (nu = 1/6; "
+                    "MADD-VER-016).  tau > 0.5 is required and the "
+                    "constructor enforces it through nu > 0, but nothing "
+                    "verifies the node outside [0.8, 1]; tau >> 1 adds "
+                    "numerical diffusion.  0.501 to 2.0, the range this "
+                    "declared until 0.4.0, was never run"
+                ),
             ),
             ValidatedRegime(
-                "Reynolds number", 0, 100,
-                notes="Validated against Poiseuille analytical solution",
+                "Reynolds number", 0, 0.21,
+                notes=(
+                    "The Poiseuille benchmarks run in the Stokes regime.  "
+                    "Measured on their own configurations (jaxlib 0.11.0): "
+                    "MADD-VER-016's pressure-driven channel reaches "
+                    "Re = u_mean * H / nu = 0.21 at H = 8 and 0.19 at "
+                    "H = 16, and MADD-VER-003's body-force pipe "
+                    "Re = u_mean * 2R / nu = 0.21.  The 0 to 100 this "
+                    "declared until 0.4.0 was never run"
+                ),
             ),
         ),
         hazard_hints=(
-            "Behaviour uncharacterised at Re > 100",
+            "Behaviour uncharacterised above Re ~0.2 and outside tau in [0.8, 1]; the Poiseuille benchmarks (MADD-VER-003, MADD-VER-016) run only in the Stokes regime",
             "No turbulence model -- do not use above Re ~2000",
             "Wall bounce-back assumes rigid, impermeable walls",
         ),
@@ -609,7 +799,7 @@ class LBMNode(SimulationNode):
         grid_shape: tuple = (64, 32, 32),
         viscosity: float = 0.1,
         lattice: str = "D3Q19",
-        wall_mask: Optional[np.ndarray] = None,
+        wall_mask: Optional[ArrayLike] = None,
         inlet_face: str = "x_min",
         outlet_face: str = "x_max",
         geometry_source: Optional[str] = None,
@@ -631,6 +821,16 @@ class LBMNode(SimulationNode):
                 f"requires {lat.D} dims."
             )
 
+        # A non-finite viscosity passed ``tau > 0.5`` below (inf) or every
+        # comparison (nan): at inf, ``(f - f_eq) / tau`` is 0 and the node
+        # ran with no collision at all, a different model with no error.
+        if not np.isfinite(viscosity):
+            raise ValueError(
+                f"viscosity must be a finite number > 0 (got {viscosity}).  "
+                "tau = 0.5 + viscosity / cs2 would not be finite, and BGK "
+                "collision relaxes by (f - f_eq) / tau: with tau = inf the node "
+                "would not collide at all."
+            )
         # Compute tau from viscosity
         tau = 0.5 + viscosity / lat.cs2
         if tau <= 0.5:
@@ -652,6 +852,35 @@ class LBMNode(SimulationNode):
                     f"{face_name} '{face_label}' uses axis {face_axis} "
                     f"but lattice {lat.name} only has {lat.D} dimensions."
                 )
+        if inlet_face == outlet_face:
+            raise ValueError(
+                f"inlet_face and outlet_face are both {inlet_face!r}.  A face "
+                "carries one pressure: the outlet closure runs after the inlet "
+                "closure and would overwrite it on every cell of the face, so "
+                "inlet_pressure would be silently dropped.  Put the outlet on "
+                f"another face -- for a channel, the opposite one, "
+                f"outlet_face={_OPPOSITE_FACE[inlet_face]!r}."
+            )
+
+        # Wall mask.  Recorded in ``params`` as nested lists of bool -- the
+        # JSON-faithful spelling, as HeatNode records ``grid_points`` -- so
+        # that the node a saved graph rebuilds (``cls(name=, timestep=,
+        # **params)``: GraphManager.from_dict, a USD stage, POST
+        # /graph/nodes) has these walls.  Until 0.4.0 the mask was kept on
+        # the node alone and every reload ran a domain with no walls
+        # (MADD-ANO-034).  No mask, no key: a wall-free node's config is
+        # unchanged.
+        mask_param = {}
+        mask = None
+        if wall_mask is not None:
+            mask = np.asarray(wall_mask)
+            if mask.shape != tuple(grid_shape):
+                raise ValueError(
+                    f"wall_mask shape {mask.shape} != grid_shape "
+                    f"{tuple(grid_shape)}"
+                )
+            mask = mask.astype(bool)
+            mask_param = {"wall_mask": mask.tolist()}
 
         super().__init__(
             name,
@@ -662,6 +891,7 @@ class LBMNode(SimulationNode):
             inlet_face=inlet_face,
             outlet_face=outlet_face,
             geometry_source=geometry_source,
+            **mask_param,
         )
 
         self._lat = lat
@@ -676,14 +906,9 @@ class LBMNode(SimulationNode):
         # Wall mask: convert to JAX array for JIT compatibility.
         # Track at Python level whether any walls are present so the
         # sharded `update_padded` can guard cheaply outside of tracing.
-        if wall_mask is not None:
-            if wall_mask.shape != tuple(grid_shape):
-                raise ValueError(
-                    f"wall_mask shape {wall_mask.shape} != grid_shape "
-                    f"{tuple(grid_shape)}"
-                )
-            self._has_walls = bool(np.any(np.asarray(wall_mask)))
-            self._wall_mask = jnp.asarray(wall_mask, dtype=jnp.bool_)
+        if mask is not None:
+            self._has_walls = bool(np.any(mask))
+            self._wall_mask = jnp.asarray(mask, dtype=jnp.bool_)
         else:
             self._has_walls = False
             self._wall_mask = jnp.zeros(grid_shape, dtype=jnp.bool_)
@@ -716,6 +941,134 @@ class LBMNode(SimulationNode):
         (3 for D3Q19, 2 for D2Q9).
         """
         return {axis: 1 for axis in range(self._D)}
+
+    def halo_boundary(self) -> str:
+        """``"periodic"``: the halo fill under which the sharded step is this node.
+
+        :meth:`update` streams with ``jnp.roll``, so a population leaving
+        the grid through one face re-enters through the opposite one.  The
+        sharded :meth:`update_padded` streams from halo cells instead, and
+        reproduces :meth:`update` only when the halos at the edges of the
+        global grid hold the cells from the opposite edge -- a periodic
+        fill.  :class:`~maddening.cloud.multigpu.sharded_node.ShardedStencilNode`
+        refuses at construction any ``boundary`` other than this one,
+        including its own default, ``"edge"``, which copies each edge cell
+        into its own halo: on a walled 16x10 D2Q9 pressure channel sharded
+        across the walls that used to run and moved the centreline
+        velocity by 0.64% after 200 steps, where ``boundary="periodic"``
+        matches the unsharded node to float32 rounding.
+        """
+        return "periodic"
+
+    def _refuse_pressure_face_on_sharded_axis(
+        self, shard_info: Optional[dict], imposed: list[tuple[str, str]],
+    ) -> None:
+        """Refuse a pressure face on an axis the sharded step has split.
+
+        ``update_padded`` sees one slab of the grid and applies the Zou-He
+        closure to that slab's edge plane, so on a sharded face axis every
+        seam between two shards would be forced to the face pressure too:
+        measured on a 16x10 D2Q9 channel sharded along its streamwise axis
+        on 2 devices, the planes either side of the seam read density
+        0.990 and 1.010 and the centreline velocity was 2.1x the unsharded
+        one, with no error.  ``shard_info`` (``{axis: (offset,
+        local_extent)}``, from the wrapper) says which axes are split; an
+        axis whose one slab is the whole axis has no seam and is allowed.
+
+        Parameters
+        ----------
+        shard_info : dict or None
+            As passed to :meth:`update_padded`; ``None`` or empty when not
+            sharded.
+        imposed : list of (str, str)
+            ``(boundary input name, face label)`` for each pressure being
+            imposed on this step.
+        """
+        if not shard_info:
+            return
+        split = []
+        for input_name, face in imposed:
+            axis, _ = _FACE_MAP[face]
+            info = shard_info.get(axis)
+            if info is None:
+                continue
+            local_extent = int(info[1])
+            if local_extent >= self._grid_shape[axis]:
+                continue
+            split.append((input_name, face, axis, local_extent))
+        if not split:
+            return
+        on_faces = " and ".join(f"{i} on face {f!r} (axis {a})" for i, f, a, _ in split)
+        split_axes = sorted({(a, n) for _, _, a, n in split})
+        slabs = "; ".join(
+            f"axis {a} into slabs of {n} of its {self._grid_shape[a]} cells"
+            for a, n in split_axes
+        )
+        which = "that axis" if len(split_axes) == 1 else "those axes"
+        face_axes = {_FACE_MAP[f][0] for _, f in imposed}
+        free = [a for a in range(self._D) if a not in face_axes]
+        if free:
+            instead = (
+                f"Shard an axis no pressure face lies on instead -- "
+                f"{' or '.join(f'axis {a}' for a in free)} here, e.g. "
+                f"axis_map={{<mesh axis>: {free[0]}}} -- and leave "
+                f"{' and '.join(f'axis {a}' for a in sorted(face_axes))} unsharded"
+            )
+        else:
+            instead = (
+                "Every axis of this grid has a pressure face on it, so the node "
+                "cannot be sharded while these pressures are imposed: run it "
+                "unsharded"
+            )
+        raise ValueError(
+            f"{type(self).__name__} {self.name!r} imposes {on_faces}, but the "
+            f"sharded step has split {which} ({slabs}).  update_padded applies "
+            "the Zou-He closure to the edge plane of its own slab, so every seam "
+            "between two shards would be forced to the face pressure as well, with "
+            f"no error.  {instead}; or drive the flow with body_force, which does "
+            "not use the pressure faces."
+        )
+
+    #: ``(D, Q)`` of each lattice the constructor accepts, for
+    #: :meth:`_allocation_estimate` (which must not build a descriptor).
+    _LATTICE_SIZES = {"D3Q19": (3, 19), "D2Q9": (2, 9)}
+
+    @classmethod
+    def _allocation_estimate(cls, args: dict) -> Optional[AllocationEstimate]:
+        """What the constructor and :meth:`initial_state` would allocate with
+        constructor arguments *args*, told without building anything.
+
+        Private on purpose (see :mod:`maddening.core._size_estimate`): a
+        convention between the built-in nodes, the REST server and
+        ``GraphManager.from_dict``, not yet part of the node contract.
+
+        Per cell the state holds ``Q`` populations, a density, ``D``
+        velocity components, a pressure and the wall mask: 25 values on
+        D3Q19, 14 on D2Q9.  Building it peaks at about 3.3 to 3.8 times the
+        state's float32 bytes (the equilibrium's temporaries; measured on
+        D3Q19 up to 90^3 and D2Q9 up to 2000 x 1000, jaxlib 0.11.0); four
+        times is counted.  ``None`` for a lattice or a grid rank the
+        constructor refuses.
+        """
+        lattice = args.get("lattice")
+        if not isinstance(lattice, str) or lattice.upper() not in cls._LATTICE_SIZES:
+            return None
+        D, Q = cls._LATTICE_SIZES[lattice.upper()]
+        shape = args.get("grid_shape")
+        if isinstance(shape, (str, bytes)) or not isinstance(shape, (list, tuple)) \
+                or len(shape) != D:
+            return None
+        cells = 1
+        for extent in shape:
+            n = as_count(extent)
+            if n is None:
+                return None
+            cells *= n
+        per_cell = Q + D + 3
+        return AllocationEstimate(
+            state_elements=cells * per_cell,
+            peak_bytes=cells * per_cell * 4 * 4,
+        )
 
     def initial_state(self) -> dict:
         shape = self._grid_shape
@@ -769,11 +1122,22 @@ class LBMNode(SimulationNode):
         been halo-exchanged the same way as ``f``), so each shard sees
         its own wall topology.  Zou-He pressure BCs at
         ``inlet_face`` / ``outlet_face`` operate on the local slice of
-        the face plane and are valid as long as the inlet/outlet axis
+        the face plane and are valid only while the inlet/outlet axis
         is *not* sharded in the pencil mesh.  For the canonical
         Hagen-Poiseuille setup we shard ``(spatial_y, spatial_z)`` and
         leave ``x`` (streamwise) replicated -- which puts every shard
         in possession of the full inlet/outlet face.
+
+        Raises
+        ------
+        ValueError
+            When a pressure is imposed (``inlet_pressure`` or
+            ``outlet_pressure`` present) on a face whose axis
+            ``shard_info`` reports split across devices.  Raised while the
+            step is traced, so the first sharded step fails before any
+            number is produced; the message names the axis to shard
+            instead.  A body-force-driven node (no pressure inputs) may be
+            sharded along any axis.
         """
         f_pad = state_padded["f"]
         # Same contract as ``update``: viscosity from the injected params
@@ -805,26 +1169,10 @@ class LBMNode(SimulationNode):
             wall_pad = self._wall_mask
 
         # Body force first (needed for the Guo half-correction below).
-        # Three input shapes are accepted:
-        #   (D,)                      -- uniform, broadcast across grid
-        #   density_pad.shape + (D,)  -- already padded local field
-        #   density_pad.interior shape (e.g. (nx,ny,nz,D)) -- pad locally
-        # The first form is the right call under sharding: send a
-        # constant vector, broadcast trivially per device.
         target_density_shape = f_pad.shape[:-1]  # padded spatial shape
-        force = boundary_inputs.get("body_force", None)
-        if force is None:
-            force = jnp.zeros(target_density_shape + (D,), dtype=jnp.float32)
-        elif force.ndim == 1 and force.shape == (D,):
-            force = jnp.broadcast_to(
-                force, target_density_shape + (D,),
-            ).astype(jnp.float32)
-        elif force.shape != target_density_shape + (D,):
-            pad_widths = [
-                (halo, halo) if d < ndim else (0, 0)
-                for d in range(force.ndim)
-            ]
-            force = jnp.pad(force, pad_widths)
+        force = self._local_body_force(
+            boundary_inputs.get("body_force", None), target_density_shape, halo,
+        )
 
         # BGK collision is purely local, so we collide on the *entire*
         # padded array -- halo cells included -- so that the post-stream
@@ -855,9 +1203,19 @@ class LBMNode(SimulationNode):
         # Zou-He pressure BCs on the inlet / outlet face (interior shape).
         # Valid under sharding provided the inlet/outlet axis is replicated
         # (not in axis_map); each shard then owns the full face and
-        # applies the BC on its local slice of the face plane.
+        # applies the BC on its local slice of the face plane.  A face on
+        # a split axis is refused here, at trace time.
         inlet_pressure = boundary_inputs.get("inlet_pressure", None)
         outlet_pressure = boundary_inputs.get("outlet_pressure", None)
+        imposed = [
+            (input_name, face)
+            for input_name, face, value in (
+                ("inlet_pressure", self._inlet_face, inlet_pressure),
+                ("outlet_pressure", self._outlet_face, outlet_pressure),
+            )
+            if value is not None
+        ]
+        self._refuse_pressure_face_on_sharded_axis(shard_info, imposed)
         if inlet_pressure is not None:
             inlet_axis, inlet_side = _FACE_MAP[self._inlet_face]
             inlet_rho = inlet_pressure / cs2
@@ -901,6 +1259,53 @@ class LBMNode(SimulationNode):
             result["wall_mask"] = state_padded["wall_mask"]
         return result
 
+    def _local_body_force(self, force, padded_shape: tuple, halo: int):
+        """``body_force`` at this block's halo-padded shape, or a refusal.
+
+        Per block, the forms :meth:`update` takes: a uniform force
+        (``(D,)``, or ``(1,)`` for the same value on every component),
+        broadcast; a per-cell field
+        as :class:`~maddening.cloud.multigpu.sharded_node.ShardedStencilNode`
+        delivers it, already at the padded block's shape; and, when the
+        block is the whole grid (a direct call), the whole-grid field
+        ``(*grid_shape, D)``, whose halos are filled periodically -- the
+        node's :meth:`halo_boundary`, and what :meth:`update`'s streaming
+        wraps to.  Anything else is refused, naming its shape.  Until 0.4.0
+        any other shape was zero-padded and applied, so a caller's force of
+        shape ``(4, 8, 2)`` on a ``(16, 8)`` grid split four ways was read
+        by every slab as its own (``update`` refuses it), and a whole-grid
+        force on a direct call collided the halo cells with no force.
+        """
+        D = self._D
+        target = tuple(padded_shape) + (D,)
+        if force is None:
+            return jnp.zeros(target, dtype=jnp.float32)
+        force = jnp.asarray(force)
+        shape = tuple(force.shape)
+        # ``(D,)`` or ``(1,)``: ``update`` indexes ``force[..., None, :]``,
+        # so it refuses a 0-d force, and so does this.
+        uniform = len(shape) == 1 and shape[0] in (1, D)
+        if uniform:
+            return jnp.broadcast_to(force, target).astype(jnp.float32)
+        if shape == target:
+            return force
+        interior = tuple(int(n) - 2 * halo for n in padded_shape)
+        whole = interior == self._grid_shape
+        if whole and shape == interior + (D,):
+            widths = [(halo, halo)] * len(interior) + [(0, 0)]
+            return jnp.pad(force, widths, mode="wrap")
+        grid_field = self._grid_shape + (D,)
+        block = "the whole grid" if whole else f"the block {interior} of the grid {self._grid_shape}"
+        raise ValueError(
+            f"{type(self).__name__} {self.name!r}: body_force has shape {shape}, "
+            f"but it is a uniform force, shape ({D},) (or (1,)), or "
+            f"one vector per cell, shape {grid_field}.  This step holds "
+            f"{block}, so update_padded takes a uniform force, or the block's "
+            f"cells with {halo} halo cell(s) either side, shape {target}, which "
+            f"is how ShardedStencilNode delivers a {grid_field} field"
+            + (f", or {grid_field} itself." if whole else ".")
+        )
+
     def param_specs(self) -> dict[str, ParamSpec]:
         return {
             **super().param_specs(),
@@ -929,18 +1334,7 @@ class LBMNode(SimulationNode):
         D = self._D
         ndim = D
 
-        # Runtime wall mask precedence:
-        #   1. boundary_inputs["wall_mask_update"] (explicit override)
-        #   2. state["wall_mask"]                  (stateful path; stored as uint8)
-        #   3. self._wall_mask                     (legacy: pre-state)
-        if "wall_mask_update" in boundary_inputs:
-            wall_mask = boundary_inputs["wall_mask_update"].astype(jnp.bool_)
-        elif "wall_mask" in state:
-            wall_mask = state["wall_mask"].astype(jnp.bool_)
-        else:
-            wall_mask = self._wall_mask
-
-        fluid_mask = ~wall_mask
+        wall_mask = self._runtime_wall_mask(state, boundary_inputs)
 
         # 1. Body force (Guo forcing).  Accept either the full grid shape
         # or a uniform (D,) vector which we broadcast.
@@ -1007,8 +1401,27 @@ class LBMNode(SimulationNode):
             result["wall_mask"] = state["wall_mask"]
         return result
 
-    def derivatives(self, state: dict, boundary_inputs: dict) -> dict:
-        """Not applicable for LBM (discrete update, not an ODE)."""
+    def _runtime_wall_mask(self, state: dict, boundary_inputs: dict):
+        """The wall mask ``update`` applies, as a bool array.
+
+        Precedence: ``boundary_inputs["wall_mask_update"]`` (explicit
+        override), then ``state["wall_mask"]`` (the stateful path, stored as
+        uint8), then the constructor's mask (a state built before the mask
+        joined it).  :meth:`compute_boundary_fluxes` reads the same mask, so
+        the outlet average excludes exactly the cells the step treated as
+        walls.
+        """
+        if "wall_mask_update" in boundary_inputs:
+            return boundary_inputs["wall_mask_update"].astype(jnp.bool_)
+        if "wall_mask" in state:
+            return state["wall_mask"].astype(jnp.bool_)
+        return self._wall_mask
+
+    def derivatives(self, state: dict, boundary_inputs: dict, *, params=None) -> dict:
+        """Not applicable for LBM (discrete update, not an ODE).
+
+        Declared with the ``params`` keyword so the signature matches the
+        contract even though it only raises."""
         raise NotImplementedError(
             "LBMNode uses a discrete lattice Boltzmann update, "
             "not a continuous ODE. derivatives() is not applicable."
@@ -1019,12 +1432,21 @@ class LBMNode(SimulationNode):
     ) -> dict:
         """Expose average pressure at the outlet face for coupling.
 
+        The average is over the fluid cells of the outlet face under the
+        *runtime* wall mask -- the one :meth:`update` applied
+        (``wall_mask_update``, else the ``wall_mask`` state field, else the
+        constructor's) -- so a wall injected at run time is excluded here
+        too.  Every such fluid cell carries the imposed outlet pressure
+        after a step, so with an ``outlet_pressure`` input this returns it.
+
         Reads no constants, so ``params`` is accepted for the contract only."""
         pressure = state["pressure"]
         outlet_axis, outlet_side = _FACE_MAP[self._outlet_face]
 
         # Build slice for the outlet face
-        face_slices = [slice(None)] * self._D
+        # `list[Any]`: the entries start as slices and the outlet face is
+        # then replaced by an index, which narrows the element type away.
+        face_slices: list[Any] = [slice(None)] * self._D
         if outlet_side == "min":
             face_slices[outlet_axis] = 0
         else:
@@ -1032,8 +1454,8 @@ class LBMNode(SimulationNode):
         face_sl = tuple(face_slices)
 
         p_face = pressure[face_sl]
-        # Mask out wall cells at the outlet face
-        wall_face = self._wall_mask[face_sl]
+        # Mask out wall cells at the outlet face: the runtime mask, as update.
+        wall_face = self._runtime_wall_mask(state, boundary_inputs)[face_sl]
         fluid_count = jnp.sum(~wall_face)
         p_sum = jnp.sum(jnp.where(wall_face, 0.0, p_face))
         outlet_pressure_avg = p_sum / jnp.maximum(fluid_count, 1.0)

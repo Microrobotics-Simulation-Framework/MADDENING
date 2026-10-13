@@ -92,6 +92,53 @@ def test_windows_must_tile_the_observations(spring):
         windowed_loss(gm, gm.params, obs, obs_fn=lambda h: h["s"]["position"], window=7)
 
 
+def _truncated(obs, field, n):
+    return {"s": {**obs["s"], field: obs["s"][field][:n]}}
+
+
+@pytest.mark.parametrize("short_field", ["velocity", "position"])
+def test_observation_leaves_of_unequal_length_are_refused(spring, short_field):
+    """``T`` used to come from the first leaf alone.  A *later* leaf that
+    was shorter was read past its end -- ``dynamic_slice`` clamps, so the
+    late windows compared against its last sample repeated and the loss
+    was finite and non-zero at the true parameters -- and a *first* leaf
+    that was shorter set ``T`` and silently dropped the others' tail.
+    ``position`` sorts before ``velocity``, so the two cases are the two
+    orders.  Both lengths below tile with ``WINDOW``, so only the length
+    check can refuse them."""
+    gm, obs = spring
+    ragged = _truncated(obs, short_field, N_STEPS - WINDOW + 1)
+    with pytest.raises(ValueError, match="disagree on the leading axis") as exc:
+        windowed_loss(gm, gm.params, ragged, obs_fn=lambda h: h["s"]["position"],
+                      window=WINDOW)
+    msg = str(exc.value)
+    assert f"{N_STEPS + 1}: " in msg and f"{N_STEPS - WINDOW + 1}: " in msg, msg
+    assert "'s.position'" in msg and "'s.velocity'" in msg, msg
+    with pytest.raises(ValueError, match="disagree on the leading axis"):
+        init_window_states(ragged, WINDOW)
+
+
+def test_window_states_of_unequal_length_are_refused(spring):
+    """The multiple-shooting starts are indexed per window with the same
+    clamping ``dynamic_index``: a leaf with too few entries would restart
+    its late windows from its last entry."""
+    gm, obs = spring
+    ws = init_window_states(obs, WINDOW)
+    ragged = {"s": {**ws["s"], "velocity": ws["s"]["velocity"][:-1]}}
+    with pytest.raises(ValueError,
+                       match="window_states leaves disagree on the leading axis"):
+        windowed_loss(gm, gm.params, obs, obs_fn=lambda h: h["s"]["position"],
+                      window=WINDOW, window_states=ragged)
+
+
+def test_a_scalar_observation_leaf_is_refused_by_name(spring):
+    gm, obs = spring
+    bad = {"s": {**obs["s"], "velocity": obs["s"]["velocity"][0]}}
+    with pytest.raises(ValueError, match=r"'s\.velocity' is a scalar"):
+        windowed_loss(gm, gm.params, bad, obs_fn=lambda h: h["s"]["position"],
+                      window=WINDOW)
+
+
 def test_mask_unconverged_through_coupled_group():
     gm = _spring_gm(coupled=True)
     obs = _observations(gm)
@@ -135,13 +182,19 @@ def test_fim_identifiable_pair_has_finite_condition_number(spring):
     rep = fim(_residual_fn(gm, obs, names), sub)
     assert rep.param_names == ("['damping']", "['stiffness']")
     assert np.isfinite(rep.cond) and rep.cond < 1e6, rep.cond
+    assert rep.rank == 2, rep.eigvals
     assert bool(jnp.all(jnp.isfinite(rep.crb)))
 
 
 def test_fim_flags_unidentifiable_scale_direction(spring):
     """With position-only data, k, c, m enter only as k/m and c/m: scaling
     all three together is invisible.  In relative coordinates that is the
-    direction (1, 1, 1)/sqrt(3), and its eigenvalue must be ~0."""
+    direction (1, 1, 1)/sqrt(3), and its eigenvalue must be ~0.
+
+    All three parameters lie partly along that direction, so none of
+    them has a finite Cramer-Rao bound: the data pins two combinations
+    of k, c and m and leaves the overall scale free.
+    """
     gm, obs = spring
     names = ("stiffness", "damping", "mass")
     sub = {n: gm.params["nodes"]["s"][n] for n in names}
@@ -151,6 +204,8 @@ def test_fim_flags_unidentifiable_scale_direction(spring):
     v = np.asarray(rep.eigvecs[:, 0])
     assert abs(abs(v @ np.ones(3) / np.sqrt(3.0))) > 0.99, v
     assert rep.cond > 1e4
+    assert rep.rank == 2, rep.eigvals
+    assert bool(jnp.all(jnp.isinf(rep.crb))), rep.crb
 
 
 # ---------------------------------------------------------------------------
@@ -328,8 +383,16 @@ def _full_residual(gm, obs):
     return residual
 
 
+# Per push: tests/core/test_sysid.py::test_fit_lm_beats_adam_at_equal_budget and
+# tests/core/test_sysid_hold_never_raises_the_loss.py::test_fit_lm_on_the_spring_one_percent_off_stays_at_its_minimum
+@pytest.mark.slow  # an LM fit over a rollout: 7-10 s on CI
 @given(kf=st.floats(0.5, 2.0), cf=st.floats(0.5, 2.0))
-@settings(max_examples=8, deadline=None)
+# Absolute at the house floor, not ``EXAMPLES_COSTLY``: one example is
+# a 30-iteration Levenberg-Marquardt fit over a full rollout, seconds
+# rather than milliseconds.  Tiering it would let the ``ci`` profile
+# turn this single test into minutes; depth here is bought from the
+# cheaper properties instead.
+@settings(max_examples=20, deadline=None)
 def test_fit_lm_recovers_k_c_in_few_iterations(kf, cf):
     gm = _spring_gm()
     obs = _observations(gm)
@@ -375,6 +438,34 @@ def test_fit_progress_events_reach_observers(spring):
     gm.add_observer(lambda ev, data: seen.append(data["method"]) if ev == EVENT_FIT_PROGRESS else None)
     fit(gm, _loss_fn(gm, obs), n_iter=2, notify_every=0)
     assert seen == []
-    fit_lm(gm, _full_residual(gm, obs), n_iter=2)
+    # Started off the truth: from the truth itself the first proposal is
+    # within ``step_tol`` and the run converges after one event.
+    fit_lm(gm, _full_residual(gm, obs), params=_perturbed(gm, 1.2, 1.0), n_iter=2)
     gm._observers.clear()  # noqa: SLF001
     assert seen == ["lm", "lm"]
+
+
+def test_an_nd_leaf_is_labelled_by_the_index_of_the_element():
+    """A 6x6 leaf whose only unobserved element is ``H[0, 5]``.  The
+    label used to be the flat position, ``['H'][5]`` -- which, read as
+    the NumPy index it looks like, is the whole of row 5.  Each label
+    must now *be* the index of its element, in the row-major order the
+    columns are in."""
+    H = jnp.ones((6, 6), jnp.float32)
+    W = jnp.ones((6, 6)).at[0, 5].set(0.0)
+    X = jnp.asarray(np.random.default_rng(0).standard_normal((36, 50)),
+                    jnp.float32)
+    rep = fim(lambda p: (p["H"] * W).reshape(-1) @ X, {"H": H}, scale=None)
+    name, weight = rep.least_identifiable()
+    assert name == "['H'][0, 5]"
+    assert weight == pytest.approx(1.0)
+    assert rep.param_names[:7] == tuple(
+        f"['H'][0, {j}]" for j in range(6)) + ("['H'][1, 0]",)
+    assert len(set(rep.param_names)) == 36
+    # A 3-D leaf and a 1-D one side by side: every label is the index.
+    params = {"T": jnp.zeros((2, 1, 2)), "v": jnp.zeros(3)}
+    rep = fim(lambda p: jnp.concatenate([p["T"].reshape(-1), p["v"]]) * 2.0,
+              params, scale=None)
+    assert rep.param_names == (
+        "['T'][0, 0, 0]", "['T'][0, 0, 1]", "['T'][1, 0, 0]", "['T'][1, 0, 1]",
+        "['v'][0]", "['v'][1]", "['v'][2]")

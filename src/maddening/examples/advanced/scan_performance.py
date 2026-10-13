@@ -15,18 +15,17 @@ for post-hoc analysis (min, max, mean, energy calculations).
 
 Usage
 -----
-    cd /home/nick/MSF/MADDENING
-    source ../venvs/.maddening/bin/activate
-    python maddening/examples/scan_performance.py
+    python -m maddening.examples.advanced.scan_performance
+    python -m maddening.examples.advanced.scan_performance --steps 2000
+
+The timings include each method's first-call trace and compile, so the
+speed-up you see depends on ``--steps``: the longer the run, the more the
+per-step dispatch saved by ``lax.scan`` outweighs its compile.
 """
 
-import sys
+import argparse
 import os
 import time
-
-_project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
-if _project_root not in sys.path:
-    sys.path.insert(0, _project_root)
 
 import jax
 import jax.numpy as jnp
@@ -100,8 +99,12 @@ def benchmark_scan_history(n_steps: int) -> tuple[float, dict, dict]:
                      "velocity": float(final_state["ball"]["velocity"])}, history
 
 
-def main() -> None:
-    n_steps = 10000
+def main(argv=None) -> None:
+    parser = argparse.ArgumentParser(description="run() vs run_scan() timing")
+    parser.add_argument("--steps", type=int, default=10000,
+                        help="Steps per benchmark (default: 10000)")
+    args = parser.parse_args(argv)
+    n_steps = args.steps
     dt = 0.01
 
     print(f"Benchmarking {n_steps} steps (dt={dt}, total time={n_steps * dt:.0f}s)")
@@ -184,6 +187,7 @@ def main() -> None:
 
     # ---- sanity checks --------------------------------------------------
     assert pos_match, "Position mismatch between run() and run_scan()!"
+    assert vel_match, "Velocity mismatch between run() and run_scan()!"
     assert hist_match, "Position mismatch between run_scan() and run_scan_with_history()!"
     assert float(jnp.min(ball_pos)) >= -0.01, "Ball fell through the table!"
 
@@ -224,7 +228,7 @@ def main() -> None:
 
         plt.suptitle(f"Scan Performance Comparison ({n_steps} steps)", fontsize=13)
         plt.tight_layout()
-        out_path = os.path.join(_project_root, "scan_performance_result.png")
+        out_path = os.path.join(os.getcwd(), "scan_performance_result.png")
         plt.savefig(out_path, dpi=150)
         print(f"\nPlot saved to {out_path}")
     except ImportError:

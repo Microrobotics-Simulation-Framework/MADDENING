@@ -1,0 +1,1197 @@
+{
+  "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
+  "bomFormat": "CycloneDX",
+  "components": [
+    {
+      "bom-ref": "equinox==0.13.8",
+      "description": "Elegant easy-to-use neural networks in JAX.",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: repository",
+          "type": "vcs",
+          "url": "https://github.com/patrick-kidger/equinox"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "name": "License :: OSI Approved :: Apache Software License"
+          }
+        }
+      ],
+      "name": "equinox",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jax!=0.7.0,!=0.7.1,>=0.4.38"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxtyping>=0.2.20"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "typing-extensions>=4.5.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "wadler-lindig>=0.1.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "4"
+        }
+      ],
+      "purl": "pkg:pypi/equinox@0.13.8",
+      "type": "library",
+      "version": "0.13.8"
+    },
+    {
+      "bom-ref": "jax==0.11.2",
+      "description": "Differentiate, compile, and transform Numpy code.",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata: Home-page",
+          "type": "website",
+          "url": "https://github.com/jax-ml/jax"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "jax",
+      "properties": [
+        {
+          "name": "cdx:python:package:required-extra",
+          "value": "cuda12"
+        },
+        {
+          "name": "cdx:python:package:required-extra",
+          "value": "tpu"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jax-cuda12-plugin<=0.11.2,>=0.11.2; extra == \"cuda12-local\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jax-cuda12-plugin[with-cuda]<=0.11.2,>=0.11.2; extra == \"cuda\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jax-cuda12-plugin[with-cuda]<=0.11.2,>=0.11.2; extra == \"cuda12\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jax-cuda13-plugin<=0.11.2,>=0.11.2; extra == \"cuda13-local\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jax-cuda13-plugin[with-cuda]<=0.11.2,>=0.11.2; extra == \"cuda13\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jax-oneapi-plugin[with-oneapi]<=0.11.2,>=0.11.2; extra == \"oneapi\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jax-rocm7-plugin==0.11.2.*; extra == \"rocm7-local\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxlib<=0.11.2,>=0.11.2"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"cuda\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"cuda12\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"cuda12-local\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"cuda13\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"cuda13-local\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"oneapi\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"rocm7-local\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"tpu\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxlib==0.11.1; extra == \"ci\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxlib==0.11.2; extra == \"minimum-jaxlib\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "kubernetes; extra == \"k8s\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "libtpu==0.0.48.*; extra == \"tpu\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "ml_dtypes>=0.5.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "numpy>=2.1"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "opt_einsum"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "requests; extra == \"tpu\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "scipy>=1.15"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "xprof; extra == \"xprof\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "26"
+        }
+      ],
+      "purl": "pkg:pypi/jax@0.11.2",
+      "type": "library",
+      "version": "0.11.2"
+    },
+    {
+      "bom-ref": "jaxlib==0.11.2",
+      "description": "XLA library for JAX",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata: Home-page",
+          "type": "website",
+          "url": "https://github.com/jax-ml/jax"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "jaxlib",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "ml_dtypes>=0.5.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "numpy>=2.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "scipy>=1.14"
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "3"
+        }
+      ],
+      "purl": "pkg:pypi/jaxlib@0.11.2",
+      "type": "library",
+      "version": "0.11.2"
+    },
+    {
+      "bom-ref": "jaxtyping==0.3.11",
+      "description": "Type annotations and runtime checking for shape and dtype of JAX/NumPy/PyTorch/etc. arrays.",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: repository",
+          "type": "vcs",
+          "url": "https://github.com/patrick-kidger/jaxtyping"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "jaxtyping",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "wadler-lindig>=0.1.3"
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "1"
+        }
+      ],
+      "purl": "pkg:pypi/jaxtyping@0.3.11",
+      "type": "library",
+      "version": "0.3.11"
+    },
+    {
+      "bom-ref": "lineax==0.1.1",
+      "description": "Linear solvers in JAX and Equinox.",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: repository",
+          "type": "vcs",
+          "url": "https://github.com/google/lineax"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "name": "License :: OSI Approved :: Apache Software License"
+          }
+        }
+      ],
+      "name": "lineax",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "equinox>=0.11.10"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jax>=0.10.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxtyping>=0.2.24"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "typing-extensions>=4.5.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "4"
+        }
+      ],
+      "purl": "pkg:pypi/lineax@0.1.1",
+      "type": "library",
+      "version": "0.1.1"
+    },
+    {
+      "bom-ref": "ml_dtypes==0.6.0",
+      "description": "ml_dtypes is a stand-alone implementation of several NumPy dtype extensions used in machine learning.",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: repository",
+          "type": "vcs",
+          "url": "https://github.com/jax-ml/ml_dtypes"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: homepage",
+          "type": "website",
+          "url": "https://github.com/jax-ml/ml_dtypes"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "ml_dtypes",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "absl-py; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "numpy>=2.0.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "numpy>=2.1.0; python_version >= \"3.13\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "numpy>=2.3.0; python_version >= \"3.14\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pyink; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pylint>=2.6.0; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest-xdist; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "8"
+        }
+      ],
+      "purl": "pkg:pypi/ml-dtypes@0.6.0",
+      "type": "library",
+      "version": "0.6.0"
+    },
+    {
+      "bom-ref": "numpy==2.5.4",
+      "description": "Fundamental package for array computing in Python",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: download",
+          "type": "distribution",
+          "url": "https://pypi.org/project/numpy/#files"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: documentation",
+          "type": "documentation",
+          "url": "https://numpy.org/doc/"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: tracker",
+          "type": "issue-tracker",
+          "url": "https://github.com/numpy/numpy/issues"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: source",
+          "type": "other",
+          "url": "https://github.com/numpy/numpy"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: release notes",
+          "type": "other",
+          "url": "https://numpy.org/doc/stable/release"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: homepage",
+          "type": "website",
+          "url": "https://numpy.org"
+        }
+      ],
+      "licenses": [
+        {
+          "acknowledgement": "declared",
+          "expression": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0"
+        }
+      ],
+      "name": "numpy",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "0"
+        }
+      ],
+      "purl": "pkg:pypi/numpy@2.5.4",
+      "type": "library",
+      "version": "2.5.4"
+    },
+    {
+      "bom-ref": "opt_einsum==3.4.0",
+      "description": "Path optimization of einsum functions.",
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "opt_einsum",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "0"
+        }
+      ],
+      "purl": "pkg:pypi/opt-einsum@3.4.0",
+      "type": "library",
+      "version": "3.4.0"
+    },
+    {
+      "bom-ref": "PyYAML==6.0.3",
+      "description": "YAML parser and emitter for Python",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata: Download-URL",
+          "type": "distribution",
+          "url": "https://pypi.org/project/PyYAML/"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Documentation",
+          "type": "documentation",
+          "url": "https://pyyaml.org/wiki/PyYAMLDocumentation"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Bug Tracker",
+          "type": "issue-tracker",
+          "url": "https://github.com/yaml/pyyaml/issues"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Mailing lists",
+          "type": "other",
+          "url": "http://lists.sourceforge.net/lists/listinfo/yaml-core"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Source Code",
+          "type": "other",
+          "url": "https://github.com/yaml/pyyaml"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: CI",
+          "type": "other",
+          "url": "https://github.com/yaml/pyyaml/actions"
+        },
+        {
+          "comment": "from packaging metadata: Home-page",
+          "type": "website",
+          "url": "https://pyyaml.org/"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "PyYAML",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "0"
+        }
+      ],
+      "purl": "pkg:pypi/pyyaml@6.0.3",
+      "type": "library",
+      "version": "6.0.3"
+    },
+    {
+      "bom-ref": "scipy==1.18.1",
+      "description": "Fundamental algorithms for scientific computing in Python",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: download",
+          "type": "distribution",
+          "url": "https://github.com/scipy/scipy/releases"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: documentation",
+          "type": "documentation",
+          "url": "https://docs.scipy.org/doc/scipy/"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: tracker",
+          "type": "issue-tracker",
+          "url": "https://github.com/scipy/scipy/issues"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: source",
+          "type": "other",
+          "url": "https://github.com/scipy/scipy"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: homepage",
+          "type": "website",
+          "url": "https://scipy.org/"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "name": "License :: OSI Approved :: BSD License"
+          }
+        }
+      ],
+      "name": "scipy",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "Cython; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "array-api-strict>=2.3.1; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "asv; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "click<8.3.0; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "cython-lint>=0.12.2; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "gmpy2; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "hypothesis>=6.30; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "intersphinx_registry; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jupyterlite-pyodide-kernel; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jupyterlite-sphinx>=0.19.1; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jupytext; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "linkify-it-py; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "matplotlib>=3.5; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "meson; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "mpmath; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "mypy==1.19.1; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "myst-nb>=1.2.0; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "ninja; sys_platform != \"emscripten\" and extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "numpy<2.8,>=2.0.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "numpydoc; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pooch; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pooch; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pycodestyle; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pydata-sphinx-theme>=0.15.2; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pyrefly==0.63.0; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest-cov; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest-timeout; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest-xdist; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest>=8.0.0; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "ruff>=0.12.0; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "scikit-umfpack; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "scipy-doctest>=2.0.0; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinx-copybutton; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinx-design>=0.4.0; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinx<8.2.0,>=5.0.0; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "spin; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "tabulate; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "threadpoolctl; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "types-psutil; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "typing_extensions; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "40"
+        }
+      ],
+      "purl": "pkg:pypi/scipy@1.18.1",
+      "type": "library",
+      "version": "1.18.1"
+    },
+    {
+      "bom-ref": "typing_extensions==4.16.0",
+      "description": "Backported and Experimental Type Hints for Python 3.9+",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: Documentation",
+          "type": "documentation",
+          "url": "https://typing-extensions.readthedocs.io/"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Bug Tracker",
+          "type": "issue-tracker",
+          "url": "https://github.com/python/typing_extensions/issues"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Q & A",
+          "type": "other",
+          "url": "https://github.com/python/typing/discussions"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Changes",
+          "type": "release-notes",
+          "url": "https://github.com/python/typing_extensions/blob/main/CHANGELOG.md"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Repository",
+          "type": "vcs",
+          "url": "https://github.com/python/typing_extensions"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Home",
+          "type": "website",
+          "url": "https://github.com/python/typing_extensions"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "PSF-2.0"
+          }
+        }
+      ],
+      "name": "typing_extensions",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "0"
+        }
+      ],
+      "purl": "pkg:pypi/typing-extensions@4.16.0",
+      "type": "library",
+      "version": "4.16.0"
+    },
+    {
+      "bom-ref": "usd-core==26.8",
+      "description": "Pixar's Universal Scene Description",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: Documentation",
+          "type": "documentation",
+          "url": "https://openusd.org"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Discussion Group",
+          "type": "other",
+          "url": "https://forum.openusd.org"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Source",
+          "type": "other",
+          "url": "https://github.com/PixarAnimationStudios/OpenUSD"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Developer Docs",
+          "type": "other",
+          "url": "https://www.openusd.org/release/apiDocs.html"
+        },
+        {
+          "comment": "from packaging metadata: Home-page",
+          "type": "website",
+          "url": "https://openusd.org"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "name": "LicenseRef-TOST-1.0"
+          }
+        }
+      ],
+      "name": "usd-core",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "0"
+        }
+      ],
+      "purl": "pkg:pypi/usd-core@26.8",
+      "type": "library",
+      "version": "26.8"
+    },
+    {
+      "bom-ref": "wadler_lindig==0.1.7",
+      "description": "A Wadler–Lindig pretty-printer for Python.",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: repository",
+          "type": "vcs",
+          "url": "https://github.com/patrick-kidger/wadler_lindig"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "name": "License :: OSI Approved :: Apache Software License"
+          }
+        }
+      ],
+      "name": "wadler_lindig",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "hippogriffe==0.1.0; extra == 'docs'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "mkdocs-include-exclude-files==0.1.0; extra == 'docs'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "mkdocs-ipynb==0.1.0; extra == 'docs'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "mkdocs-material==9.6.7; extra == 'docs'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "mkdocs==1.6.1; extra == 'docs'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "mkdocstrings[python]==0.28.3; extra == 'docs'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "numpy; extra == 'dev'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pre-commit; extra == 'dev'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pymdown-extensions==10.14.3; extra == 'docs'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest; extra == 'dev'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "10"
+        }
+      ],
+      "purl": "pkg:pypi/wadler-lindig@0.1.7",
+      "type": "library",
+      "version": "0.1.7"
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "PyYAML==6.0.3"
+    },
+    {
+      "dependsOn": [
+        "jax==0.11.2",
+        "jaxtyping==0.3.11",
+        "typing_extensions==4.16.0",
+        "wadler_lindig==0.1.7"
+      ],
+      "ref": "equinox==0.13.8"
+    },
+    {
+      "dependsOn": [
+        "jaxlib==0.11.2",
+        "ml_dtypes==0.6.0",
+        "numpy==2.5.4",
+        "opt_einsum==3.4.0",
+        "scipy==1.18.1"
+      ],
+      "ref": "jax==0.11.2"
+    },
+    {
+      "dependsOn": [
+        "ml_dtypes==0.6.0",
+        "numpy==2.5.4",
+        "scipy==1.18.1"
+      ],
+      "ref": "jaxlib==0.11.2"
+    },
+    {
+      "dependsOn": [
+        "wadler_lindig==0.1.7"
+      ],
+      "ref": "jaxtyping==0.3.11"
+    },
+    {
+      "dependsOn": [
+        "equinox==0.13.8",
+        "jax==0.11.2",
+        "jaxtyping==0.3.11",
+        "typing_extensions==4.16.0"
+      ],
+      "ref": "lineax==0.1.1"
+    },
+    {
+      "dependsOn": [
+        "PyYAML==6.0.3",
+        "jax==0.11.2",
+        "jaxlib==0.11.2",
+        "lineax==0.1.1",
+        "numpy==2.5.4",
+        "scipy==1.18.1",
+        "usd-core==26.8"
+      ],
+      "ref": "maddening==0.4.0"
+    },
+    {
+      "dependsOn": [
+        "numpy==2.5.4"
+      ],
+      "ref": "ml_dtypes==0.6.0"
+    },
+    {
+      "ref": "numpy==2.5.4"
+    },
+    {
+      "ref": "opt_einsum==3.4.0"
+    },
+    {
+      "dependsOn": [
+        "numpy==2.5.4",
+        "typing_extensions==4.16.0"
+      ],
+      "ref": "scipy==1.18.1"
+    },
+    {
+      "ref": "typing_extensions==4.16.0"
+    },
+    {
+      "ref": "usd-core==26.8"
+    },
+    {
+      "dependsOn": [
+        "numpy==2.5.4"
+      ],
+      "ref": "wadler_lindig==0.1.7"
+    }
+  ],
+  "metadata": {
+    "component": {
+      "bom-ref": "maddening==0.4.0",
+      "description": "Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph",
+      "externalReferences": [
+        {
+          "comment": "from pyproject urls: Documentation",
+          "type": "documentation",
+          "url": "https://microrobotica.org/maddening/"
+        },
+        {
+          "comment": "from pyproject urls: Issues",
+          "type": "issue-tracker",
+          "url": "https://github.com/Microrobotics-Simulation-Framework/MADDENING/issues"
+        },
+        {
+          "comment": "from pyproject urls: Repository",
+          "type": "vcs",
+          "url": "https://github.com/Microrobotics-Simulation-Framework/MADDENING"
+        },
+        {
+          "comment": "from pyproject urls: Homepage",
+          "type": "website",
+          "url": "https://microrobotica.org/maddening/"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "LGPL-3.0-or-later"
+          }
+        }
+      ],
+      "name": "maddening",
+      "purl": "pkg:pypi/maddening@0.4.0",
+      "type": "library",
+      "version": "0.4.0"
+    },
+    "properties": [
+      {
+        "name": "cdx:reproducible",
+        "value": "true"
+      },
+      {
+        "name": "maddening:sbom:exclude-newer",
+        "value": "2026-10-13T00:00:00Z"
+      },
+      {
+        "name": "maddening:sbom:generator",
+        "value": "scripts/generate_sbom.py"
+      },
+      {
+        "name": "maddening:sbom:index",
+        "value": "https://pypi.org/simple"
+      },
+      {
+        "name": "maddening:sbom:install",
+        "value": "usd"
+      },
+      {
+        "name": "maddening:sbom:libc",
+        "value": "glibc 2.39"
+      },
+      {
+        "name": "maddening:sbom:marker:implementation_name",
+        "value": "cpython"
+      },
+      {
+        "name": "maddening:sbom:marker:os_name",
+        "value": "posix"
+      },
+      {
+        "name": "maddening:sbom:marker:platform_machine",
+        "value": "x86_64"
+      },
+      {
+        "name": "maddening:sbom:marker:platform_python_implementation",
+        "value": "CPython"
+      },
+      {
+        "name": "maddening:sbom:marker:platform_system",
+        "value": "Linux"
+      },
+      {
+        "name": "maddening:sbom:marker:python_full_version",
+        "value": "3.12.3"
+      },
+      {
+        "name": "maddening:sbom:marker:python_version",
+        "value": "3.12"
+      },
+      {
+        "name": "maddening:sbom:marker:sys_platform",
+        "value": "linux"
+      },
+      {
+        "name": "maddening:sbom:platform",
+        "value": "linux-x86_64"
+      },
+      {
+        "name": "maddening:sbom:requirement",
+        "value": "maddening[usd]"
+      },
+      {
+        "name": "maddening:sbom:resolver",
+        "value": "uv 0.11.15 (x86_64-unknown-linux-gnu)"
+      }
+    ],
+    "timestamp": "2026-10-13T00:00:00Z",
+    "tools": {
+      "components": [
+        {
+          "description": "CycloneDX Software Bill of Materials (SBOM) generator for Python projects and environments",
+          "externalReferences": [
+            {
+              "type": "build-system",
+              "url": "https://github.com/CycloneDX/cyclonedx-python/actions"
+            },
+            {
+              "type": "distribution",
+              "url": "https://pypi.org/project/cyclonedx-bom/"
+            },
+            {
+              "type": "documentation",
+              "url": "https://cyclonedx-bom-tool.readthedocs.io/"
+            },
+            {
+              "type": "issue-tracker",
+              "url": "https://github.com/CycloneDX/cyclonedx-python/issues"
+            },
+            {
+              "type": "license",
+              "url": "https://github.com/CycloneDX/cyclonedx-python/blob/main/LICENSE"
+            },
+            {
+              "type": "release-notes",
+              "url": "https://github.com/CycloneDX/cyclonedx-python/blob/main/CHANGELOG.md"
+            },
+            {
+              "type": "vcs",
+              "url": "https://github.com/CycloneDX/cyclonedx-python/"
+            },
+            {
+              "type": "website",
+              "url": "https://github.com/CycloneDX/cyclonedx-python/#readme"
+            }
+          ],
+          "group": "CycloneDX",
+          "licenses": [
+            {
+              "license": {
+                "acknowledgement": "declared",
+                "id": "Apache-2.0"
+              }
+            }
+          ],
+          "name": "cyclonedx-py",
+          "type": "application",
+          "version": "7.4.0"
+        },
+        {
+          "description": "Python library for CycloneDX",
+          "externalReferences": [
+            {
+              "type": "build-system",
+              "url": "https://github.com/CycloneDX/cyclonedx-python-lib/actions"
+            },
+            {
+              "type": "distribution",
+              "url": "https://pypi.org/project/cyclonedx-python-lib/"
+            },
+            {
+              "type": "documentation",
+              "url": "https://cyclonedx-python-library.readthedocs.io/"
+            },
+            {
+              "type": "issue-tracker",
+              "url": "https://github.com/CycloneDX/cyclonedx-python-lib/issues"
+            },
+            {
+              "type": "license",
+              "url": "https://github.com/CycloneDX/cyclonedx-python-lib/blob/main/LICENSE"
+            },
+            {
+              "type": "release-notes",
+              "url": "https://github.com/CycloneDX/cyclonedx-python-lib/blob/main/CHANGELOG.md"
+            },
+            {
+              "type": "vcs",
+              "url": "https://github.com/CycloneDX/cyclonedx-python-lib"
+            },
+            {
+              "type": "website",
+              "url": "https://github.com/CycloneDX/cyclonedx-python-lib/#readme"
+            }
+          ],
+          "group": "CycloneDX",
+          "licenses": [
+            {
+              "license": {
+                "acknowledgement": "declared",
+                "id": "Apache-2.0"
+              }
+            }
+          ],
+          "name": "cyclonedx-python-lib",
+          "type": "library",
+          "version": "11.12.0"
+        }
+      ]
+    }
+  },
+  "serialNumber": "urn:uuid:5332313b-da89-5587-b303-04bb46bcc29f",
+  "specVersion": "1.6",
+  "version": 1
+}

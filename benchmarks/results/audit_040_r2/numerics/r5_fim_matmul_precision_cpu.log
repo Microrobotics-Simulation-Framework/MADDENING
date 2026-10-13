@@ -1,0 +1,10 @@
+backend = cpu   devices = [CpuDevice(id=0)]
+jax version = 0.11.0
+jax_default_matmul_precision = None
+
+Exactly rank-deficient F (true rank 1 of 2), m=4000, n=2, float32:
+  default matmul precision           rank=1  lam0/lam_max= 0.0000e+00  cutoff=7.539e-06  ratio/cutoff=     0.00  crb=[inf inf]  warned=False
+  precision=highest                  rank=1  lam0/lam_max= 0.0000e+00  cutoff=7.539e-06  ratio/cutoff=     0.00  crb=[inf inf]  warned=False
+  precision=float32                  rank=1  lam0/lam_max= 0.0000e+00  cutoff=7.539e-06  ratio/cutoff=     0.00  crb=[inf inf]  warned=False
+  precision=tensorfloat32            rank=1  lam0/lam_max= 0.0000e+00  cutoff=7.539e-06  ratio/cutoff=     0.00  crb=[inf inf]  warned=False
+  precision=bfloat16                 rank=1  lam0/lam_max= 0.0000e+00  cutoff=7.539e-06  ratio/cutoff=     0.00  crb=[inf inf]  warned=False

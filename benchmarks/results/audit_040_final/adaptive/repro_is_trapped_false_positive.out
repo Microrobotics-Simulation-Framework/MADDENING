@@ -1,0 +1,9 @@
+dJ/dtheta at 0.3 =  3.375327e-02   at 0.37 = -1.778679e-02
+stationary point of the FROZEN objective: theta* = 0.343973370458
+   dJ_frozen/dtheta(theta*) =  2.642e-14
+   the problem has no symmetry fixing theta* = 0.343973 (the only reflection fixed point of this toy is theta = 0.5)
+   is_trapped_at(theta*)       = True
+   gradient_capture_ratio      = 0.393416
+
+what check_gradient_capture does there (on_blind='warn', the default):
+   returned ratio 1.2587660788328525; warnings: []

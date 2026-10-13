@@ -4,11 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "maddening"
-version = "0.3.1"
+version = "0.4.0"
 description = "Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph"
 readme = "README.md"
 license = "LGPL-3.0-or-later"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 authors = [
     { name = "Nicholas Ehsan Roy" },
 ]
@@ -25,20 +25,35 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Physics",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Visualization",
 ]
 
-# Base install: simulation engine (CPU JAX + NumPy + PyYAML).
+# Base install: simulation engine (CPU JAX + NumPy + PyYAML + lineax).
 # For GPU acceleration, add the cuda12 or tpu extra.
+#
+# `lineax` is a core dependency, not an extra: a coupling group at its
+# *default* settings (solver="ift", linear_solver="gmres") routes its
+# derivative rule through lineax, so a base install without it failed
+# at runtime on the default path.  lineax is small and pure JAX
+# (equinox + jaxtyping transitively), so the footprint is acceptable.
+# It is still imported lazily -- see the note on the `ift` extra.
+#
+# `scipy` is declared because the sparse interface mappings use it
+# directly (`scipy.spatial.KDTree`, the nearest-neighbour search of
+# `maddening.core.coupling.sparse_mapping`).  It adds nothing to an
+# install: jax and jaxlib already require it, and the floor is theirs
+# (jax 0.10 asks for scipy>=1.14).  It is imported by the builder that
+# needs it, not by `import maddening`.
 dependencies = [
     "jax>=0.10,<0.13",
     "jaxlib>=0.10,<0.13",
+    "lineax>=0.0.7",
     "numpy>=1.24",
     "pyyaml>=6.0",
+    "scipy>=1.14",
 ]
 
 [project.optional-dependencies]
@@ -49,10 +64,18 @@ dependencies = [
 cuda12 = ["jax[cuda12]>=0.10,<0.13"]
 tpu = ["jax[tpu]>=0.10,<0.13"]
 
-# ── Differentiable linear solve (experimental pilot, v0.3.1) ────────
-# `maddening.core.solver_utils.ift_linear_solve` lazy-imports lineax.
-# Install this extra to use it:  pip install maddening[ift]
-ift = ["lineax>=0.0.7"]
+# ── Differentiable linear solve (compatibility alias, v0.4.0) ───────
+# `lineax` moved into the base dependencies in v0.4.0 because the
+# default coupling solver needs it (see the note above).  This extra
+# is kept, deliberately empty, so `pip install maddening[ift]` keeps
+# resolving for anyone who pinned it in v0.3.x.  Removing it would
+# still install, but pip warns on an extra the package does not
+# declare (and is moving towards erroring), and warning at every
+# downstream install buys nothing.  The wheel keeps a bare
+# `Provides-Extra: ift` with no requirements.  lineax is still
+# imported lazily: `import maddening` must not pay lineax's ~1 s
+# import (equinox + jaxtyping + jax); only a Krylov solve does.
+ift = []
 
 # ── Cloud providers ────────────────────────────────────────────────
 # One extra per provider.  Installs SkyPilot WITH the provider SDK.
@@ -71,8 +94,14 @@ cloud-all = ["skypilot[all]>=0.11"]
 # Matplotlib-based visualization (time-series, 2D scene renderers)
 viz = ["matplotlib>=3.5"]
 
-# Rich-based terminal renderer (works over SSH, no GUI needed)
-terminal = ["rich>=12.0"]
+# Rich-based terminal renderer (works over SSH, no GUI needed), and
+# termaid for GraphManager.print_graph_diagram (a box-and-arrow drawing of
+# the graph; MIT, pure Python, no dependencies).  termaid is pinned below
+# 1.0 because the diagram leans on its 0.x parser: the subgraph-title form
+# it reads, the sequences it acts on inside a quoted label, and its theme
+# names.  tests/core/test_inspection_diagram.py pins each of those, so
+# raising the ceiling is a deliberate step taken after they pass.
+terminal = ["rich>=12.0", "termaid>=0.9,<1"]
 
 # ZMQ network transport for remote visualization and command channels
 network = ["pyzmq>=25.0"]
@@ -99,7 +128,11 @@ usd = ["usd-core>=21.8"]
 # WebRTC streaming (GStreamer + signaling)
 streaming = ["PyGObject>=3.42", "websockets>=11.0"]
 
-# SBOM generation
+# SBOM generation tool, for running cyclonedx-py by hand.
+# scripts/generate_sbom.py does not use this extra: it installs its own
+# pinned cyclonedx-bom into a separate venv, because the tool installed
+# next to maddening would list itself in maddening's SBOM.  Kept so that
+# `pip install maddening[sbom]` keeps resolving.
 sbom = ["cyclonedx-bom>=4.0"]
 
 # zstd compression for the binary state encoder (v0.2 #6).
@@ -129,6 +162,7 @@ client = [
 all = [
     "matplotlib>=3.5",
     "rich>=12.0",
+    "termaid>=0.9,<1",
     "pyzmq>=25.0",
     "fastapi>=0.100",
     "uvicorn>=0.20",
@@ -150,17 +184,25 @@ all = [
 #
 # httpx2 is pulled alongside httpx because starlette's testclient
 # auto-detects httpx2 when present and uses it preferentially.  This
-# closes the v0.2.1 StarletteDeprecationWarning loop (see C5 in
-# plans/MADDENING_v0.3.0_PLAN.md).
+# closes the v0.2.1 StarletteDeprecationWarning loop.
 ci = [
-    "fsspec>=2023.1",   # cloud checkpoint URLs (tests/core/test_checkpoint_cloud_urls.py)
+    "fsspec>=2023.1",   # cloud checkpoint URLs (tests/cloud/test_resume.py)
     "pytest>=7.0",
     "httpx>=0.24",
     "httpx2>=2.0",
     "matplotlib>=3.5",
     "rich>=12.0",
+    "termaid>=0.9,<1",  # print_graph_diagram (the terminal extra); see there
     "pyzmq>=25.0",
     "fastapi>=0.100",
+    # 1.7.0 is the first release whose testclient imports
+    # anyio.from_thread.BlockingPortal instead of the anyio.abc alias that
+    # anyio >= 4.14 deprecates.  Below it, every tests/api module fails to
+    # collect under filterwarnings = ["error"] (measured: starlette 1.6.0 +
+    # anyio 4.15.1 gives 11 collection errors; 1.7.0 gives 313 passed), so
+    # the floor replaces the warning filter that used to paper over it.
+    # Test environment only: the runtime `api` extra does not need it.
+    "starlette>=1.7.0",
     "uvicorn>=0.20",
     "websockets>=11.0",
     "equinox>=0.11",
@@ -170,15 +212,23 @@ ci = [
     # FMI 3.0 round-trip validation (v0.3.0 A1).  Test-only -- not a
     # runtime dep of maddening.fmi.
     "fmpy>=0.3",
-    # IFT coupling solver tests (v0.3.0 A4) and the sharded sparse
-    # iterative solver lineax-backed path (v0.3.0 A5).  Both are
-    # lazy-imported at runtime, so lineax stays out of base
-    # dependencies; CI / dev installs need it explicitly.  Promoting
-    # this to a user-facing [ift] extra + a friendlier import error
-    # is scheduled for v0.4.0 -- see plans/MADDENING_v0.4.0_PLAN.md.
-    "lineax>=0.0.7",
+    # (`lineax` used to be listed here: as of v0.4.0 it is a base
+    # dependency, so the base install already provides it.)
     # Property-based testing (hypothesis).
     "hypothesis>=6.165,<7",
+    # The declared build backend, so tests/test_packaging_py_typed.py can
+    # build a real wheel and assert the PEP 561 marker is in it without
+    # reaching the network for an isolated build.  MADDENING_REQUIRE_PACKAGING_TESTS
+    # in the CI test job turns "hatchling missing" into a failure rather
+    # than a silent skip of the only check that proves py.typed ships.
+    "hatchling>=1.21",
+    # Static type check (the blocking two-tier `typecheck` CI job; see
+    # docs/developer_guide/typing.md).  Pinned exactly: the per-package
+    # ceilings in typing_tiers.json are tied to this pyright release, and
+    # scripts/typing_baseline.py refuses to compare against ceilings taken
+    # under another one.  Bump it together with typing_tiers.json, never
+    # alone.  The dev extra keeps a floor.
+    "pyright==1.1.414",
 ]
 
 # Property-based node verification (user-facing).
@@ -189,12 +239,15 @@ verify = [
 
 # Development / testing (full -- requires display server for viz3d/gpu-viz)
 dev = [
-    "fsspec>=2023.1",   # cloud checkpoint URLs (tests/core/test_checkpoint_cloud_urls.py)
+    "fsspec>=2023.1",   # cloud checkpoint URLs (tests/cloud/test_resume.py)
     "pytest>=7.0",
     "httpx>=0.24",
     "httpx2>=2.0",
     "fmpy>=0.3",
-    "lineax>=0.0.7",
+    # `pyright` / `python scripts/typing_baseline.py` -- see
+    # docs/developer_guide/typing.md.  A floor here; the ci extra pins the
+    # exact release the typing_tiers.json ceilings were measured with.
+    "pyright>=1.1.414",
     "maddening[all]",
 ]
 
@@ -208,6 +261,12 @@ Issues        = "https://github.com/Microrobotics-Simulation-Framework/MADDENING
 packages = ["src/maddening"]
 
 [tool.hatch.build.targets.wheel.force-include]
+# PEP 561 marker.  Without it a downstream type checker MUST ignore every
+# annotation in the package, so the whole typing effort is invisible to
+# users of the wheel.  `tests/test_packaging_py_typed.py` builds the wheel and
+# asserts the member is present -- a force-include that looks right and
+# ships nothing is indistinguishable from no marker at all.
+"src/maddening/py.typed" = "maddening/py.typed"
 "src/maddening/usd/schema/generatedSchema.usda" = "maddening/usd/schema/generatedSchema.usda"
 "src/maddening/usd/schema/plugInfo.json" = "maddening/usd/schema/plugInfo.json"
 
@@ -215,28 +274,45 @@ packages = ["src/maddening"]
 testpaths = ["tests"]
 filterwarnings = [
     "error",
-    # GraphManager.compile() emits informational warnings about disconnected
-    # nodes and cycle staggering -- expected in unit tests with minimal graphs.
-    "ignore:WARNING. node .* is disconnected:UserWarning",
-    "ignore:WARNING. cycle detected:UserWarning",
+    # GraphManager.compile() emits an informational warning about a
+    # disconnected node -- expected in unit tests with minimal graphs.  (A
+    # staggered cycle is an INFO issue and a logging record since 0.2.1, not
+    # a warning: nothing here ignores one, so one that came back would fail.)
+    # (?s): a node's name may hold a line break, and "." must match it, or
+    # the warning for such a node is an error here and nowhere else.
+    "ignore:(?s)WARNING. node .* is disconnected:UserWarning",
+    # ... and about a coupling group whose block staggers an edge between two
+    # components (MADD-ANO-159): the drawn graphs of the serialisation and
+    # differential properties carry such groups.  Its own tests record it
+    # with catch_warnings(record=True) and simplefilter("always").
+    "ignore:.* is read from the previous step although no cycle runs through it:UserWarning",
+    # ... and about a dead band (MADD-ANO-254), under either of the
+    # advisory's two openings: it is due on EVERY group that sets atol > 0,
+    # whatever its member count and schedule, and the domain batteries, the
+    # searches and the drawn graphs build such groups on purpose (which of
+    # them a run builds depends on what Hypothesis draws, so the filter is
+    # here and not at each site).  The advisory's own tests read it from
+    # validate() and record compile()'s with pytest.warns, or with
+    # catch_warnings(record=True) and simplefilter("always").
+    "ignore:(?s).*declares a dead band (under iteration_mode='jacobi'|on \\d+ member):UserWarning",
     # RigidBody2DNode is deprecated but existing tests still exercise it
     "ignore:RigidBody2DNode is deprecated:DeprecationWarning",
     # solver='fori' is deprecated; the fori-vs-ift parity tests keep
     # exercising it until it is removed.
     "ignore:CouplingGroup solver='fori' is deprecated:DeprecationWarning",
+    # calibrate()/tune_coupling_params() are deprecated in favour of
+    # maddening.sysid.fit; their own tests still exercise them until 0.5.0.
+    "ignore:maddening.core.simulation.calibration:DeprecationWarning",
     # ZMQ sockets not always cleanly closed in tests
     "ignore::ResourceWarning:zmq",
     "ignore::pytest.PytestUnraisableExceptionWarning",
     # optax 0.2.x sets jax_pmap_shmap_merge which is deprecated in JAX 0.9+
     "ignore:Setting `jax_pmap_shmap_merge`:DeprecationWarning",
-    # anyio >= 4.14 deprecates the anyio.abc.BlockingPortal alias that
-    # starlette's testclient still imports at module level, which turns
-    # every tests/api collection into an error.  Fixed on starlette main
-    # (Kludex/starlette#3497) but not in any release as of 1.6.0; drop
-    # this filter and bump the starlette floor once it ships.
-    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",
     # SelkiesRenderer emits PerformanceWarning on CPU fallback
     "ignore::maddening.warnings.PerformanceWarning",
+    # The coupling tests deliberately run groups at 2**-100 and below; the
+    # warning's own tests record it with pytest.warns / catch_warnings.
+    "ignore::maddening.warnings.UnderflowRangeWarning",
     # SkyPilot deprecation warnings
     "ignore:.*--cloud.*--region.*--zone.*deprecated:UserWarning",
 ]
@@ -244,7 +320,7 @@ filterwarnings = [
 # doesn't elevate Unknown-Mark warnings to test errors. Mirrors the
 # convention already in MIME's pyproject.toml.
 markers = [
-    "slow: tests >5s wall-clock or that need a beefy machine (latency benchmarks, full-LBM smokes). Run with `pytest -m 'slow or not slow'`. Default suite excludes them.",
+    "slow: tests over 5 s on the CI runner, or that need a beefy machine (latency benchmarks, full-LBM smokes); see the test time budget in docs/developer_guide/testing_standards.md. Run with `pytest -m 'slow or not slow'`. Default suite excludes them.",
     "gpu: tests that require a CUDA device (auto-skipped on CPU-only hosts).",
 ]
 # Default-skip the slow lane in CI; opt in locally with

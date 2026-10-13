@@ -20,8 +20,18 @@ each heartbeat at a rate of ``heart_rate / 60``.
 
 import jax.numpy as jnp
 
-from maddening.core.node import BoundaryFluxSpec, BoundaryInputSpec, SimulationNode
-from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
+from maddening.core.node import (
+    BoundaryFluxSpec,
+    BoundaryInputSpec,
+    SimulationNode,
+    _method_with_params,
+)
+from maddening.core.compliance.metadata import (
+    DiscretizationOrder,
+    NodeMeta,
+    StabilityLevel,
+    ValidatedRegime,
+)
 from maddening.core.compliance.stability import stability
 from maddening.core.params import ParamSpec
 
@@ -93,6 +103,24 @@ class HeartPumpNode(SimulationNode):
         description="2-element Windkessel heart pump model",
         governing_equations="dP/dt = (Q_heart - (P-P_v)/R) / C",
         discretization="Forward Euler (explicit, 1st-order)",
+        discretization_order=DiscretizationOrder(
+            spatial=None,
+            temporal=1.0,
+            notes=(
+                "1st order globally in the arterial pressure, measured by "
+                "MADD-VER-012.  No spatial order -- the Windkessel "
+                "compartment is lumped.  The order holds, but the scheme is "
+                "not the plain forward Euler ``discretization`` above "
+                "names: ``update()`` advances the cardiac phase first and "
+                "evaluates the inflow waveform at the *end* of the step, "
+                "while the node's own ``derivatives()`` evaluates it at the "
+                "start, so the two disagree at O(dt) in the source term "
+                "(MADD-ANO-012).  Both samplings are 1st order.  The "
+                "measured order is also floored by the float32 downcast of "
+                "``backpressure`` (MADD-ANO-013), which caps the usable "
+                "refinement ladder."
+            ),
+        ),
         assumptions=(
             "Lumped parameters (spatially uniform arterial compartment)",
             "Rigid arterial walls (compliance is constant)",
@@ -234,23 +262,28 @@ class HeartPumpNode(SimulationNode):
             "flow_rate": Q_heart,
         }
 
-    def derivatives(self, state, boundary_inputs):
+    def derivatives(self, state, boundary_inputs, *, params=None):
         """Time derivatives for higher-order integration.
 
         Note: flow_rate derivative is not continuous (waveform has
         a discontinuity at systole/diastole transition), so we return
         an approximate zero for it.
+
+        The Windkessel constants come from the injected ``params`` when
+        the caller supplies them, by the same ``{**self.params,
+        **params}`` rule as ``update``.
         """
-        R = self.params["resistance"]
-        C = self.params["compliance"]
-        hr = self.params["heart_rate"]
-        sf = self.params["systole_fraction"]
-        P_venous = self.params["venous_pressure"]
+        p = self.params if params is None else {**self.params, **params}
+        R = p["resistance"]
+        C = p["compliance"]
+        hr = p["heart_rate"]
+        sf = p["systole_fraction"]
+        P_venous = p["venous_pressure"]
 
         P_art = state["arterial_pressure"]
         phase = state["phase"]
 
-        q_max = self._compute_q_max()
+        q_max = self._compute_q_max(p)
         Q_heart = _cardiac_output(phase, sf, q_max)
 
         P_downstream = boundary_inputs.get("backpressure", P_venous)
@@ -265,12 +298,20 @@ class HeartPumpNode(SimulationNode):
             "flow_rate": jnp.array(0.0, dtype=jnp.float32),
         }
 
-    def implicit_residual(self, state_new, state_old, boundary_inputs, dt):
+    def implicit_residual(self, state_new, state_old, boundary_inputs, dt, *, params=None):
         """Backward Euler residual for the pressure ODE.
 
         R(x_new) = x_new - x_old - dt * f(x_new, boundary_inputs)
         """
-        derivs = self.derivatives(state_new, boundary_inputs)
+        # Through the shared binder: empty ``params`` calls the two-argument
+        # form (a ``derivatives`` override that predates the keyword keeps
+        # working for every caller that passes none), and a non-empty one
+        # for such an override is the documented ValueError naming the
+        # class and the method -- not Python's TypeError from one call
+        # deeper (MADD-ANO-018's refusal contract, one method in).
+        derivs = _method_with_params(self, "derivatives", params)(
+            state_new, boundary_inputs,
+        )
         return {
             k: state_new[k] - state_old[k] - dt * derivs[k]
             for k in derivs

@@ -5,9 +5,23 @@ Provides a modular, thread-safe pipeline for real-time visualization of
 running simulations.
 """
 
+from typing import TYPE_CHECKING, Any
+
 from maddening.viz.renderer import Renderer, GraphInfo
 from maddening.viz.relay import StateRelay
 from maddening.viz.runner import RealtimeRunner
+
+if TYPE_CHECKING:
+    # PEP 562: the names below are resolved lazily by the module
+    # `__getattr__`, which a type checker cannot see through -- without
+    # these re-exports it reports every one of them as missing from
+    # `__all__`, and a downstream `from maddening.viz import X` is an error.
+    # Nothing here runs at import time; the lazy table stays the only
+    # runtime path.
+    from maddening.viz.backends.pygfx_viewer import GPUHistoryViewer
+    from maddening.viz.backends.pyvista_live import PyVistaLiveRenderer
+    from maddening.viz.history_viewer import HistoryViewer3D
+
 
 __all__ = [
     "Renderer",
@@ -40,7 +54,7 @@ _INSTALL_HINTS = {
 }
 
 
-def __getattr__(name):
+def __getattr__(name: str) -> Any:
     _lazy = {
         "HistoryViewer3D": ("maddening.viz.history_viewer", "HistoryViewer3D"),
         "GPUHistoryViewer": ("maddening.viz.backends.pygfx_viewer", "GPUHistoryViewer"),

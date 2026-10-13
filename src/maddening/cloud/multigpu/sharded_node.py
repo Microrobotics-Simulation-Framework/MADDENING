@@ -18,25 +18,219 @@ sharding or :class:`ShardedStencilNode` for stencil sharding.
 from __future__ import annotations
 
 import functools
-import inspect
-import warnings
 from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import lax
 from jax import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
-from maddening.cloud.multigpu.halo import halo_exchange
+from maddening.cloud.multigpu._scan_hazards import (
+    ScanHazard,
+    active_probe,
+    analyse_update_padded,
+    window_label,
+)
+from maddening.cloud.multigpu.halo import (
+    _BOUNDARY_MODES,
+    _global_edge_halos,
+    halo_exchange,
+)
+from maddening.core._quiet_warnings import quiet_warnings
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
-from maddening.core.node import SimulationNode
+from maddening.core.node import (
+    _detached_config,
+    BoundaryFluxSpec,  # noqa: F401 - named by boundary_flux_spec's annotation
+    SimulationNode,
+    _method_accepts_params,
+    _refuse_keyword_no_keyword_reaches,
+    _refuse_params_no_keyword_reaches,
+    _signature_takes_keyword,
+)
 from maddening.core.static_data import StaticArray, coerce_static_data_value
+
+#: Mesh axis :class:`ShardedPointwiseNode` shards over (the 1-D default
+#: name of :func:`~maddening.cloud.multigpu.device_mesh.create_device_mesh`).
+_MESH_AXIS = "devices"
+
+
+def _check_shard_divisible(
+    *,
+    wrapper: str,
+    owner: str,
+    what: str,
+    spatial_axis: int,
+    extent: int,
+    mesh_axis: str,
+    n_devices: int,
+) -> None:
+    """Refuse a shard that JAX would split unevenly, in the caller's terms.
+
+    ``jax.device_put`` raises :class:`jax.errors.IndivisibleError` from
+    inside the sharding machinery, naming neither the node, the field,
+    the cell count nor the device count.  Both Cartesian wrappers
+    validate up front instead, so the failure arrives at construction
+    with the two numbers that have to agree and the ways to make them.
+
+    Parameters
+    ----------
+    wrapper, owner, what : str
+        Wrapper class name, node name, and what is being sharded (e.g.
+        ``"state field 'f'"``), for the message.
+    spatial_axis, extent : int
+        The array axis being sharded and how many cells it has.
+    mesh_axis : str
+        Name of the mesh axis it is sharded over.
+    n_devices : int
+        How many devices that mesh axis has.
+
+    Raises
+    ------
+    ValueError
+        When *extent* is not a multiple of *n_devices*.
+    """
+    if n_devices <= 0 or extent % n_devices == 0:
+        return
+    nearest = ((extent // n_devices) + 1) * n_devices
+    divisors = sorted(d for d in range(1, n_devices + 1) if extent % d == 0)
+    if wrapper == "ShardedPointwiseNode":
+        # A pointwise node reads no neighbour, so it steps correctly under
+        # the partition layout too: every row is updated on its own.
+        way_out = (
+            ", or, for a node whose cells are its first array axis, use "
+            "ShardedUnstructuredNode with a layout from "
+            "build_unstructured_partition (edges may be empty), which pads "
+            "each shard to an explicit layout and accepts any (device, cell) "
+            "pair."
+        )
+    else:
+        # Until 0.4.0 this pointed a stencil node at ShardedUnstructuredNode,
+        # which hands update_padded [owned | ghosts] rather than
+        # [halo | interior | halo] and stepped the node wrong (it now
+        # refuses a node with a halo_width()).
+        way_out = (
+            ".  ShardedUnstructuredNode is not a way out for a stencil "
+            "node: it hands update_padded the partition layout, not "
+            "[halo | interior | halo], and refuses a node that declares a "
+            "halo_width()."
+        )
+    raise ValueError(
+        f"{wrapper} cannot shard {what} of node {owner!r}: spatial axis "
+        f"{spatial_axis} has {extent} cells and mesh axis {mesh_axis!r} has "
+        f"{n_devices} devices, which does not divide it "
+        f"({extent} % {n_devices} == {extent % n_devices}).  A sharded axis "
+        f"is split evenly across the devices, so the cell count must be a "
+        f"multiple of the device count: resize that axis to a multiple of "
+        f"{n_devices} (the next one up is {nearest}), or run on one of the "
+        f"device counts that do divide {extent} ({divisors}){way_out}"
+    )
+
+
+def _declared_halo_boundary(node: SimulationNode) -> Optional[str]:
+    """The halo fill ``node`` declares through an optional ``halo_boundary()``.
+
+    A stencil node whose ``update_padded`` reproduces its own ``update``
+    only under one fill of the halos at the edges of the global grid says
+    which by defining ``halo_boundary()`` (e.g.
+    :meth:`~maddening.nodes.lbm.LBMNode.halo_boundary`, ``"periodic"``,
+    because its unsharded streaming wraps).  Duck-typed, like
+    ``domain_integral_axes``: a node without the method declares nothing
+    and returns ``None``.
+
+    Raises
+    ------
+    ValueError
+        When the declared value is not one of the halo-exchange modes.
+    """
+    hook = getattr(node, "halo_boundary", None)
+    if hook is None:
+        return None
+    declared = hook() if callable(hook) else hook
+    if declared is None:
+        return None
+    if declared not in _BOUNDARY_MODES:
+        raise ValueError(
+            f"{type(node).__name__} {node.name!r}.halo_boundary() returned "
+            f"{declared!r}; it must be one of {_BOUNDARY_MODES} or None."
+        )
+    return str(declared)
+
+
+def _accepts_params(node: SimulationNode) -> bool:
+    """True when ``node.update(..., params=x)`` would deliver ``x``.
+
+    :func:`~maddening.core.node._method_accepts_params`, the one params
+    rule: the node's own :meth:`SimulationNode.accepts_params` when it has
+    one, the signature (explicit keyword or ``**kwargs``) otherwise, so
+    the wrapper answers exactly what the graph would have answered for
+    the unwrapped node.  The duck-typed fallback here used to accept only
+    the explicit keyword.
+    """
+    return _method_accepts_params(node, "update")
+
+
+class _ForwardsCouplingHooks:
+    """The flux and interface-correction hooks, forwarded to ``self._inner``.
+
+    Both wrappers that use this keep the graph-level state in the inner
+    node's own global view -- each field is the inner node's array, placed
+    with a ``NamedSharding`` -- so the inner node's
+    ``compute_boundary_fluxes`` and ``compute_interface_correction`` read
+    it exactly as they would unwrapped, and an index from
+    ``interface_dof_indices`` names the same cell.  Without the
+    forwarding a wrapped node published no fluxes (a flux edge from it
+    failed to compile) and no interface DOFs (a coupled interface was
+    silently left uncorrected).  ``params`` reaches the inner hook under
+    the one params rule, as in
+    :class:`~maddening.core.simulation.hybrid_node.HybridNode`.
+
+    :class:`~maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode`
+    does not use it: its state is in partition layout, where the inner
+    node's global indices name different cells.
+    """
+
+    _inner: SimulationNode
+
+    def boundary_flux_spec(self) -> dict[str, "BoundaryFluxSpec"]:
+        return self._inner.boundary_flux_spec()
+
+    def compute_boundary_fluxes(
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
+    ) -> dict:
+        if params is not None and _method_accepts_params(
+                self._inner, "compute_boundary_fluxes"):
+            return self._inner.compute_boundary_fluxes(
+                state, boundary_inputs, dt, params=params)
+        return self._inner.compute_boundary_fluxes(state, boundary_inputs, dt)
+
+    def interface_dof_indices(self) -> dict[str, tuple[str, int]]:
+        return self._inner.interface_dof_indices()
+
+    def update_evaluations(self) -> Optional[float]:
+        """The wrapped node's declaration: sharding does not change how often it rounds."""
+        return self._inner.update_evaluations()
+
+    def compute_interface_correction(
+        self,
+        pre_state: dict,
+        boundary_inputs: dict,
+        dt: float,
+        *,
+        params=None,
+    ) -> dict[str, list[tuple[int, Any]]]:
+        if params is not None and _method_accepts_params(
+                self._inner, "compute_interface_correction"):
+            return self._inner.compute_interface_correction(
+                pre_state, boundary_inputs, dt, params=params)
+        return self._inner.compute_interface_correction(
+            pre_state, boundary_inputs, dt)
 
 
 @stability(StabilityLevel.STABLE)
-class ShardedPointwiseNode(SimulationNode):
+class ShardedPointwiseNode(_ForwardsCouplingHooks, SimulationNode):
     """Data-parallel wrapper for a pointwise :class:`SimulationNode`.
 
     Only nodes with empty ``halo_width()`` can be wrapped; stencil nodes
@@ -49,10 +243,41 @@ class ShardedPointwiseNode(SimulationNode):
     mesh : Mesh
         JAX device mesh (1-D, axis name ``"devices"``).
     shard_axes : int or tuple[int, ...]
-        Which axes of the state arrays to shard.  Only single-axis
-        sharding is implemented; multi-axis raises
-        :class:`NotImplementedError`.
+        Which axis of the state arrays to shard, as a 1-tuple (an ``int``
+        is accepted and wrapped).  Any single axis is honoured: the
+        partition spec puts the mesh axis at that position and replicates
+        the rest.  A state field with too few dimensions to have that
+        axis is replicated, but at least one field must have it.
+        Multi-axis sharding raises :class:`NotImplementedError`.
+
+    Raises
+    ------
+    ValueError
+        If *node* is a stencil node, if the mesh has no ``"devices"``
+        axis, if *shard_axes* is not a non-negative axis index, if no
+        state field has the shard axis (a node of scalars, say: nothing
+        would be sharded), or if the sharded axis of a state field is not
+        divisible by the device count.
+
+    Notes
+    -----
+    ``initial_state`` is where the placement happens: it places every
+    state field onto the mesh with ``jax.device_put``.  ``update``
+    deliberately does neither a ``device_put`` nor a ``shard_map`` --
+    the operation is pointwise, so
+    XLA's SPMD propagation keeps a sharded input sharded through it, and
+    forcing a placement would insert a resharding collective on every
+    step.  The consequence is that the wrapper follows the sharding of
+    the state it is *given*: feed it an unsharded array (a state that
+    round-tripped through a checkpoint, a host array from a REST write)
+    and the step runs on one device, silently and correctly.  Start from
+    ``initial_state`` -- ``GraphManager`` does -- or ``device_put`` the
+    state yourself with :attr:`sharding`.
     """
+
+    # The wrapped node's ``params`` are this node's: one mapping, read and
+    # assigned through the attribute named here (``SimulationNode.params``).
+    _params_owner_attr = "_inner"
 
     def __init__(
         self,
@@ -70,18 +295,102 @@ class ShardedPointwiseNode(SimulationNode):
 
         if isinstance(shard_axes, int):
             shard_axes = (shard_axes,)
+        shard_axes = tuple(shard_axes)
 
         if len(shard_axes) > 1:
             raise NotImplementedError(
                 f"Multi-axis pointwise sharding (axes={shard_axes}) is "
                 "not yet implemented. Use a single shard axis."
             )
+        if len(shard_axes) != 1 or int(shard_axes[0]) != shard_axes[0] \
+                or shard_axes[0] < 0:
+            raise ValueError(
+                f"shard_axes={shard_axes!r} must be a single non-negative "
+                "axis index (an int or a 1-tuple)."
+            )
+        shard_axis = int(shard_axes[0])
+        if _MESH_AXIS not in mesh.axis_names:
+            raise ValueError(
+                f"ShardedPointwiseNode shards over a mesh axis named "
+                f"{_MESH_AXIS!r}, which mesh.axis_names={mesh.axis_names} "
+                "does not have.  Build the mesh with "
+                "create_device_mesh(shape=(n,)) (its 1-D default axis name), "
+                "or use ShardedStencilNode, which takes an axis_map."
+            )
 
         super().__init__(name=node.name, timestep=node.delta_t, **node.params)
         self._inner = node
+        # One node, one params dict: the wrapper's ``params`` IS the
+        # wrapped node's (``_params_owner_attr``), so a write through any
+        # surface (REST, sysid, a recompile) reaches the ``self.params``
+        # the inner ``update`` actually reads, and so does an assignment
+        # (``node.params = {...}``), on either of the two.  This statement
+        # drops the copy the base constructor stored a line above; a copy
+        # silently strands the write on the wrapper.
+        self.params = node.params
         self._mesh = mesh
         self._shard_axes = shard_axes
-        self._sharding = NamedSharding(mesh, P("devices"))
+        self._shard_axis = shard_axis
+        # The requested axis, not always axis 0: ``P("devices")`` names
+        # the *first* array axis, so a caller asking for axis 1 used to
+        # get axis 0 sharded and an IndivisibleError blaming an axis they
+        # had not chosen.  Leading axes are replicated (``None``).
+        self._sharding = NamedSharding(
+            mesh, P(*([None] * shard_axis + [_MESH_AXIS])),
+        )
+        self._n_devices = int(mesh.shape[_MESH_AXIS])
+        self._validate_state_divisible(node)
+        # Graph parameter contract: the wrapper is a params node exactly
+        # when the node it wraps is one.  A hook that names ``params``
+        # where no keyword reaches it is refused, as the graph refuses it
+        # for the node unwrapped: answered "takes none", the node would
+        # run on its constructor's constants.
+        _refuse_params_no_keyword_reaches(node, caller="ShardedPointwiseNode")
+        self._inner_accepts_params = _accepts_params(node)
+
+    def _validate_state_divisible(self, node: SimulationNode) -> None:
+        """Refuse at construction what ``device_put`` would refuse later.
+
+        A node that cannot build its initial state yet (one waiting for
+        a ``static_data_provider``, say) is left alone: the same check
+        runs again in :meth:`initial_state`, where the arrays are real.
+        """
+        try:
+            state = node.initial_state()
+        except Exception:      # noqa: BLE001 - construction must not depend on it
+            return
+        self._check_state_divisible(state)
+
+    def _check_state_divisible(self, state: dict) -> None:
+        # A field too short to have the shard axis is replicated, so a
+        # node none of whose fields has it was accepted and ran whole on
+        # every device -- a wrapper that sharded nothing and said nothing.
+        if not any(jnp.ndim(arr) > self._shard_axis for arr in state.values()):
+            fields = ", ".join(
+                f"{field!r} ({jnp.ndim(arr)}-d)" for field, arr in state.items()
+            ) or "none"
+            raise ValueError(
+                f"ShardedPointwiseNode cannot shard {type(self._inner).__name__} "
+                f"{self._inner.name!r} along array axis {self._shard_axis}: no "
+                f"state field has that axis (state fields: {fields}).  A field "
+                "with too few axes is replicated, so every device would run the "
+                "whole node and nothing would be sharded.  Choose a shard_axes "
+                "entry that a state field has, or leave the node unwrapped."
+            )
+        for field, arr in state.items():
+            if jnp.ndim(arr) <= self._shard_axis:
+                continue       # too few axes to shard: replicated
+            _check_shard_divisible(
+                wrapper=type(self).__name__, owner=self._inner.name,
+                what=f"state field {field!r}", spatial_axis=self._shard_axis,
+                extent=int(jnp.shape(arr)[self._shard_axis]),
+                mesh_axis=_MESH_AXIS, n_devices=self._n_devices,
+            )
+
+    @property
+    def sharding(self) -> NamedSharding:
+        """The placement ``initial_state`` gives every sharded field."""
+        return self._sharding
 
     def halo_width(self) -> dict[int, int]:
         """ShardedPointwiseNode only wraps pointwise nodes (no halo)."""
@@ -89,15 +398,30 @@ class ShardedPointwiseNode(SimulationNode):
 
     def initial_state(self) -> dict:
         state = self._inner.initial_state()
+        self._check_state_divisible(state)
         sharded = {}
         for field, arr in state.items():
-            if arr.ndim > self._shard_axes[0]:
+            if arr.ndim > self._shard_axis:
                 sharded[field] = jax.device_put(arr, self._sharding)
             else:
                 sharded[field] = arr
         return sharded
 
-    def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:
+    def update(
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
+    ) -> dict:
+        """Delegate to the wrapped node, forwarding injected ``params``.
+
+        ``params`` (the node's entry of ``GraphManager.params``) is
+        handed to an inner ``update(..., params=)``; a node on the
+        3-argument contract is called without it.
+        """
+        if self._inner_accepts_params and params is not None:
+            # `_inner_accepts_params` was computed from the inner node's
+            # signature; `SimulationNode.update` does not declare it.
+            return self._inner.update(
+                state, boundary_inputs, dt,
+                params=params)  # pyright: ignore[reportCallIssue]
         return self._inner.update(state, boundary_inputs, dt)
 
     def state_fields(self) -> list[str]:
@@ -106,11 +430,24 @@ class ShardedPointwiseNode(SimulationNode):
     def boundary_input_spec(self):
         return self._inner.boundary_input_spec()
 
+    # -- graph parameter contract (proxied to the inner node) -----------
+
+    def accepts_params(self, *, method: str = "update") -> bool:
+        if method != "update":
+            return super().accepts_params(method=method)
+        return self._inner_accepts_params
+
+    def params_pytree(self) -> dict:
+        return self._inner.params_pytree() if self._inner_accepts_params else {}
+
+    def param_specs(self) -> dict:
+        return self._inner.param_specs() if self._inner_accepts_params else {}
+
     def to_dict(self) -> dict:
         d = self._inner.to_dict() if hasattr(self._inner, "to_dict") else {}
         d["sharded"] = True
         d["shard_axes"] = self._shard_axes
-        return d
+        return _detached_config(d)
 
 
 def _params_signature(params) -> tuple:
@@ -124,7 +461,7 @@ def _params_signature(params) -> tuple:
 
 
 @stability(StabilityLevel.STABLE)
-class ShardedStencilNode(SimulationNode):
+class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
     """Pencil-decomposition wrapper for a stencil :class:`SimulationNode`.
 
     On each step, every state field listed in the node's
@@ -149,10 +486,93 @@ class ShardedStencilNode(SimulationNode):
         Spatial axes not appearing as values of ``axis_map`` are
         replicated on every device; their halos do not need exchange.
     boundary : str
-        Boundary mode for halo exchange (``"periodic"``, ``"edge"``,
-        or ``"zero"``).  Default ``"edge"`` -- replicate own edge.
-        ``update_padded`` applies the physical BCs after the exchange.
+        How the halos at the edges of the *global* grid are filled
+        (``"periodic"``, ``"edge"`` or ``"zero"``, exactly as
+        :func:`~maddening.cloud.multigpu.halo.halo_exchange` documents);
+        interior halos always come from the neighbouring shard.  The same
+        fill is used on a mesh axis of one device, and on a halo axis
+        ``axis_map`` leaves unsharded.  Default ``"edge"`` -- each edge
+        cell repeated across its halo -- for a node that applies its
+        physical boundary conditions in ``update_padded`` after the
+        exchange.  A node that declares ``halo_boundary()`` must be given
+        exactly that mode (see the note below).  One string for every
+        axis; anything else is refused at construction.  A sharded
+        ``StaticArray``'s halos are filled periodically under
+        ``"periodic"`` and with the edge cell repeated under the other two
+        (see :meth:`update`).
+
+    Raises
+    ------
+    ValueError
+        If *node* is pointwise, if ``axis_map`` is empty (nothing would
+        be sharded), names a mesh axis the
+        mesh does not have or a spatial axis with no declared halo, if a
+        sharded extent is not divisible by the devices on its mesh axis
+        (see the note below), if *boundary* is not one of the three modes
+        (a per-axis dict included), or if *boundary* -- the default
+        ``"edge"`` included -- differs from the mode the node declares, or
+        from the one a wrapped ``ShardedStencilNode`` was built with.
+
+    Notes
+    -----
+    **A node may declare its halo boundary.**  Some stencil nodes impose
+    no condition at the edges of their grid in ``update_padded``: what
+    arrives from the halo *is* the boundary condition.
+    :class:`~maddening.nodes.lbm.LBMNode` is one -- its unsharded
+    ``update`` streams periodically (``jnp.roll``), so its sharded step is
+    the same model only with periodic halos.  Such a node defines
+    ``halo_boundary()``, and a *boundary* that differs from it -- the
+    default ``"edge"`` included -- is refused at construction, because it
+    would make the sharded node compute something the unsharded node does
+    not.  Wrap an ``LBMNode`` with ``boundary="periodic"``.  (Before 0.4.0
+    an ``LBMNode`` wrapped with the default ``"edge"`` ran, and a walled
+    channel's centreline velocity moved by 0.64% against the unsharded
+    node.)  :class:`~maddening.nodes.heat.HeatNode` declares ``"edge"``
+    for the opposite reason: it closes its rod ends itself, from its
+    ``left_temperature`` / ``right_temperature`` inputs, so any other fill
+    would be ignored, and the refusal says to pass those inputs instead.
+
+    **Each sharded extent must divide by the devices on its mesh axis.**
+    A pencil decomposition gives every device the same slab, so a 17-cell
+    axis over 3 devices has no layout; construction refuses it, naming
+    the cell count and the device count.  Pad the grid to a multiple, or
+    choose a device count that divides it.
+    :class:`~maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode`
+    takes any (device, cell) pair, but it is not a way out for a stencil
+    node: it hands ``update_padded`` the partition layout (``[owned cells
+    | ghost cells]``), not ``[halo | interior | halo]``, and since 0.4.0
+    refuses a node that declares a ``halo_width()``.  (Until then this
+    note recommended it, and a ``HeatNode`` wrapped that way stepped
+    every cell wrong without an error.)
+
+    **A domain integral carried in the state is not a grid field.**  A
+    node that declares its integral's initial value, or a graph feeding a
+    step's output back, puts the integral in the state; it is placed as
+    the step returns it -- replicated once reduced over every mesh axis
+    ``axis_map`` uses, stacked along the unreduced ones of
+    ``domain_integral_axes()`` otherwise -- and handed to
+    ``update_padded`` unpadded (a per-shard one as this shard's slice).
+    Before 0.4.0 it was split and halo-padded like a grid field, which a
+    vector integral could not survive.
+
+    **A mesh axis** ``axis_map`` **leaves unused replicates the node.**
+    Every device along it holds the same block, so a domain integral is
+    neither summed nor stacked over it (that would count each block once
+    per device there); it is replicated along it.  Until 0.4.0 the
+    default reduction summed over it, which JAX refused at the first
+    step with an error about ``psum`` naming neither the node nor the
+    axis.
+
+    **An empty** ``axis_map`` **is refused.**  It would shard no spatial
+    axis: every device would run the whole node, which is the unsharded
+    node at the cost of a wrapper.  Before 0.4.0 an ``LBMNode`` wrapped
+    with ``axis_map={}`` was accepted and did exactly that, and a
+    ``HeatNode`` was refused with a message about its ``grid_x`` static.
     """
+
+    # The wrapped node's ``params`` are this node's: one mapping, read and
+    # assigned through the attribute named here (``SimulationNode.params``).
+    _params_owner_attr = "_inner"
 
     def __init__(
         self,
@@ -166,6 +586,86 @@ class ShardedStencilNode(SimulationNode):
             raise ValueError(
                 f"{type(node).__name__} has empty halo_width() -- use "
                 "ShardedPointwiseNode for pointwise sharding."
+            )
+        # An empty axis_map shards nothing: every device runs the whole
+        # node.  Until 0.4.0 an LBMNode was accepted that way, and a
+        # HeatNode refused only because its ``grid_x`` static named a
+        # shard axis the map did not have -- a message about the static,
+        # not about the map.  Refused first, as ShardedPointwiseNode
+        # refuses a node none of whose fields it could shard.
+        if not axis_map:
+            raise ValueError(
+                f"ShardedStencilNode cannot wrap {type(node).__name__} "
+                f"{node.name!r} with an empty axis_map: no spatial axis would "
+                "be sharded, so every device would run the whole node.  Map a "
+                "mesh axis to each spatial axis to shard, one the node "
+                f"declares a halo on (halo_width() == {dict(halo)}), e.g. "
+                f"axis_map={{{mesh.axis_names[0]!r}: {min(halo)}}}; or leave "
+                "the node unwrapped."
+            )
+
+        # One mode for every axis, and a known one.  Until 0.4.0 nothing
+        # checked: an unknown string failed only when the first step was
+        # traced (inside halo_exchange), and on a halo axis axis_map
+        # leaves unsharded anything but "periodic"/"edge" -- a typo, or a
+        # per-axis dict -- was silently filled with zeros.
+        if not isinstance(boundary, str):
+            raise ValueError(
+                f"ShardedStencilNode: boundary must be one mode for every "
+                f"axis, one of {_BOUNDARY_MODES}; got "
+                f"{type(boundary).__name__} {boundary!r}.  Per-mesh-axis "
+                "modes are a halo_exchange feature: the wrapper also fills "
+                "halo axes axis_map leaves unsharded, which have no mesh "
+                "axis to key a mode by."
+            )
+        if boundary not in _BOUNDARY_MODES:
+            raise ValueError(
+                f"ShardedStencilNode: unknown boundary mode {boundary!r}; "
+                f"expected one of {_BOUNDARY_MODES}."
+            )
+
+        # The halo fill at the global edges.  A node that declares one
+        # (``halo_boundary()``) must be given exactly that one -- the
+        # default ``"edge"`` included.  For LBMNode the halo is the
+        # boundary condition, so another fill is another model; for
+        # HeatNode, which closes its rod ends itself, another fill would be
+        # ignored without a word.  A built-in node may add what to do
+        # instead through the private ``_halo_boundary_hint()`` (internal
+        # for now, not part of the node contract).  A node that declares nothing is
+        # wrapped exactly as before.
+        declared = _declared_halo_boundary(node)
+        if declared is not None and boundary != declared:
+            hint = getattr(node, "_halo_boundary_hint", None)
+            hint = hint() if callable(hint) else hint
+            raise ValueError(
+                f"ShardedStencilNode: {type(node).__name__} {node.name!r} declares "
+                f"halo_boundary() == {declared!r}, the one fill of the halos at "
+                "the edges of the global grid it takes, but was given "
+                f"boundary={boundary!r}"
+                f"{' (the default)' if boundary == 'edge' else ''}.  With another "
+                "fill the sharded node would silently compute a different model "
+                "from the unsharded one, or silently ignore the fill.  Pass "
+                f"boundary={declared!r}." + (f"  {hint}" if hint else "")
+            )
+        # One ShardedStencilNode inside another.  The outer wrapper calls
+        # the inner one's ``update_padded``, which forwards straight to the
+        # node it wraps, so the inner wrapper's halo fill never runs: the
+        # outer fill replaces it.  The inner wrapper was checked against
+        # its node as above, but declares no ``halo_boundary()`` of its
+        # own, so an outer ``"edge"`` (the default) around an inner
+        # ``"periodic"`` LBM wrapper was accepted and ran another model.
+        # The fill the inner wrapper was built with is the one it takes.
+        if isinstance(node, ShardedStencilNode) and boundary != node._boundary:
+            raise ValueError(
+                f"ShardedStencilNode: the node to wrap is itself a "
+                f"ShardedStencilNode ({type(node._inner).__name__} "
+                f"{node.name!r}) built with boundary={node._boundary!r}, but "
+                f"the outer wrapper was given boundary={boundary!r}"
+                f"{' (the default)' if boundary == 'edge' else ''}.  Only the "
+                "outer wrapper's halo fill runs -- the inner one's "
+                "update_padded forwards to the node it wraps -- so the inner "
+                f"fill would be silently replaced.  Pass "
+                f"boundary={node._boundary!r}, or wrap the node itself once."
             )
 
         # Validate axis_map keys against the mesh and warn on covered axes
@@ -188,6 +688,11 @@ class ShardedStencilNode(SimulationNode):
 
         super().__init__(name=node.name, timestep=node.delta_t, **node.params)
         self._inner = node
+        # The wrapper's ``params`` IS the inner node's
+        # (``_params_owner_attr``), not a copy of it, so a write or an
+        # assignment through either reaches the code that reads it.  This
+        # statement drops the copy the base constructor stored a line above.
+        self.params = node.params
         self._mesh = mesh
         self._axis_map = dict(axis_map)
         self._boundary = boundary
@@ -206,40 +711,49 @@ class ShardedStencilNode(SimulationNode):
         # StaticArray declared with ``replication="shard"`` and validate
         # that its shard_axis lines up with one of the spatial axes this
         # wrapper actually shards.
-        self._sharded_static: dict[str, StaticArray] = {}
-        for k, v in node.static_data.items():
-            v_coerced = coerce_static_data_value(v, node_name=node.name, key=k)
-            if isinstance(v_coerced, StaticArray) and v_coerced.replication == "shard":
-                if v_coerced.shard_axis not in sharded_spatial:
-                    raise ValueError(
-                        f"StaticArray {k!r} declares shard_axis="
-                        f"{v_coerced.shard_axis} but {type(node).__name__} "
-                        f"shards spatial axes {sorted(sharded_spatial)} via "
-                        "ShardedStencilNode (per axis_map.values())."
-                    )
-                self._sharded_static[k] = v_coerced
+        self._sharded_static: dict[str, StaticArray] = (
+            self._classify_sharded_static(node.static_data)
+        )
+        # Per-device materialisation of those statics, cached across
+        # calls.  See ``_materialise_sharded_statics``.
+        self._static_device_cache: Optional[tuple] = None
+
+        # A pencil decomposition splits each sharded axis evenly, so the
+        # grid extent has to be a multiple of the devices on that axis.
+        # Unvalidated, that surfaced as an IndivisibleError from inside
+        # ``device_put`` on the first ``initial_state`` or first step,
+        # naming neither the node nor either number.
+        self._check_divisible_extents()
 
         # Probe inner.update_padded's signature once.  Nodes ported to
         # v0.2.1 accept `static_padded=` and `shard_info=`; v0.2-era
         # nodes do not.  If the node has sharded statics declared but
         # its signature does not accept `static_padded`, that is a
         # contract violation and we raise here rather than at first
-        # trace.
-        sig = inspect.signature(node.update_padded)
-        params = sig.parameters
-        has_var_kw = any(
-            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+        # trace.  So is a signature that names one of the three keywords
+        # where no keyword reaches it (``shard_info=None, /``): the hook
+        # plainly means to take it, and would be called without it.
+        for keyword in ("static_padded", "shard_info"):
+            _refuse_keyword_no_keyword_reaches(
+                node, "update_padded", keyword, caller="ShardedStencilNode")
+        _refuse_params_no_keyword_reaches(
+            node, "update_padded", caller="ShardedStencilNode")
+        self._inner_accepts_static_padded = _signature_takes_keyword(
+            node.update_padded, "static_padded",
         )
-        self._inner_accepts_static_padded = (
-            "static_padded" in params or has_var_kw
-        )
-        self._inner_accepts_shard_info = (
-            "shard_info" in params or has_var_kw
+        self._inner_accepts_shard_info = _signature_takes_keyword(
+            node.update_padded, "shard_info",
         )
         # Graph parameter contract on the sharded path: an inner
         # ``update_padded(..., params=None)`` receives the node's entry of
         # ``GraphManager.params`` (replicated across shards).
-        self._inner_accepts_params = "params" in params
+        #
+        # The one params rule (explicit keyword or ``**kwargs``), asked
+        # through the inner node's own probe.  A ``**kwargs`` node that
+        # did not get ``params`` silently fell back to its constructor
+        # constant, so the injected leaf never entered the trace and
+        # d(loss)/d(param) came back exactly 0.0 with no error anywhere.
+        self._inner_accepts_params = _method_accepts_params(node, "update_padded")
         if self._sharded_static and not self._inner_accepts_static_padded:
             raise ValueError(
                 f"{type(node).__name__} declares sharded static_data "
@@ -251,20 +765,118 @@ class ShardedStencilNode(SimulationNode):
 
         # Cache for shard_map-wrapped update functions, keyed by state
         # shape signature.  Built once per shape, then reused so the JAX
-        # trace cache hits on every subsequent step.
+        # trace cache hits on every subsequent step.  Dropped by
+        # :meth:`invalidate_static_cache` (every ``compile()``): each entry
+        # is a trace of the inner node as it read its params then.
         self._local_update_fn = self._build_local_update()
         self._sharded_cache: dict[tuple, Any] = {}
+        # The field shapes the inner node's ``initial_state()`` builds,
+        # read lazily and dropped with the compiled functions; see
+        # :meth:`_check_state_matches_inner`.
+        self._inner_state_shapes: Optional[dict[str, tuple[int, ...]]] = None
 
     def halo_width(self) -> dict[int, int]:
         """Same as the wrapped node -- sharding does not change the stencil."""
         return self._inner.halo_width()
 
+    def _check_divisible_extents(self, state: Optional[dict] = None) -> None:
+        """Refuse a grid this mesh cannot split evenly, naming both numbers.
+
+        Checks every state field and every sharded ``StaticArray`` on
+        each axis of ``axis_map``.  A node that cannot build its initial
+        state at construction time (one waiting for a
+        ``static_data_provider``) is skipped here and checked again in
+        :meth:`initial_state`, where the arrays are real.
+        """
+        if state is None:
+            try:
+                state = self._inner.initial_state()
+            except Exception:  # noqa: BLE001 - construction must not depend on it
+                state = {}
+        # A domain integral is not a grid field: it is never split along a
+        # spatial axis (a 3-vector drag on two devices used to be refused
+        # here as "3 cells").
+        integrals = set(self._inner.domain_integral_fields())
+        for mesh_axis, spatial_axis in self._axis_map.items():
+            n_devices = int(self._mesh.shape[mesh_axis])
+            for field, arr in state.items():
+                if field in integrals or jnp.ndim(arr) <= spatial_axis:
+                    continue
+                _check_shard_divisible(
+                    wrapper=type(self).__name__, owner=self._inner.name,
+                    what=f"state field {field!r}", spatial_axis=spatial_axis,
+                    extent=int(jnp.shape(arr)[spatial_axis]),
+                    mesh_axis=mesh_axis, n_devices=n_devices,
+                )
+            for key, static in self._sharded_static.items():
+                if static.shard_axis != spatial_axis:
+                    continue
+                shape = tuple(jnp.shape(static.value))
+                if spatial_axis >= len(shape):
+                    continue
+                _check_shard_divisible(
+                    wrapper=type(self).__name__, owner=self._inner.name,
+                    what=f"static array {key!r}", spatial_axis=spatial_axis,
+                    extent=int(shape[spatial_axis]),
+                    mesh_axis=mesh_axis, n_devices=n_devices,
+                )
+
     def initial_state(self) -> dict:
-        state = self._inner.initial_state()
-        return {
-            field: jax.device_put(arr, self._sharding_for_field(arr))
-            for field, arr in state.items()
-        }
+        state = self._node_initial_state()
+        self._check_divisible_extents(state)
+        integrals = set(self._inner.domain_integral_fields())
+        out = {}
+        for field, arr in state.items():
+            if field in integrals:
+                out[field] = self._place_integral(field, arr)
+            else:
+                out[field] = jax.device_put(arr, self._sharding_for_field(arr))
+        return out
+
+    def _node_initial_state(self) -> dict:
+        """The initial state of the node this wrapper steps, as that node builds it.
+
+        For a ``ShardedStencilNode`` nested in this one, that is the node
+        *it* wraps: the outer wrapper calls the inner one's
+        ``update_padded``, which forwards straight to its node, so the
+        inner wrapper's placement is not part of the model.  Read from the
+        inner wrapper's ``initial_state()`` instead, a per-shard
+        (unreduced) domain integral arrived already stacked along its
+        unreduced mesh axes and :meth:`_place_integral` stacked it again:
+        ``(2, 2)`` on two devices where a step returns ``(2,)``, so
+        ``step()`` changed the state's shape and ``run_scan`` refused the
+        carry.
+        """
+        if isinstance(self._inner, ShardedStencilNode):
+            return self._inner._node_initial_state()
+        return self._inner.initial_state()
+
+    def _integral_spec(self, key: str) -> P:
+        """The placement of domain integral ``key``, as the step returns it.
+
+        Replicated (``P()``) once reduced over every mesh axis ``axis_map``
+        uses; stacked along the unreduced ones (one leading dimension
+        each) otherwise.  See :meth:`_integral_reduction`.
+        """
+        _, unreduced = self._integral_reduction(key)
+        return P(*unreduced) if unreduced else P()
+
+    def _place_integral(self, key: str, arr) -> jax.Array:
+        """An initial value of domain integral ``key``, placed as a step returns it.
+
+        Until 0.4.0 an integral in ``initial_state`` was placed like a grid
+        field, sharded along the spatial axes: a scalar was left alone by
+        luck, a 3-vector on two devices failed (``IndivisibleError``, then
+        a false "3 cells" refusal).  A per-shard (unreduced) integral's
+        value is stacked along its unreduced mesh axes, so a scan carry
+        keeps its shape.
+        """
+        _, unreduced = self._integral_reduction(key)
+        arr = jnp.asarray(arr)
+        if unreduced:
+            lead = tuple(int(self._mesh.shape[a]) for a in unreduced)
+            arr = jnp.broadcast_to(arr, lead + tuple(arr.shape))
+        return jax.device_put(arr, NamedSharding(self._mesh, self._integral_spec(key)))
 
     def state_fields(self) -> list[str]:
         return self._inner.state_fields()
@@ -280,12 +892,27 @@ class ShardedStencilNode(SimulationNode):
         *,
         static_padded=None,
         shard_info=None,
+        params=None,
     ):
+        """Forward to the wrapped node's ``update_padded``.
+
+        What an outer ``ShardedStencilNode`` calls when this wrapper is
+        the node it wraps.  ``params`` is forwarded under the one params
+        rule, as ``static_padded`` and ``shard_info`` are under theirs.
+        In the 0.4.0 development tree this took no ``params``, so the
+        outer wrapper read the nested node as a params-free one, the
+        node's leaves never reached ``GraphManager.params``, and a
+        ``run_scan(params=)`` write of ``thermal_diffusivity`` moved
+        nothing (0.0 K, against 30.9 K for the singly wrapped rod), with
+        no error.
+        """
         kwargs = {}
         if self._inner_accepts_static_padded and static_padded is not None:
             kwargs["static_padded"] = static_padded
         if self._inner_accepts_shard_info and shard_info is not None:
             kwargs["shard_info"] = shard_info
+        if self._inner_accepts_params and params is not None:
+            kwargs["params"] = params
         return self._inner.update_padded(
             state_padded, boundary_inputs, dt, **kwargs
         )
@@ -296,7 +923,14 @@ class ShardedStencilNode(SimulationNode):
 
     # -- graph parameter contract (proxied to the inner node) -----------
 
-    def accepts_params(self) -> bool:
+    def accepts_params(self, *, method: str = "update") -> bool:
+        # ``update`` and ``update_padded`` both hand ``params`` to the
+        # wrapped node's ``update_padded``, so both answer for it.  An
+        # outer wrapper asks ``"update_padded"``, and the base class would
+        # answer from this wrapper's own signature -- which says nothing
+        # about the node it forwards to.
+        if method not in ("update", "update_padded"):
+            return super().accepts_params(method=method)
         return self._inner_accepts_params
 
     def params_pytree(self) -> dict:
@@ -310,11 +944,27 @@ class ShardedStencilNode(SimulationNode):
         return dict(getattr(self._inner, "domain_integral_axes", dict)())
 
     def _integral_reduction(self, key: str):
-        """``(reduce_axes, unreduced_axes)`` for a domain-integral key."""
+        """``(reduce_axes, unreduced_axes)`` for a domain-integral key.
+
+        Both are mesh axes ``axis_map`` uses, in mesh order.  A mesh axis
+        ``axis_map`` leaves unused splits nothing: the state, every
+        grid-shaped input and every sharded static are replicated along
+        it (their partition specs never name it), so every device along
+        it holds the same block and computes the same partial.  Summing
+        the partials over it would count the block once per device --
+        JAX refused that ``psum`` at the first step, naming neither the
+        node nor the axis -- and stacking them along it would repeat
+        each partial, so the stacked values no longer summed to the
+        domain integral.  Such an axis is neither reduced nor stacked
+        over, whether ``domain_integral_axes()`` names it or not; the
+        result is replicated along it.  ``ShardedUnstructuredNode``
+        treats every mesh axis but its own the same way.
+        """
         mesh_axes = tuple(self._mesh.axis_names)
+        used = tuple(a for a in mesh_axes if a in self._axis_map)
         axes = self.domain_integral_axes().get(key)
         if axes is None:
-            return mesh_axes, ()
+            return used, ()
         axes = tuple(axes)
         unknown = [a for a in axes if a not in mesh_axes]
         if unknown:
@@ -322,7 +972,8 @@ class ShardedStencilNode(SimulationNode):
                 f"domain_integral_axes[{key!r}] names mesh axes {unknown} "
                 f"not in mesh.axis_names={mesh_axes}"
             )
-        return axes, tuple(a for a in mesh_axes if a not in axes)
+        return (tuple(a for a in used if a in axes),
+                tuple(a for a in used if a not in axes))
 
     # ------------------------------------------------------------------
     # update path
@@ -338,14 +989,33 @@ class ShardedStencilNode(SimulationNode):
         """
         inner = self._inner
         mesh = self._mesh
-        exchange_axes = self._exchange_axes
         boundary = self._boundary
-        replicated_halo_axes = self._replicated_halo_axes
         strip_fn = self._strip_halos
         field_needs_halo = self._field_needs_halo
         sharded_static = self._sharded_static
         axis_map = self._axis_map  # {mesh_axis: spatial_axis}
-        halo_widths = inner.halo_width()
+        # The halo layout is read from the node whenever the update is
+        # built -- at construction and on every ``compile()`` -- rather
+        # than kept from construction: a node's halo can follow one of its
+        # parameters (``HeatNode``'s is 1 at ``stencil_order=2`` and 2 at
+        # 4).  Kept, a ``stencil_order`` write and a recompile padded each
+        # shard with one halo cell and stripped two, and the sharded rod
+        # stepped a field matching neither order (4.0e-2 off both).
+        halo_widths = dict(inner.halo_width())
+        unhaloed = sorted(sa for sa in axis_map.values() if sa not in halo_widths)
+        if unhaloed:
+            raise ValueError(
+                f"ShardedStencilNode {self.name!r}: axis_map shards spatial "
+                f"axes {unhaloed}, which {type(inner).__name__}.halo_width() "
+                f"= {halo_widths} no longer lists; the node's halo changed "
+                "after the wrapper was built.  Rebuild the wrapper."
+            )
+        exchange_axes = [(ma, sa, halo_widths[sa]) for ma, sa in axis_map.items()]
+        replicated_halo_axes = {
+            sa: h for sa, h in halo_widths.items() if sa not in set(axis_map.values())
+        }
+        self._exchange_axes = exchange_axes
+        self._replicated_halo_axes = replicated_halo_axes
         state_set = set(inner.state_fields())
         integrals = set(inner.domain_integral_fields())
         integral_reduction = {k: self._integral_reduction(k) for k in integrals}
@@ -356,9 +1026,19 @@ class ShardedStencilNode(SimulationNode):
 
         # Pre-compute per-static halo-exchange descriptors. A sharded
         # static gets halo-exchanged only on the single mesh axis that
-        # maps to its shard_axis, with ``boundary="edge"`` (statics
-        # don't evolve in time -- periodic wrap would be wrong even when
-        # the state uses periodic).
+        # maps to its shard_axis.  At the global edges its halo is filled
+        # periodically when the wrapper is periodic, and by repeating the
+        # edge cell otherwise.  The halo fill is a question about space,
+        # not time -- which cells lie beyond the edge -- and on a periodic
+        # grid those are the opposite edge's cells, for a static as much as
+        # for the state.  Until 0.4.0 statics were always edge-filled,
+        # "because statics don't evolve", and a periodic node that read a
+        # static in its halo stepped ~3% off the unsharded node with no
+        # error.  Under "edge" or "zero" there is no cell beyond the edge:
+        # the state's halo there is a boundary condition the wrapper
+        # imposes, a static has none to impose, and it keeps the edge fill
+        # it always had.
+        static_boundary = "periodic" if boundary == "periodic" else "edge"
         static_exchange: dict[str, list[tuple[str, int, int]]] = {}
         for k, sa in sharded_static.items():
             descriptors: list[tuple[str, int, int]] = []
@@ -379,13 +1059,12 @@ class ShardedStencilNode(SimulationNode):
                 n = out.shape[sa]
                 left = jax.lax.slice_in_dim(out, 0, h, axis=sa)
                 right = jax.lax.slice_in_dim(out, n - h, n, axis=sa)
-                if boundary == "periodic":
-                    left_halo, right_halo = right, left
-                elif boundary == "edge":
-                    left_halo, right_halo = left, right
-                else:  # zero
-                    left_halo = jnp.zeros_like(left)
-                    right_halo = jnp.zeros_like(right)
+                # An unsharded axis is the whole axis, so both its halos
+                # are global halos -- filled exactly as halo_exchange
+                # fills them on a sharded one (the same helper).
+                left_halo, right_halo = _global_edge_halos(
+                    left, right, spatial_axis=sa, halo=h, boundary=boundary,
+                )
                 out = jnp.concatenate([left_halo, out, right_halo], axis=sa)
             return out
 
@@ -397,10 +1076,47 @@ class ShardedStencilNode(SimulationNode):
                 )
             return arr2
 
+        def _analyse_static_reads(padded, local_bi, local_dt, padded_static,
+                                  shard_info, extra_kwargs):
+            """How ``update_padded`` reads each sharded static (MADD-ANO-068).
+
+            One extra trace of the node, never compiled, with the statics
+            and the ``shard_info`` offsets as explicit inputs; see
+            :func:`~maddening.cloud.multigpu._scan_hazards.analyse_update_padded`.
+            """
+            if "static_padded" not in extra_kwargs:
+                return {}
+            keys = sorted(padded_static)
+            axes = sorted(shard_info) if "shard_info" in extra_kwargs else []
+
+            def traced(statics, offsets):
+                kwargs = dict(extra_kwargs)
+                kwargs["static_padded"] = dict(zip(keys, statics))
+                if axes:
+                    kwargs["shard_info"] = {
+                        sax: (off, shard_info[sax][1]) for sax, off in zip(axes, offsets)
+                    }
+                return inner.update_padded(padded, local_bi, local_dt, **kwargs)
+
+            closed = jax.make_jaxpr(traced)(
+                [padded_static[k] for k in keys], [shard_info[a][0] for a in axes])
+            layout = []
+            for k in keys:
+                descriptors = static_exchange[k]
+                axis = sharded_static[k].shard_axis
+                halo = int(descriptors[0][2]) if descriptors else 0
+                layout.append((k, axis, halo, int(padded_static[k].shape[axis])))
+            return analyse_update_padded(closed, layout)
+
         def _local_update(local_state, local_bi, local_dt, local_static,
-                          local_params, *, grid_bi=frozenset()):
-            # 1. Halo-pad state.
-            padded = {f: _pad_like_state(arr) for f, arr in local_state.items()}
+                          local_params, *, grid_bi=frozenset(),
+                          local_extents=None, analyse=None):
+            # 1. Halo-pad state.  A domain integral carried in the state
+            #    is not a grid field: passed through unpadded.
+            padded = {
+                f: (arr if f in integrals else _pad_like_state(arr))
+                for f, arr in local_state.items()
+            }
 
             # 1b. Grid-shaped boundary inputs (a per-cell body force, a
             #     wall-mask update) arrive as this shard's slice and are
@@ -412,13 +1128,15 @@ class ShardedStencilNode(SimulationNode):
                 for k, v in local_bi.items()
             }
 
-            # 2. Halo-pad sharded statics (boundary="edge").
+            # 2. Halo-pad sharded statics (periodic under a periodic
+            #    wrapper, the edge cell repeated otherwise).
             padded_static: dict[str, Any] = {}
             for k, arr in local_static.items():
                 descriptors = static_exchange[k]
                 if descriptors:
                     padded_static[k] = halo_exchange(
-                        arr, mesh=mesh, axes=descriptors, boundary="edge",
+                        arr, mesh=mesh, axes=descriptors,
+                        boundary=static_boundary,
                     )
                 else:
                     padded_static[k] = arr
@@ -426,19 +1144,17 @@ class ShardedStencilNode(SimulationNode):
             # 3. Compute shard_info: {spatial_axis: (global_offset,
             #    local_extent)} for every spatial axis the node shards.
             #    ``global_offset`` is a traced JAX scalar — usable in
-            #    dynamic_slice, not in Python integer slicing.
+            #    dynamic_slice, not in Python integer slicing.  The local
+            #    extent was fixed before tracing, from the global grid
+            #    (:meth:`_local_extents`).  It used to be read here off the
+            #    first local state field long enough to have the axis, in
+            #    sorted key order -- a domain integral carried in the state
+            #    included -- so a vector integral named to sort first gave
+            #    HeatNode an extent of 2 on 4-cell blocks, and its right rod
+            #    end was never closed (70.9 K off, no error).
             shard_info: dict[int, tuple[Any, int]] = {}
             for ma, sax in axis_map.items():
-                extent = None
-                for arr in local_state.values():
-                    if sax < arr.ndim:
-                        extent = arr.shape[sax]
-                        break
-                if extent is None:
-                    for arr in local_static.values():
-                        if sax < arr.ndim:
-                            extent = arr.shape[sax]
-                            break
+                extent = (local_extents or {}).get(sax)
                 if extent is None:
                     continue
                 offset = lax.axis_index(ma) * extent
@@ -452,23 +1168,33 @@ class ShardedStencilNode(SimulationNode):
                 extra_kwargs["shard_info"] = shard_info
             if accepts_params and local_params:
                 extra_kwargs["params"] = local_params
+            if analyse is not None:
+                analyse.append(_analyse_static_reads(
+                    padded, local_bi, local_dt, padded_static, shard_info,
+                    extra_kwargs))
             new_padded = inner.update_padded(
                 padded, local_bi, local_dt, **extra_kwargs
             )
 
-            # 5. Classify outputs: state fields → strip halos; declared
-            #    integrals → psum across the full mesh; otherwise raise
-            #    (the out_specs build below would also catch it).
+            # 5. Classify outputs: declared integrals → psum across the
+            #    mesh axes axis_map uses (unless domain_integral_axes()
+            #    says otherwise); state fields → strip halos; otherwise raise
+            #    (the out_specs build below would also catch it).  An
+            #    integral first: a node whose ``state_fields()`` also lists
+            #    it (the default lists every ``initial_state`` key) had it
+            #    stripped like a grid field and never summed, and shard_map
+            #    refused the unreplicated result with an error about
+            #    out_specs.
             out: dict[str, Any] = {}
             for k, v in new_padded.items():
-                if k in state_set:
-                    out[k] = strip_fn(v, original=local_state[k])
-                elif k in integrals:
+                if k in integrals:
                     reduce_axes, unreduced = integral_reduction[k]
                     red = lax.psum(v, axis_name=reduce_axes) if reduce_axes else v
                     # One leading axis per unreduced mesh axis: the local
                     # value is that shard's slice of the stacked result.
                     out[k] = red[(None,) * len(unreduced)] if unreduced else red
+                elif k in state_set:
+                    out[k] = strip_fn(v, original=local_state[k], halo=halo_widths)
                 else:
                     raise ValueError(
                         f"{type(inner).__name__}.update_padded returned "
@@ -508,9 +1234,31 @@ class ShardedStencilNode(SimulationNode):
         fn = self._sharded_cache.get(key)
         if fn is not None:
             return fn
+        # Bare shard_map outside jit incurs ~250ms/call of Python dispatch
+        # overhead on CPU; wrapping it in jit reduces that to microseconds.
+        # When ShardedStencilNode is used inside GraphManager's jitted step
+        # function the outer jit would absorb this anyway, but the eager
+        # path (standalone .update calls in tests) needs the explicit jit.
+        fn = jax.jit(self._shard_mapped(state, boundary_inputs, static, params))
+        self._sharded_cache[key] = fn
+        return fn
 
-        state_specs = {f: self._spec_for_field(arr) for f, arr in state.items()}
+    def _shard_mapped(self, state: dict, boundary_inputs: dict, static: dict,
+                      params=None, **local_kwargs):
+        """The ``shard_map`` of the local update for these input shapes.
+
+        ``local_kwargs`` reach the local update (``analyse=`` collects how
+        the node reads its statics; see :meth:`_xla_scan_hazards`).
+        """
+        # A domain integral fed back as state is placed as the step returns
+        # it, not split along a spatial axis like a grid field.
+        integrals = set(self._inner.domain_integral_fields())
+        state_specs = {
+            f: (self._integral_spec(f) if f in integrals else self._spec_for_field(arr))
+            for f, arr in state.items()
+        }
         grid_bi = self._grid_shaped_boundary_inputs(state, boundary_inputs)
+        self._refuse_misshapen_inputs(state, boundary_inputs, grid_bi)
         bi_specs = {
             k: (self._spec_for_field(jnp.asarray(v)) if k in grid_bi else P())
             for k, v in boundary_inputs.items()
@@ -530,20 +1278,220 @@ class ShardedStencilNode(SimulationNode):
             out_specs[k] = P(*unreduced) if unreduced else P()
 
         params_specs = jax.tree.map(lambda _: P(), params if params else {})
-        sm = shard_map(
-            functools.partial(self._local_update_fn, grid_bi=grid_bi),
+        local_extents = self._local_extents(state, static)
+        return shard_map(
+            functools.partial(self._local_update_fn, grid_bi=grid_bi,
+                              local_extents=local_extents, **local_kwargs),
             mesh=self._mesh,
             in_specs=(state_specs, bi_specs, P(), static_specs, params_specs),
             out_specs=out_specs,
         )
-        # Bare shard_map outside jit incurs ~250ms/call of Python dispatch
-        # overhead on CPU; wrapping it in jit reduces that to microseconds.
-        # When ShardedStencilNode is used inside GraphManager's jitted step
-        # function the outer jit would absorb this anyway, but the eager
-        # path (standalone .update calls in tests) needs the explicit jit.
-        fn = jax.jit(sm)
-        self._sharded_cache[key] = fn
-        return fn
+
+    def _statics_replicated_over_devices(self) -> dict[str, tuple]:
+        """``{key: ((mesh axis, devices), ...)}`` for each sharded static
+        replicated over a mesh axis of two or more devices.
+
+        A sharded static is split along the one mesh axis
+        :meth:`_spec_for_static_key` names for its ``shard_axis`` and
+        replicated over every other: an axis ``axis_map`` leaves unused,
+        and on a pencil the axis that splits the other spatial axis.  The
+        declaration half of the MADD-ANO-068 condition; whether the node
+        reads the static in the miscompiled pattern is
+        :meth:`_xla_scan_hazards`'s question.
+        """
+        out: dict[str, tuple] = {}
+        # Classified afresh, as every step does: ``_sharded_static`` is
+        # refreshed only when a step materialises the statics, and a node
+        # whose static_data gained a sharded key since must not be missed.
+        for key, sa in self._classify_sharded_static(self._inner.static_data).items():
+            split = next((ma for ma, sax in self._axis_map.items()
+                          if sax == sa.shard_axis), None)
+            replicated = tuple((str(a), int(n)) for a, n in self._mesh.shape.items()
+                               if a != split and int(n) >= 2)
+            if replicated:
+                out[key] = replicated
+        return out
+
+    def _xla_scan_hazards(self, state: dict, boundary_inputs: dict, dt,
+                          params=None) -> list[ScanHazard]:
+        """The statics XLA would miscompile this step for inside a loop.
+
+        MADD-ANO-068: on jaxlib 0.10.2 to 0.11.2 a step traced inside
+        ``lax.scan`` (or another loop) is compiled wrongly when the node
+        reads a sharded static in its halo, reads another array through a
+        window at a ``shard_info`` offset, and the static is replicated
+        over a mesh axis of two or more devices
+        (:meth:`_statics_replicated_over_devices`).  The node's
+        ``update_padded`` is traced once more, with the halos and
+        ``shard_info`` this step would hand it, and walked
+        (:func:`~maddening.cloud.multigpu._scan_hazards.analyse_update_padded`);
+        nothing is compiled.  Empty when no static is replicated that way,
+        which costs nothing.
+        """
+        replicated = self._statics_replicated_over_devices()
+        if not replicated:
+            return []
+        # Materialised first: it refreshes ``_sharded_static`` and rebuilds
+        # the local update when the statics' structure changed.
+        static = self._materialise_sharded_statics()
+        found: list = []
+        jax.make_jaxpr(self._shard_mapped(state, boundary_inputs, static, params,
+                                          analyse=found))(
+            state, boundary_inputs, jnp.asarray(dt), static, params if params else {})
+        node = self._inner
+        while isinstance(node, ShardedStencilNode):
+            node = node._inner
+        hazards: list[ScanHazard] = []
+        for key in sorted(replicated):
+            if not found:
+                # The local update was never traced: nothing was learnt,
+                # so every replicated static counts.
+                hazards.append(ScanHazard(
+                    node=self.name, node_type=type(node).__name__, static=key,
+                    shard_axis=self._sharded_static[key].shard_axis,
+                    replicated_over=replicated[key], window=""))
+                continue
+            halo = any(result.get(key, (False, []))[0] for result in found)
+            windows = [w for result in found for w in result.get(key, (False, []))[1]]
+            if halo and windows:
+                hazards.append(ScanHazard(
+                    node=self.name, node_type=type(node).__name__, static=key,
+                    shard_axis=self._sharded_static[key].shard_axis,
+                    replicated_over=replicated[key], window=window_label(windows)))
+        return hazards
+
+    def _local_extents(self, state: dict, static: dict) -> dict[int, int]:
+        """``{spatial_axis: cells per block}`` for every sharded axis.
+
+        Worked out before tracing, from the global shapes: a grid field's
+        extent along the axis divided by the devices on its mesh axis.  A
+        grid field is a state field that is not a domain integral and has
+        the axis; a sharded ``StaticArray`` split along the axis stands in
+        when no state field has it.  A domain integral carried in the
+        state is not on the grid and never sets the extent (before 0.4.0
+        the first field in sorted key order did, integral or not).
+
+        Raises
+        ------
+        ValueError
+            When the inner node reads ``shard_info`` and two grid fields
+            disagree about an axis's extent: they are split into blocks of
+            different sizes, and one ``(offset, extent)`` pair cannot
+            describe both.
+        """
+        integrals = set(self._inner.domain_integral_fields())
+        out: dict[int, int] = {}
+        for mesh_axis, spatial_axis in self._axis_map.items():
+            extents = {
+                f"state field {f!r}": int(jnp.shape(arr)[spatial_axis])
+                for f, arr in sorted(state.items())
+                if f not in integrals and jnp.ndim(arr) > spatial_axis
+            }
+            if not extents:
+                extents = {
+                    f"static array {k!r}": int(jnp.shape(arr)[spatial_axis])
+                    for k, arr in sorted(static.items())
+                    if k in self._sharded_static
+                    and self._sharded_static[k].shard_axis == spatial_axis
+                    and jnp.ndim(arr) > spatial_axis
+                }
+            if not extents:
+                continue
+            if len(set(extents.values())) > 1 and self._inner_accepts_shard_info:
+                listed = ", ".join(f"{what} has {n}" for what, n in extents.items())
+                raise ValueError(
+                    f"ShardedStencilNode {self.name!r}: the grid fields of "
+                    f"{type(self._inner).__name__} disagree about the extent of "
+                    f"spatial axis {spatial_axis} ({listed} cells), so they are "
+                    "split into blocks of different sizes, and the one "
+                    "(offset, extent) pair update_padded receives in "
+                    f"shard_info[{spatial_axis}] cannot describe both.  Give "
+                    "every field sharded along this axis the grid's extent, or "
+                    "declare a field that is one value for the whole domain in "
+                    "domain_integral_fields()."
+                )
+            global_extent = next(iter(extents.values()))
+            out[spatial_axis] = global_extent // int(self._mesh.shape[mesh_axis])
+        return out
+
+    def _classify_sharded_static(self, static_data) -> dict[str, StaticArray]:
+        """Pick the ``replication="shard"`` entries out of ``static_data``.
+
+        Validates that every such array's ``shard_axis`` is one of the
+        spatial axes this wrapper actually shards.  Called from
+        ``__init__`` and again whenever the inner node's static data
+        changes identity (see :meth:`_materialise_sharded_statics`).
+        """
+        sharded_spatial = set(self._axis_map.values())
+        out: dict[str, StaticArray] = {}
+        for k, v in static_data.items():
+            v_coerced = coerce_static_data_value(
+                v, node_name=self._inner.name, key=k,
+            )
+            if isinstance(v_coerced, StaticArray) and v_coerced.replication == "shard":
+                if v_coerced.shard_axis not in sharded_spatial:
+                    raise ValueError(
+                        f"StaticArray {k!r} declares shard_axis="
+                        f"{v_coerced.shard_axis} but "
+                        f"{type(self._inner).__name__} "
+                        f"shards spatial axes {sorted(sharded_spatial)} via "
+                        "ShardedStencilNode (per axis_map.values())."
+                    )
+                out[k] = v_coerced
+        return out
+
+    @staticmethod
+    def _static_cache_key(sharded: dict[str, StaticArray]) -> tuple:
+        """Identity key for a classified sharded-static dict.
+
+        ``id(sa.value)`` is the change signal: a node that rebuilds its
+        static arrays (a checkpoint restore through a
+        ``static_data_provider``, a ``replace_node`` that brings a new
+        mesh) hands back a *different* array object and the cache
+        misses.  Shape, dtype and ``shard_axis`` ride along so a
+        same-object-different-view case cannot slip through.  The
+        materialised dict keeps a reference to those very objects, so
+        an ``id`` can never be recycled while it is a live cache key.
+
+        What this deliberately does *not* see is a mutation of an array
+        in place.  ``SimulationNode.static_data`` requires the values to
+        be stable for a node instance, and ``static_data_hash`` (the
+        framework's existing invalidation signal) does not hash contents
+        either; a node that really does rewrite a static array in place
+        must call :meth:`invalidate_static_cache`.
+        """
+        return tuple(
+            (k, id(sharded[k].value), sharded[k].shape,
+             str(sharded[k].dtype), sharded[k].shard_axis)
+            for k in sorted(sharded)
+        )
+
+    @stability(StabilityLevel.STABLE)
+    def invalidate_static_cache(self) -> None:
+        """Drop the cached per-device copy of the sharded static arrays.
+
+        Call this after rewriting a sharded ``StaticArray``'s buffer in
+        place; replacing the array object is detected automatically.
+        The ``super()`` call forwards to the wrapped node, so a cache
+        further in is dropped too.
+
+        The compiled ``shard_map`` step functions go with it, because
+        :meth:`~maddening.core.graph_manager.GraphManager.compile` calls
+        this on every node and a recompile has to trace the inner node
+        afresh.  Each cached function is a trace of the inner node as it
+        was when it was first called: a node on the three-argument
+        contract that reads a constant from ``self.params`` has that
+        value baked in, and a jitted function hands back its old trace
+        for the same argument shapes.  Before 0.4.0 only the static copy
+        was dropped, so a ``PUT /graph/params`` write (or a write into
+        ``node.params``) followed by ``compile()`` answered 200 and the
+        sharded step kept the old value (MADD-ANO-032).
+        """
+        self._static_device_cache = None
+        self._sharded_cache.clear()
+        self._local_update_fn = self._build_local_update()
+        self._inner_state_shapes = None
+        super().invalidate_static_cache()
 
     def _materialise_sharded_statics(self) -> dict:
         """Per-device materialisation of every sharded StaticArray.
@@ -553,13 +1501,50 @@ class ShardedStencilNode(SimulationNode):
         PartitionSpec puts the matching mesh-axis at the array's
         ``shard_axis``.  This is the "3a materialisation" step from the
         v0.2.1 plan -- v0.2.0 only stored ``shard_axis`` as metadata.
+
+        The result is cached: the statics do not change from step to
+        step, so re-partitioning and re-copying them on every public
+        ``update`` was pure host overhead on the interactive path (one
+        ``device_put`` per sharded array per frame).  The cache is keyed
+        on :meth:`_static_cache_key`, so a node that hands back a
+        different array -- or a different set of sharded keys -- is
+        picked up on the next call.
         """
+        sharded = self._classify_sharded_static(self._inner.static_data)
+        key = self._static_cache_key(sharded)
+        cached = self._static_device_cache
+        if cached is not None and cached[0] == key:
+            return cached[1]
+
+        # The inner node's sharded statics changed.  If their *structure*
+        # changed (a key appeared/disappeared, or moved axis) the closure
+        # built by ``_build_local_update`` and every shard_map compiled
+        # against it are stale too.
+        struct = tuple((k, sharded[k].shard_axis) for k in sorted(sharded))
+        prev_struct = tuple(
+            (k, self._sharded_static[k].shard_axis)
+            for k in sorted(self._sharded_static)
+        )
+        self._sharded_static = sharded
+        if struct != prev_struct:
+            self._local_update_fn = self._build_local_update()
+            self._sharded_cache.clear()
+
+        # ``ensure_compile_time_eval`` keeps the placement concrete even
+        # when this runs inside a trace (GraphManager compiles the step
+        # with the node's ``update`` in it).  Without it the cached value
+        # would be a tracer that escapes its trace -- and the statics are
+        # compile-time constants anyway, so evaluating them eagerly is
+        # exactly right.
         out: dict[str, jax.Array] = {}
-        for k, sa in self._sharded_static.items():
-            arr = jnp.asarray(sa.value)
-            spec = self._spec_for_static_key(k, arr)
-            sharding = NamedSharding(self._mesh, spec)
-            out[k] = jax.device_put(arr, sharding)
+        with jax.ensure_compile_time_eval():
+            for k, sa in sharded.items():
+                arr = jnp.asarray(sa.value)
+                spec = self._spec_for_static_key(k, arr)
+                sharding = NamedSharding(self._mesh, spec)
+                out[k] = jax.device_put(arr, sharding)
+        # ``sharded`` is retained so the ``id()``s in ``key`` stay pinned.
+        self._static_device_cache = (key, out, sharded)
         return out
 
     def update(
@@ -577,22 +1562,108 @@ class ShardedStencilNode(SimulationNode):
         Sharded static arrays declared by the inner node (via
         :class:`~maddening.core.static_data.StaticArray` with
         ``replication="shard"``) are materialised per-device and
-        halo-exchanged with ``boundary="edge"`` before being passed
-        through as ``static_padded`` to :meth:`update_padded`.
+        halo-exchanged before being passed through as ``static_padded``
+        to :meth:`update_padded`: periodically when ``boundary`` is
+        ``"periodic"`` (the cells beyond a periodic edge are the opposite
+        edge's, for a static as for the state), with the edge cell
+        repeated under ``"edge"`` and ``"zero"``.  Until 0.4.0 they were
+        edge-filled under every mode.
 
         The shard_map wrapper is built once per
         ``(state_shape, bi_shape, static_shape, static_data_hash)``
         signature and cached so repeated steps hit JAX's compile cache.
+
+        ``dt`` reaches the inner node at the precision it was given, as
+        it does unwrapped.  Until 0.4.0 it was cast to float32, so under
+        ``jax_enable_x64`` a float64 node stepped with a rounded ``dt``
+        when sharded (MADD-ANO-033).
+
+        ``shard_info[axis]``'s local extent is the grid's extent along the
+        axis over the devices on its mesh axis, fixed before tracing; a
+        domain integral carried in the state never sets it (before 0.4.0
+        the first field in sorted key order did: MADD-ANO-056).
+
+        Raises
+        ------
+        ValueError
+            When a state field's shape is not what the inner node's
+            ``initial_state()`` builds now; when a boundary input the node
+            declares per cell is neither grid-shaped nor broadcastable to
+            its declared shape (it would reach every shard whole and be
+            read as that shard's block: MADD-ANO-057); or when the inner
+            node reads ``shard_info`` and its grid fields disagree about a
+            sharded axis's extent.
         """
+        self._check_state_matches_inner(state)
+        probe = active_probe()
+        if probe is not None:
+            # A graph asking whether this step may go inside a loop
+            # (MADD-ANO-068): answer with the inputs the step really has.
+            entry = probe.setdefault(id(self), (self, []))
+            for hazard in self._xla_scan_hazards(state, boundary_inputs, dt, params):
+                if hazard not in entry[1]:
+                    entry[1].append(hazard)
         static_materialised = self._materialise_sharded_statics()
         fn = self._get_sharded_fn(state, boundary_inputs, static_materialised, params)
         return fn(
             state,
             boundary_inputs,
-            jnp.asarray(dt, dtype=jnp.float32),
+            jnp.asarray(dt),
             static_materialised,
             params if params else {},
         )
+
+    def _check_state_matches_inner(self, state: dict) -> None:
+        """Refuse a state the inner node would not build now, by shape.
+
+        The stencil path never sees the global grid: each shard gets its
+        slab and ``shard_info``, and a node that needs the global extent
+        (``HeatNode`` closes its rod ends where ``offset + extent`` reaches
+        ``n_cells``) takes it from its params.  After a shape-defining
+        parameter is written and the graph recompiled, the state still
+        has the old shape until it is reset, and the unsharded node
+        refuses to step it (its arrays no longer broadcast) where the
+        sharded one used to step it with the new extent: a rod of 16
+        cells with ``dx = L/17`` and its right end never closed.  So the
+        global state is compared against what ``initial_state()`` builds
+        with the current params -- evaluated abstractly, once per
+        ``compile()`` -- and a mismatch is an error naming the field.
+        A node whose ``initial_state()`` cannot be evaluated that way is
+        not checked.
+        """
+        shapes = self._inner_state_shapes
+        if shapes is None:
+            try:
+                with quiet_warnings():
+                    built = jax.eval_shape(self._inner.initial_state)
+                shapes = {
+                    k: tuple(v.shape) for k, v in dict(built).items()
+                    if hasattr(v, "shape")
+                }
+            except Exception:  # noqa: BLE001 - cannot tell: check nothing
+                shapes = {}
+            self._inner_state_shapes = shapes
+        # A domain integral is not on the grid; a per-shard one is stacked
+        # along the mesh, so its shape is not the node's.  Compared, a
+        # per-shard integral fed back by a graph was refused as a grid
+        # "changed by a parameter".
+        integrals = set(self._inner.domain_integral_fields())
+        for field, arr in state.items():
+            if field in integrals:
+                continue
+            want = shapes.get(field)
+            got = tuple(jnp.shape(arr))
+            if want is not None and got != want:
+                raise ValueError(
+                    f"ShardedStencilNode {self.name!r}: state field {field!r} "
+                    f"has shape {got}, but {type(self._inner).__name__}"
+                    f".initial_state() now builds {want} from its params.  A "
+                    "parameter that sets the grid was changed after the state "
+                    "was built; the unsharded node refuses to step this state, "
+                    "and the sharded one would step it with the new grid "
+                    "extent.  Reset the state (GraphManager.reset_state(), "
+                    "POST /sim/reset) or rebuild the node."
+                )
 
     # ------------------------------------------------------------------
     # helpers
@@ -620,10 +1691,30 @@ class ShardedStencilNode(SimulationNode):
         carries component dims *and* the grid has undeclared spatial
         axes) cannot be resolved from shapes alone.
         """
+        grid = self._grid_rank_and_shape(state)
+        if grid is None:
+            return frozenset()
+        rank, ref = grid
+        out = set()
+        for k, v in boundary_inputs.items():
+            shape = tuple(jnp.shape(v))
+            if len(shape) >= rank and tuple(shape[:rank]) == ref:
+                out.add(k)
+        return frozenset(out)
+
+    def _grid_rank_and_shape(
+        self, state: dict,
+    ) -> Optional[tuple[int, tuple[int, ...]]]:
+        """``(rank, global grid shape)`` of the state, or ``None``.
+
+        The rule :meth:`_grid_shaped_boundary_inputs` documents: the rank is
+        bracketed by the axes the node declares and by the smallest grid
+        field, and the shape is the leading ``rank`` dims of a grid field.
+        """
         halo = self._inner.halo_width()
         declared = list(self._axis_map.values()) + list(halo.keys())
         if not declared:
-            return frozenset()
+            return None
         rank_lb = max(int(a) for a in declared) + 1
         integrals = set(self._inner.domain_integral_fields())
         grid_fields = [
@@ -631,15 +1722,70 @@ class ShardedStencilNode(SimulationNode):
             if k not in integrals and jnp.ndim(arr) >= rank_lb
         ]
         if not grid_fields:
-            return frozenset()
+            return None
         rank = max(rank_lb, min(int(jnp.ndim(a)) for a in grid_fields))
-        ref = tuple(int(n) for n in jnp.shape(grid_fields[0])[:rank])
-        out = set()
-        for k, v in boundary_inputs.items():
-            shape = tuple(jnp.shape(v))
-            if len(shape) >= rank and tuple(shape[:rank]) == ref:
-                out.add(k)
-        return frozenset(out)
+        return rank, tuple(int(n) for n in jnp.shape(grid_fields[0])[:rank])
+
+    def _refuse_misshapen_inputs(
+        self, state: dict, boundary_inputs: dict, grid_bi: frozenset[str],
+    ) -> None:
+        """Refuse a replicated input that the node declares per cell and cannot be.
+
+        A boundary input that is not grid-shaped is replicated: every shard
+        receives the whole array and cannot tell it from a local one.  So a
+        caller's ``heat_source`` of 4 values on a 16-cell rod split four
+        ways was read by each shard as its own 4 cells -- one pattern
+        repeated along the rod -- and one of 6 as a halo-padded block;
+        an ``LBMNode`` ``body_force`` of shape ``(4, 8, 2)`` on a
+        ``(16, 8)`` grid was zero-padded and applied on every slab.  The
+        unsharded node refuses all three (its arrays do not broadcast).
+
+        So an input whose declared ``boundary_input_spec()`` shape is per
+        cell (its leading dims are the grid's) must either be grid-shaped
+        -- sharded like the state -- or broadcast to that declared shape,
+        the forms the unsharded ``update`` takes (a scalar, a uniform
+        vector).  Anything else is refused here, before tracing, naming the
+        global shape the caller passed.  An input the node does not
+        declare, or declares with a shape that is not per cell, is left to
+        the node.
+        """
+        grid = self._grid_rank_and_shape(state)
+        if grid is None:
+            return
+        rank, ref = grid
+        try:
+            specs = dict(self._inner.boundary_input_spec() or {})
+        except Exception:  # noqa: BLE001 - no declaration to check against
+            return
+        for key, value in boundary_inputs.items():
+            if key in grid_bi or key not in specs:
+                continue
+            declared_shape = getattr(specs[key], "shape", None)
+            if declared_shape is None:
+                continue
+            try:
+                declared = tuple(int(n) for n in declared_shape)
+            except (TypeError, ValueError):
+                continue           # not a concrete shape: nothing to hold it to
+            if len(declared) < rank or declared[:rank] != ref:
+                continue           # not a per-cell input
+            given = tuple(int(n) for n in jnp.shape(value))
+            try:
+                fits = np.broadcast_shapes(given, declared) == declared
+            except ValueError:
+                fits = False
+            if fits:
+                continue
+            raise ValueError(
+                f"ShardedStencilNode {self.name!r}: boundary input {key!r} has "
+                f"shape {given}, but {type(self._inner).__name__} declares it "
+                f"per cell with shape {declared}, and {given} neither is that "
+                f"grid (leading dims {ref}) nor broadcasts to it, so it is not "
+                "a value the node declares for this input.  Sharded, it would "
+                "be handed whole to every shard and read as that shard's own "
+                f"block.  Pass the whole grid, shape {declared}, or a value "
+                "that broadcasts to it (a scalar, a uniform vector)."
+            )
 
     def _spec_for_field(self, arr: jax.Array) -> P:
         """PartitionSpec for a single state field array.
@@ -678,9 +1824,16 @@ class ShardedStencilNode(SimulationNode):
                 return True
         return False
 
-    def _strip_halos(self, arr: jax.Array, *, original: jax.Array) -> jax.Array:
-        """Strip every halo axis (sharded **and** replicated)."""
-        halo = self._inner.halo_width()
+    def _strip_halos(
+        self, arr: jax.Array, *, original: jax.Array,
+        halo: Optional[dict[int, int]] = None,
+    ) -> jax.Array:
+        """Strip every halo axis (sharded **and** replicated).
+
+        ``halo`` is the layout the padding was built with; the node's
+        current ``halo_width()`` when not given.
+        """
+        halo = self._inner.halo_width() if halo is None else halo
         out = arr
         for spatial_axis in sorted(halo):
             if spatial_axis >= out.ndim:
@@ -698,4 +1851,6 @@ class ShardedStencilNode(SimulationNode):
         d["sharded_stencil"] = True
         d["axis_map"] = self._axis_map
         d["boundary"] = self._boundary
-        return d
+        # Copies: the wrapper's own axis map used to be handed out, and a
+        # config edited to describe another decomposition changed this one.
+        return _detached_config(d)

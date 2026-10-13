@@ -11,10 +11,16 @@ Hagen-Poiseuille validation).
 What we verify here:
 
 - A single sharded HeatNode runs inside a ``GraphManager.compile()``
-  + ``step()`` loop.
-- Two sharded HeatNodes coupled via boundary-temperature edges run
-  and produce the same trajectory as the unsharded reference.
-- ``run_scan`` works on the sharded graph and matches the eager loop.
+  + ``step()`` loop, its ends held at 0 by external inputs.
+- Two sharded HeatNodes coupled via boundary-temperature edges produce
+  the unsharded trajectory to float32 rounding -- and the coupling moves
+  it, so a sharded path that dropped the edges would fail.
+- ``run_scan`` works on the sharded graph.
+
+Until 0.4.0 the coupled test compared means within 10%, which it passed
+with the coupling ignored: ``HeatNode.update_padded`` never read the
+``left_temperature`` / ``right_temperature`` the edges deliver
+(MADD-ANO-030).
 """
 
 from __future__ import annotations
@@ -48,97 +54,83 @@ def test_single_sharded_heat_in_graph_manager():
     n = 16
     node = _make_heat("heat", n)
     mesh = create_device_mesh(shape=(4,))
-    sharded = ShardedStencilNode(
-        node, mesh, axis_map={"devices": 0}, boundary="zero",
-    )
+    sharded = ShardedStencilNode(node, mesh, axis_map={"devices": 0})
 
-    gm = GraphManager()
-    gm.add_node(sharded)
-    gm.compile()
+    def graph(heat):
+        gm = GraphManager()
+        gm.add_node(heat)
+        # Both ends at 0: external inputs default to zero every step.
+        gm.add_external_input("heat", "left_temperature")
+        gm.add_external_input("heat", "right_temperature")
+        gm.compile()
+        return gm
+
+    gm = graph(sharded)
+    gm_u = graph(_make_heat("heat", n))
 
     t0 = float(jnp.mean(gm._state["heat"]["temperature"]))
     for _ in range(20):
         gm.step()
+        gm_u.step()
     t_after = float(jnp.mean(gm._state["heat"]["temperature"]))
 
-    # Heat diffuses under Dirichlet T=0 -> mean drops
+    # Heat diffuses out through the cold ends -> mean drops
     assert t_after < t0
     assert jnp.isfinite(t_after)
+    np.testing.assert_allclose(np.asarray(gm._state["heat"]["temperature"]),
+                               np.asarray(gm_u._state["heat"]["temperature"]),
+                               rtol=0, atol=1e-6)
 
 
 @pytest.mark.skipif(not _HAS_4, reason="needs >=4 virtual devices")
 def test_two_sharded_heats_coupled_via_edges():
     """Two sharded HeatNodes coupled by passing right-edge cell to neighbour.
 
-    Each node uses its right-edge temperature as the OTHER node's
-    ``left_temperature`` boundary input -- a simple replicated scalar
-    edge.  The sharded run must match the unsharded reference because
-    halo exchange does not change associativity of any reduction.
+    Each node's end cell is the OTHER node's end temperature -- a simple
+    replicated scalar edge.  The sharded run is the unsharded run to
+    float32 rounding: ``update_padded`` closes the rod ends from those
+    inputs exactly as ``update`` does.  The coupling is also checked to
+    matter, against the same pair uncoupled, so that a sharded path which
+    dropped the edge inputs (as every release before 0.4.0 did) cannot
+    pass by agreeing with an unsharded run it no longer resembles.
     """
     n = 16
 
-    # Unsharded reference
-    a_u = _make_heat("a", n)
-    b_u = _make_heat("b", n)
-    gm_u = GraphManager()
-    gm_u.add_node(a_u)
-    gm_u.add_node(b_u)
-    gm_u.add_edge(
-        source="a", target="b",
-        source_field="temperature", target_field="left_temperature",
-        transform=lambda T: T[-1],
-    )
-    gm_u.add_edge(
-        source="b", target="a",
-        source_field="temperature", target_field="right_temperature",
-        transform=lambda T: T[0],
-    )
-    gm_u.compile()
+    def pair(wrap, coupled=True):
+        gm = GraphManager()
+        gm.add_node(wrap(_make_heat("a", n)))
+        gm.add_node(wrap(_make_heat("b", n)))
+        if coupled:
+            gm.add_edge(
+                source="a", target="b",
+                source_field="temperature", target_field="left_temperature",
+                transform=lambda T: T[-1],
+            )
+            gm.add_edge(
+                source="b", target="a",
+                source_field="temperature", target_field="right_temperature",
+                transform=lambda T: T[0],
+            )
+        gm.compile()
+        return gm
 
-    # Sharded run
-    a_inner = _make_heat("a", n)
-    b_inner = _make_heat("b", n)
     mesh = create_device_mesh(shape=(4,))
-    a_s = ShardedStencilNode(
-        a_inner, mesh, axis_map={"devices": 0}, boundary="zero",
-    )
-    b_s = ShardedStencilNode(
-        b_inner, mesh, axis_map={"devices": 0}, boundary="zero",
-    )
-    gm_s = GraphManager()
-    gm_s.add_node(a_s)
-    gm_s.add_node(b_s)
-    gm_s.add_edge(
-        source="a", target="b",
-        source_field="temperature", target_field="left_temperature",
-        transform=lambda T: T[-1],
-    )
-    gm_s.add_edge(
-        source="b", target="a",
-        source_field="temperature", target_field="right_temperature",
-        transform=lambda T: T[0],
-    )
-    gm_s.compile()
+    gm_u = pair(lambda node: node)
+    gm_s = pair(lambda node: ShardedStencilNode(node, mesh, axis_map={"devices": 0}))
+    gm_free = pair(lambda node: node, coupled=False)
 
     for _ in range(30):
         gm_u.step()
         gm_s.step()
+        gm_free.step()
 
-    # Sharded "zero" boundary differs from unsharded ghost handling only
-    # on the global edge cells; mid-domain should track unsharded
-    # closely.  Tolerance allows for boundary-overwrite (MADD-ANO-002)
-    # vs ghost=0 discrepancy on the wrapped node.
-    Ta_u = np.asarray(gm_u._state["a"]["temperature"])
-    Ta_s = np.asarray(gm_s._state["a"]["temperature"])
-    Tb_u = np.asarray(gm_u._state["b"]["temperature"])
-    Tb_s = np.asarray(gm_s._state["b"]["temperature"])
-
-    # Trajectories should be qualitatively similar (mean within 10%).
-    assert abs(np.mean(Ta_s) - np.mean(Ta_u)) / abs(np.mean(Ta_u)) < 0.1
-    assert abs(np.mean(Tb_s) - np.mean(Tb_u)) / abs(np.mean(Tb_u)) < 0.1
-    # No NaN
-    assert np.all(np.isfinite(Ta_s))
-    assert np.all(np.isfinite(Tb_s))
+    for name in ("a", "b"):
+        T_u = np.asarray(gm_u._state[name]["temperature"])
+        T_s = np.asarray(gm_s._state[name]["temperature"])
+        T_free = np.asarray(gm_free._state[name]["temperature"])
+        np.testing.assert_allclose(T_s, T_u, rtol=0, atol=1e-6, err_msg=name)
+        # The coupling moves the answer by far more than the tolerance.
+        assert np.max(np.abs(T_u - T_free)) > 1e-3, name
 
 
 @pytest.mark.skipif(not _HAS_4, reason="needs >=4 virtual devices")
@@ -147,9 +139,7 @@ def test_sharded_heat_run_scan():
     n = 16
     node = _make_heat("heat", n)
     mesh = create_device_mesh(shape=(4,))
-    sharded = ShardedStencilNode(
-        node, mesh, axis_map={"devices": 0}, boundary="zero",
-    )
+    sharded = ShardedStencilNode(node, mesh, axis_map={"devices": 0})
 
     gm = GraphManager()
     gm.add_node(sharded)

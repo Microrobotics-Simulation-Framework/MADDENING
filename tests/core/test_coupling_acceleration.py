@@ -219,7 +219,10 @@ class TestIQNILSIntegration:
             acceleration="iqn-ils",
         )
         gm.compile()
-        step_fn = gm._build_step_fn()
+        # Jitted: stepped in a Python loop under jax.grad, the bare
+        # step was retraced and compiled primitive by primitive on
+        # every pass (over a hundred compiles for one gradient).
+        step_fn = jax.jit(gm._build_step_fn())
         ext = gm._default_external_inputs()
 
         def loss_fn(init_pos):

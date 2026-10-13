@@ -2,6 +2,7 @@
 
 import warnings
 
+import numpy as np
 import pytest
 import jax
 import jax.numpy as jnp
@@ -55,8 +56,14 @@ class TestHeatNodeUnit:
             f"Max deviation: {float(jnp.max(jnp.abs(T - T_expected)))}"
 
     def test_heat_source_increases_temperature_uniformly(self):
-        """Uniform source with matching BCs should increase temperature uniformly
-        in the interior (boundaries are pinned by Dirichlet BCs)."""
+        """A uniform source raises every cell, including the end cells.
+
+        With zero diffusivity the Dirichlet data has nothing to act
+        through, so ``source * dt`` is the whole update.  Until 0.4.0
+        the end cells were overwritten with the boundary value
+        afterwards and stayed at 0 regardless of the source
+        (MADD-ANO-007); they are ordinary cells now.
+        """
         n = 20
         h = HeatNode(name="rod", timestep=0.001, n_cells=n,
                      initial_temperature=0.0, thermal_diffusivity=0.0)
@@ -69,11 +76,8 @@ class TestHeatNodeUnit:
               "heat_source": source}
         state = h.update(state, bi, 0.001)
         T = state["temperature"]
-        # Boundary cells are pinned at 0 by Dirichlet BCs
-        assert float(T[0]) == pytest.approx(0.0)
-        assert float(T[-1]) == pytest.approx(0.0)
-        # Interior cells should increase by source * dt = 10 * 0.001 = 0.01
-        for i in range(1, n - 1):
+        # Every cell increases by source * dt = 10 * 0.001 = 0.01
+        for i in range(n):
             assert float(T[i]) == pytest.approx(0.01, abs=1e-6)
 
     def test_energy_conservation_insulated(self):
@@ -216,10 +220,14 @@ class TestHeatNodeInGraph:
         final, history = gm.run_scan_with_history(200, external_inputs=ext)
         assert final["rod"]["temperature"].shape == (n,)
         assert history["rod"]["temperature"].shape == (200, n)
-        # Left end should be hot
-        assert float(final["rod"]["temperature"][0]) == pytest.approx(100.0)
-        # Right end should be cold
-        assert float(final["rod"]["temperature"][-1]) == pytest.approx(0.0)
+        T = final["rod"]["temperature"]
+        # The Dirichlet data is imposed at the rod ends, so the first and
+        # last CELL sit half a cell inside them and are strictly between
+        # the two boundary values -- not equal to them (MADD-ANO-007).
+        assert 0.0 < float(T[0]) < 100.0
+        assert 0.0 < float(T[-1]) < float(T[0])
+        # Left end hot, right end cold, monotone in between.
+        assert np.all(np.diff(np.asarray(T)) < 0.0)
 
     def test_two_rods_connected_by_edge(self):
         """Temperature from one heat node drives the BC of another via an edge."""
@@ -266,8 +274,10 @@ class TestHeatNodeInGraph:
                             jnp.full(n, 100.0), atol=1.0)
         # rod_b's left end should be warm (driven by rod_a's right end ~100)
         assert float(final["rod_b"]["temperature"][0]) > 50.0
-        # rod_b's right end pinned at 0
-        assert float(final["rod_b"]["temperature"][-1]) == pytest.approx(0.0)
+        # rod_b's right BC is 0 at the rod end, so the last cell centre is
+        # just above it rather than exactly 0 (MADD-ANO-007).
+        last = float(final["rod_b"]["temperature"][-1])
+        assert 0.0 < last < 10.0
 
     def test_graph_serialization_round_trip(self):
         """GraphManager.to_dict / from_dict should work with HeatNode."""
@@ -285,3 +295,78 @@ class TestHeatNodeInGraph:
         state = gm2.get_node_state("rod")
         assert state["temperature"].shape == (8,)
         assert jnp.allclose(state["temperature"], jnp.full(8, 25.0))
+
+
+def test_length_is_trainable_on_the_uniform_grid_only():
+    """On a non-uniform grid the geometry is ``grid_points`` and nothing
+    reads ``length`` (the constructor docs say it is ignored), so the spec
+    must not offer it to an optimiser: a trainable leaf with an
+    identically zero gradient is the dead-leaf trap ``params_effective``
+    exists to catch, and it caught this configuration."""
+    uniform = HeatNode("u", 1e-4, n_cells=8, length=1.0, thermal_diffusivity=0.01)
+    nonuniform = HeatNode("n", 1e-4, n_cells=8, length=1.0, thermal_diffusivity=0.01,
+                          grid_points=[0.05, 0.12, 0.25, 0.33, 0.5, 0.6, 0.8, 0.95])
+    assert uniform.param_specs()["length"].trainable is True
+    spec = nonuniform.param_specs()["length"]
+    assert spec.trainable is False
+    assert "grid_points" in spec.description
+    # ``thermal_diffusivity`` is still fitted on both grids.
+    assert nonuniform.param_specs()["thermal_diffusivity"].trainable is True
+
+
+
+@pytest.mark.parametrize("stencil_order", [2, 4])
+def test_the_uniform_rod_end_flux_reads_the_injected_length(stencil_order):
+    """``compute_boundary_fluxes`` with an injected ``length`` is the flux of
+    a rod built with that length.  The uniform branch divides by
+    ``p["length"] / n``; a flux that read ``self.params["length"]`` there
+    delivered the constructor's flux over every edge while ``update`` used
+    the calibrated length, and no test compared the two."""
+    kw = dict(n_cells=10, thermal_diffusivity=0.02, stencil_order=stencil_order,
+              initial_temperature=[300.0 + 4.0 * i for i in range(10)])
+    built = HeatNode("h", 1e-3, length=1.7, **kw)
+    injected = HeatNode("h", 1e-3, length=1.0, **kw)
+    state = built.initial_state()
+    for bi in ({}, {"left_temperature": jnp.asarray(350.0), "right_temperature": jnp.asarray(280.0)}):
+        want = built.compute_boundary_fluxes(state, bi, 1e-3)
+        got = injected.compute_boundary_fluxes(
+            state, bi, 1e-3, params={**injected.params_pytree(), "length": jnp.asarray(1.7)})
+        for k in want:
+            assert float(got[k]) == pytest.approx(float(want[k]), rel=1e-5)
+        # the fixture can express the fault: the constructor's length differs
+        base = injected.compute_boundary_fluxes(state, bi, 1e-3)
+        assert float(base["left_heat_flux"]) != pytest.approx(float(want["left_heat_flux"]), rel=1e-3)
+
+
+def _mean_drift_with_no_boundary_input(stencil_order, steps=500):
+    """Relative change of the mean temperature, both rod ends unconnected.
+
+    64 cells, an ``x**2`` profile (curved at both ends, and not symmetric),
+    Fourier number 0.25, stepped under ``jax.lax.fori_loop``.
+    """
+    n, alpha = 64, 0.01
+    dx = 1.0 / n
+    dt = 0.25 * dx * dx / alpha
+    x = (np.arange(n) + 0.5) * dx
+    rod = HeatNode(name="rod", timestep=dt, n_cells=n, length=1.0,
+                   thermal_diffusivity=alpha, initial_temperature=(x ** 2).tolist(),
+                   stencil_order=stencil_order)
+    T0 = rod.initial_state()["temperature"]
+    step = jax.jit(lambda i, T: rod.update({"temperature": T}, {}, dt)["temperature"])
+    T = jax.lax.fori_loop(0, steps, step, T0)
+    return abs(float(jnp.mean(T)) - float(jnp.mean(T0))) / float(jnp.mean(T0))
+
+
+def test_an_unconnected_second_order_end_is_insulated():
+    """No boundary input at ``stencil_order=2``: the ghost is the end cell,
+    the face flux is exactly zero, and total heat is conserved."""
+    assert _mean_drift_with_no_boundary_input(2) < 1e-5
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "MADD-ANO-031 (open): with no boundary input the datum is the end cell, "
+    "and at stencil_order=4 the cubic ghost closure through it has a "
+    "non-zero slope at the rod end, so heat crosses an unconnected end "
+    "(the mean of this profile moves 3.1e-3 in 500 steps).  Scheduled for 0.5.0."))
+def test_an_unconnected_fourth_order_end_is_insulated():
+    assert _mean_drift_with_no_boundary_input(4) < 1e-5

@@ -1,0 +1,48 @@
+x64 = True
+
+HeatNode stencil_order=2, profile=release, Fo=0.4  [declared 2]
+       n           err    order
+      10  1.605230e-02 
+      20  3.949439e-03    2.023
+      40  9.834446e-04    2.006
+      80  2.456174e-04    2.001
+     160  6.138913e-05    2.000
+  observed(finest pair) = 2.0004   max pairwise = 2.0231
+
+HeatNode stencil_order=4, profile=release, Fo=0.3  [declared 4]
+       n           err    order
+      10  5.520228e-04 
+      20  4.074956e-05    3.760
+      40  2.864253e-06    3.831
+      80  1.901492e-07    3.913
+     160  1.224431e-08    3.957
+  observed(finest pair) = 3.9569   max pairwise = 3.9569
+
+HeatNode stencil_order=2, profile=exp_sin, Fo=0.4  [declared 2]
+       n           err    order
+      10  4.144731e-03 
+      20  1.031199e-03    2.007
+      40  2.574906e-04    2.002
+      80  6.435335e-05    2.000
+     160  1.608713e-05    2.000
+  observed(finest pair) = 2.0001   max pairwise = 2.0070
+
+HeatNode stencil_order=4, profile=exp_sin, Fo=0.3  [declared 4]
+       n           err    order
+      10  2.226024e-05 
+      20  1.391870e-06    3.999
+      40  9.156093e-08    3.926
+      80  5.941070e-09    3.946
+     160  3.787494e-10    3.971
+  observed(finest pair) = 3.9714   max pairwise = 3.9994
+
+HeatNode stencil_order=4, extended ladder, profile=release
+       n           err    order
+       5  8.809321e-03 
+      10  5.520228e-04    3.996
+      20  4.074956e-05    3.760
+      40  2.864253e-06    3.831
+      80  1.901492e-07    3.913
+     160  1.224431e-08    3.957
+     320  7.762264e-10    3.979
+  observed(finest pair) = 3.9795   max pairwise = 3.9962

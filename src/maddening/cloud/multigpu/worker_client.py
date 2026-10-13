@@ -57,6 +57,24 @@ class WorkerClient:
         This worker's public ``"ip:port"`` for peer connections.
     zmq_ports : dict[str, int]
         ZMQ ports this worker exposes: ``{service_name: port}``.
+    secure : bool, optional
+        Whether to talk to the coordinator over ZMQ CURVE.  ``None``
+        (default) decides from *coordinator_addr*: a loopback
+        coordinator is contacted in cleartext, a remote one is
+        encrypted and authenticated.  ``True`` forces it on.
+
+        **Pass ``True`` explicitly when the coordinator binds a
+        non-loopback address but you reach it over a loopback one** --
+        rank 0's own worker talking to ``127.0.0.1:5580``, or any worker
+        going through an SSH tunnel.  The coordinator's posture is set
+        by *its* bind address, which this client cannot see, so the
+        address rule gets that case wrong.  It fails loudly rather than
+        silently: ``register_and_wait`` raises ``ConnectionError``
+        naming the mismatch.
+    token : str, optional
+        Shared secret the CURVE keys are derived from; ``None`` reads
+        ``MADDENING_TRANSPORT_TOKEN``, falling back to
+        ``MADDENING_API_TOKEN``.  Must match the coordinator's.
     """
 
     def __init__(
@@ -65,7 +83,17 @@ class WorkerClient:
         subgraph_id: str,
         address: str,
         zmq_ports: Optional[dict[str, int]] = None,
+        secure: Optional[bool] = None,
+        token: Optional[str] = None,
     ) -> None:
+        from maddening.transport_auth import resolve_security
+
+        self._secure = resolve_security(f"tcp://{coordinator_addr}", secure)
+        self._token = token
+        if self._secure:
+            from maddening.transport_auth import TransportAuth
+
+            TransportAuth(token=token)  # raises now if the token is missing
         self._coordinator_addr = coordinator_addr
         self._subgraph_id = subgraph_id
         self._address = address
@@ -75,6 +103,19 @@ class WorkerClient:
         self._stop_event = threading.Event()
         self._on_shutdown: Optional[Callable[[], None]] = None
         self._on_peer_dead: Optional[Callable[[str], None]] = None
+
+    def _secure_socket(self, sock) -> None:
+        """Apply CURVE client keys to *sock* before it connects."""
+        if not self._secure:
+            return
+        from maddening.transport_auth import TransportAuth
+
+        TransportAuth(token=self._token).secure_client(sock)
+
+    @property
+    def secure(self) -> bool:
+        """Whether this client talks to the coordinator over CURVE."""
+        return self._secure
 
     @property
     def topology(self) -> Optional[list[PeerConnection]]:
@@ -109,7 +150,19 @@ class WorkerClient:
         ctx = zmq.Context()
         sock = ctx.socket(zmq.DEALER)
         sock.setsockopt(zmq.LINGER, 0)
-        sock.setsockopt(zmq.RCVTIMEO, 5000)  # 5s recv timeout
+        # Short, because this is the loop's poll interval: the deadline
+        # below is only checked between recv calls, so a 5s RCVTIMEO made
+        # register_and_wait(timeout=3) take 5s and overshoot every
+        # deadline shorter than itself.
+        sock.setsockopt(zmq.RCVTIMEO, 250)
+        self._secure_socket(sock)
+        # A DEALER whose peer rejects the security handshake enters mute
+        # state, and an unbounded send on a mute socket blocks forever --
+        # measured, not assumed: a plain DEALER sending to a CURVE ROUTER
+        # never returns from the first send_multipart.  That would make
+        # `timeout` a lie and hang the worker on the single most likely
+        # misconfiguration, a token that does not match the coordinator's.
+        sock.setsockopt(zmq.SNDTIMEO, 1000)
         sock.connect(f"tcp://{self._coordinator_addr}")
 
         # Send registration
@@ -119,14 +172,21 @@ class WorkerClient:
             "address": self._address,
             "zmq_ports": self._zmq_ports,
         }
-        sock.send_multipart([b"", json.dumps(reg_msg).encode()])
-        logger.info("Registered with coordinator at %s as %s",
-                     self._coordinator_addr, self._subgraph_id)
+        payload = [b"", json.dumps(reg_msg).encode()]
 
-        # Wait for ACK
+        # Wait for ACK, re-sending as we go so a coordinator that starts
+        # after this worker still gets the registration.
         deadline = time.monotonic() + timeout
         ack_received = False
+        deliverable = False
         while time.monotonic() < deadline:
+            try:
+                sock.send_multipart(payload)
+                deliverable = True
+            except zmq.Again:
+                # No peer will take it. Keep trying until the deadline:
+                # the coordinator may still be coming up.
+                pass
             try:
                 frames = sock.recv_multipart()
                 msg = json.loads(frames[-1])
@@ -137,12 +197,44 @@ class WorkerClient:
             except zmq.Again:
                 continue
 
+        # The CURVE asymmetry is the single most likely cause of either
+        # failure below, so it is decided by self._secure and attached to
+        # both.  It used to live only on the ConnectionError, which
+        # requires every send to raise zmq.Again for the whole timeout --
+        # and a DEALER that has connect()ed accepts ZMQ_SNDHWM (1000)
+        # messages regardless of the handshake, so with a 250ms recv
+        # timeout that branch needs a deadline of about 250 seconds.
+        # Measured: every realistic call reached the TimeoutError, which
+        # said nothing about CURVE, and the test could not tell because
+        # it accepted either exception type.
+        curve_hint = (
+            f" This worker has CURVE {'on' if self._secure else 'off'}, and "
+            f"the coordinator's setting is decided by the address it bound: "
+            f"the two have to match. A coordinator bound to a non-loopback "
+            f"address has CURVE on, while a worker reaching it over a "
+            f"loopback address (an SSH tunnel, or rank 0's own worker) turns "
+            f"it off by default -- pass secure=True to WorkerClient in that "
+            f"case, and give both ends the same MADDENING_TRANSPORT_TOKEN "
+            f"(or MADDENING_API_TOKEN)."
+        )
+
+        if not ack_received and not deliverable:
+            sock.close()
+            ctx.term()
+            raise ConnectionError(
+                f"Could not deliver a registration to the coordinator at "
+                f"{self._coordinator_addr}: it accepted no message in "
+                f"{timeout:.0f}s." + curve_hint
+            )
+
         if not ack_received:
             sock.close()
             ctx.term()
             raise TimeoutError(
                 f"No ACK from coordinator at {self._coordinator_addr} "
-                f"within {timeout}s"
+                f"within {timeout}s: the registration was accepted by the "
+                f"local socket but never answered, which is what a refused "
+                f"security handshake looks like from this side." + curve_hint
             )
 
         # Now poll for topology broadcast
@@ -233,17 +325,25 @@ class WorkerClient:
         sock = ctx.socket(zmq.DEALER)
         sock.setsockopt(zmq.LINGER, 0)
         sock.setsockopt(zmq.RCVTIMEO, 2000)
+        # See register_and_wait: an unbounded send on a mute DEALER never
+        # returns, which would wedge this daemon thread past stop().
+        sock.setsockopt(zmq.SNDTIMEO, 1000)
+        self._secure_socket(sock)
         sock.connect(f"tcp://{self._coordinator_addr}")
 
         while not self._stop_event.is_set():
             try:
-                sock.send_multipart([
-                    b"",
-                    json.dumps({
-                        "type": "heartbeat",
-                        "subgraph_id": self._subgraph_id,
-                    }).encode(),
-                ])
+                try:
+                    sock.send_multipart([
+                        b"",
+                        json.dumps({
+                            "type": "heartbeat",
+                            "subgraph_id": self._subgraph_id,
+                        }).encode(),
+                    ])
+                except zmq.Again:
+                    logger.debug("Heartbeat undeliverable to %s",
+                                 self._coordinator_addr)
                 try:
                     frames = sock.recv_multipart()
                     msg = json.loads(frames[-1])

@@ -3,6 +3,21 @@ built plain and with ``-fsanitize=address,undefined``, plus FMPy driving
 an ASan-instrumented build in a subprocess.  Skipped without a C
 compiler.  (Valgrind is not required; ASan/UBSan cover the same memory
 and UB classes on this toolchain.)
+
+**Which C source is tested.**  The two harnesses include the wrapper
+through the macro ``MADDENING_FMU_C``, which :func:`_build` sets to
+``maddening.fmi.package.C_SOURCE`` -- the source of the package Python
+imported, the one :func:`~maddening.fmi.package.build_fmu_binary` compiles.
+They used to include ``../../../src/maddening/fmi/c/maddening_fmu.c`` by
+relative path, so with a copy of ``src/`` on ``PYTHONPATH`` the FMU binary
+was built from the copy and these tests from the tree: a fault seeded in
+the copy's C file was never compiled into them.  To mutation-test the
+wrapper, copy ``src/`` to a scratch directory, seed the fault in the copy's
+``maddening/fmi/c/maddening_fmu.c`` and run this file (and the other
+``tests/fmi/test_c_*.py``) with ``PYTHONPATH=<scratch>/src``; the unit-test
+binary prints the path it was built from, and
+``test_the_c_harnesses_are_built_from_the_imported_packages_source`` pins
+it.
 """
 
 import os
@@ -25,8 +40,12 @@ SAN_ENV = {"ASAN_OPTIONS": "detect_leaks=1:abort_on_error=1:halt_on_error=1",
            "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1"}
 
 
-def _build(src: Path, out: Path, *flags: str, shared: bool = False) -> Path:
-    cmd = [CC, "-g", "-O1", "-Wall", "-Wextra", f"-I{FMI3_INCLUDE_DIR}", str(src), "-o", str(out),
+def _build(src: Path, out: Path, *flags: str, shared: bool = False,
+           wrapper: Path = C_SOURCE) -> Path:
+    """Compile ``src``.  A harness includes the wrapper source ``wrapper``
+    (the imported package's, unless a test names another)."""
+    cmd = [CC, "-g", "-O1", "-Wall", "-Wextra", f"-I{FMI3_INCLUDE_DIR}",
+           f'-DMADDENING_FMU_C="{wrapper}"', str(src), "-o", str(out),
            "-lpthread", *flags]
     if shared:
         cmd[1:1] = ["-shared", "-fPIC"]
@@ -50,7 +69,152 @@ def _run(exe: Path, *args: str, env: dict | None = None, timeout: float = 120) -
 def test_c_unit_tests(tmp_path, sanitized):
     exe = _build(C_DIR / "test_maddening_fmu.c", tmp_path / "unit", *(SANITIZE if sanitized else []))
     out = _run(exe, env=SAN_ENV if sanitized else None)
-    assert "0 failures" in out, out
+    assert "checks, 0 failures" in out, out
+
+
+def test_the_c_harnesses_are_built_from_the_imported_packages_source(tmp_path):
+    """The unit-test binary is built from ``maddening.fmi.package.C_SOURCE``
+    and says so, and one built from another copy of the wrapper runs that
+    copy: a fault seeded in the copy -- here ``fmi3GetFMUState`` made to
+    allocate a new state object on every call, the leak it had -- fails the
+    unit tests, where the harness used to compile the tree's source whatever
+    was asked for."""
+    exe = _build(C_DIR / "test_maddening_fmu.c", tmp_path / "unit")
+    out = _run(exe)
+    assert f"wrapper source: {C_SOURCE}\n" in out, out[:300]
+    assert Path(C_SOURCE).is_absolute()
+    source = Path(C_SOURCE).read_text()
+    reuse = "state_filled(in, state_if_live(in, *FMUState), src, n)"
+    version = '#define MADDENING_FMU_VERSION "'
+    assert source.count(reuse) == 1 and source.count(version) == 1
+    mutant = tmp_path / "mutant" / "maddening_fmu.c"
+    mutant.parent.mkdir()
+    mutant.write_text(
+        source.replace(reuse, "state_filled(in, state_if_live(NULL, *FMUState), src, n)")
+        .replace(version, version + "seeded-"))
+    exe = _build(C_DIR / "test_maddening_fmu.c", tmp_path / "unit_mutant", wrapper=mutant)
+    proc = subprocess.run([str(exe)], capture_output=True, text=True, timeout=120)
+    assert f"wrapper source: {mutant}\n" in proc.stdout, proc.stdout[:300]
+    assert 'wrapper version: seeded-' in proc.stdout
+    assert proc.returncode == 1 and "checks, 0 failures" not in proc.stdout, proc.stdout[-300:]
+    assert "live_allocs() == held" in proc.stderr and "state == first" in proc.stderr
+    # the fuzz harness takes the same macro (its self-check needs no change)
+    fuzz = _build(C_DIR / "fuzz_maddening_fmu.c", tmp_path / "fuzz_mutant", wrapper=mutant)
+    assert "seed=3 iterations=200" in _run_any(fuzz, "3", "200")
+
+
+def _run_any(exe: Path, *args: str) -> str:
+    """The stdout of ``exe``, whatever its exit code."""
+    return subprocess.run([str(exe), *args], capture_output=True, text=True,
+                          timeout=120).stdout
+
+
+# Languages whose locales use ',' as the decimal point, tried in order.
+_COMMA_LANGUAGES = ("nl", "de", "fr", "da", "es", "it", "pt", "sv", "fi", "pl", "cs", "ru")
+
+
+def _comma_locale(tmp_path: Path) -> tuple[str, dict] | None:
+    """A locale whose decimal point is ',', and the environment that selects
+    it, or ``None``.
+
+    An installed one if ``locale -a`` lists any; otherwise one compiled into
+    ``tmp_path`` with ``localedef`` (no root needed, found through
+    ``LOCPATH``), which works wherever glibc's locale sources are installed
+    -- as they are on GitHub's Ubuntu runners, which install no such locale
+    themselves.
+    """
+    try:
+        names = subprocess.run(["locale", "-a"], capture_output=True, text=True,
+                               timeout=30).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        names = []
+    for lang in _COMMA_LANGUAGES:
+        for name in names:
+            if name.startswith(lang + "_") and name.lower().endswith(("utf8", "utf-8")):
+                return name, {"LC_ALL": name}
+    localedef = shutil.which("localedef")
+    if localedef is None:
+        return None
+    for lang, region in (("de", "DE"), ("nl", "NL"), ("fr", "FR")):
+        name = f"{lang}_{region}.UTF-8"
+        proc = subprocess.run([localedef, "-i", f"{lang}_{region}", "-f", "UTF-8",
+                               str(tmp_path / name)], capture_output=True, text=True,
+                              timeout=120)
+        if (tmp_path / name).exists():
+            return name, {"LC_ALL": name, "LOCPATH": str(tmp_path)}
+        del proc
+    return None
+
+
+def test_c_unit_tests_under_a_comma_decimal_locale(tmp_path):
+    """The whole unit-test binary again, under a locale whose decimal point
+    is ','.  ``%.17g`` and ``strtod`` follow ``LC_NUMERIC``, so before the
+    wrapper formatted and parsed in the C locale every ``fmi3DoStep`` of an
+    importer running under such a locale sent ``"dt":0,01`` (not JSON) and
+    failed; here every request-string and parsed-value check in the binary
+    is a check that the wire ignores the locale.  The binary prints the
+    decimal point it ran under, so a locale that did not take is a failure,
+    not a silent pass."""
+    found = _comma_locale(tmp_path)
+    if found is None:
+        pytest.skip("no locale with a ',' decimal point is installed and localedef "
+                    "could not build one (glibc's locale sources are missing)")
+    name, env = found
+    exe = _build(C_DIR / "test_maddening_fmu.c", tmp_path / "unit")
+    out = _run(exe, env=env)
+    assert "decimal point in effect: ," in out, (name, out[:400])
+    assert "checks, 0 failures" in out, out
+
+
+# The wrapper paths the fuzz harness counts (MADDENING_FUZZ_COUNTERS); every
+# one must be reached in every run, or the harness is not fuzzing what it
+# claims to.  From 86dafe1 ("thread-free fuzz harness") until the audit of
+# 2026-09-16 the fake server was closed before the client sent its request:
+# every exchange failed with EPIPE and no reply was ever parsed.
+FUZZ_PATHS = ("replies_read", "binary_replies", "parse_values", "parse_values_ok",
+              "parse_binary_values", "parse_binary_ok", "hello_negotiated", "hello_binary",
+              "raw_state", "raw_state_ok", "conn_dropped")
+
+
+def _fuzz_paths(out: str) -> dict[str, int]:
+    line = next(l for l in out.splitlines() if l.startswith("fuzz paths:"))
+    return {k: int(v) for k, v in (kv.split("=") for kv in line.split()[2:])}
+
+
+def _assert_fuzz_reached_the_parsers(out: str, iterations: int) -> dict[str, int]:
+    counts = _fuzz_paths(out)
+    missing = [p for p in FUZZ_PATHS if counts.get(p, 0) == 0]
+    assert not missing, (missing, counts)
+    # most iterations get as far as a fully read reply; the success paths
+    # of the binary parsers (a well-formed frame for the operation) are a
+    # steady few per cent, not a lucky one-off
+    assert counts["replies_read"] > 0.5 * iterations, counts
+    assert counts["parse_binary_ok"] > 0.01 * iterations, counts
+    assert counts["raw_state_ok"] > 0.01 * iterations, counts
+    assert counts["parse_values_ok"] > 0.005 * iterations, counts
+    assert counts["hello_binary"] > 0.005 * iterations, counts
+    return counts
+
+
+def test_fuzz_harness_reaches_every_parser_path(tmp_path):
+    """The plain build, one seed: the harness's own self-check passes and
+    the per-path counts it prints are what the sanitizer runs rely on."""
+    exe = _build(C_DIR / "fuzz_maddening_fmu.c", tmp_path / "fuzz")
+    out = _run(exe, "3", "2000")
+    counts = _assert_fuzz_reached_the_parsers(out, 2000)
+    assert "seed=3 iterations=2000 ok" in out
+    assert counts["binary_replies"] > 0.05 * 2000 and counts["conn_dropped"] > 0.05 * 2000
+
+
+def test_fuzz_harness_fails_when_a_path_is_unreached(tmp_path):
+    """The self-check has teeth: one iteration cannot reach every path, so
+    the harness must exit non-zero and say which paths it missed."""
+    exe = _build(C_DIR / "fuzz_maddening_fmu.c", tmp_path / "fuzz")
+    proc = subprocess.run([str(exe), "1", "1"], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 1, proc.stdout
+    assert "FAILED" in proc.stdout and "paths unreached" in proc.stdout
+    assert "was never reached" in proc.stderr
+    assert " ok" not in proc.stdout.splitlines()[-1]
 
 
 @pytest.mark.parametrize("seed", [1, 7, 12345])
@@ -58,6 +222,7 @@ def test_fuzz_replies_under_sanitizers(tmp_path, seed):
     exe = _build(C_DIR / "fuzz_maddening_fmu.c", tmp_path / "fuzz", *SANITIZE)
     out = _run(exe, str(seed), "3000", env=SAN_ENV)
     assert f"seed={seed} iterations=3000 ok" in out
+    _assert_fuzz_reached_the_parsers(out, 3000)
 
 
 @pytest.mark.slow
@@ -65,6 +230,7 @@ def test_fuzz_long_run(tmp_path):
     exe = _build(C_DIR / "fuzz_maddening_fmu.c", tmp_path / "fuzz", *SANITIZE)
     out = _run(exe, "2026", "60000", env=SAN_ENV, timeout=1500)
     assert "iterations=60000 ok" in out
+    _assert_fuzz_reached_the_parsers(out, 60000)
 
 
 def test_wrapper_compiles_clean_with_strict_warnings(tmp_path):
@@ -99,51 +265,84 @@ def test_fmpy_drives_the_sanitized_binary(tmp_path):
     md, bridge = _bridge(gm)
 
     class Hostile:
-        """Answers hello correctly, then garbage / truncated / huge frames."""
+        """Answers hello correctly, then one kind of hostile reply per
+        connection -- garbage bytes, a frame cut off mid-body, a JSON frame
+        of the wrong shape -- to every later request.  Records, per
+        connection, which ops it was sent after the hello, so the test can
+        prove the wrapper was driven into each kind of reply rather than
+        failing before it (the assertion on this half used to be
+        ``got["hostile"] != "returned" or True``, which nothing could
+        fail: a hostile bridge that never answered at all passed)."""
+
+        KINDS = ("garbage", "truncated", "wrong_shape")
 
         def __init__(self):
             self.srv = socket.socket()
             self.srv.bind(("127.0.0.1", 0))
             self.srv.listen(1)
+            self.srv.settimeout(120)
             self.endpoint = "127.0.0.1:%d" % self.srv.getsockname()[1]
-            threading.Thread(target=self.run, daemon=True).start()
+            self.seen: list[tuple[str, list]] = []
+            self.thread = threading.Thread(target=self.run, daemon=True)
+            self.thread.start()
 
         def run(self):
-            conn, _ = self.srv.accept()
-            with conn:
-                n = 0
-                while True:
-                    try:
-                        req = recv_message(conn)
-                    except Exception:
-                        return
-                    if req is None:
-                        return
-                    n += 1
-                    if req.get("op") == "hello":
-                        send_message(conn, {"ok": True, "token": md.instantiation_token})
-                    elif n % 3 == 0:
-                        conn.sendall(struct.pack(">I", 70000) + b'{"ok":true' + b"x" * 100)
-                        return                                     # truncated frame, hang up
-                    elif n % 3 == 1:
-                        conn.sendall(struct.pack(">I", 12) + b"\xff\x00garbage!!!!")
-                    else:
-                        send_message(conn, {"ok": True, "values": "notalist", "state": 5})
+            for kind in self.KINDS:
+                try:
+                    conn, _ = self.srv.accept()
+                except OSError:
+                    return
+                ops: list = []
+                with conn:
+                    conn.settimeout(120)
+                    while True:
+                        try:
+                            req = recv_message(conn)
+                        except Exception:
+                            break
+                        if req is None:
+                            break
+                        if req.get("op") == "hello" and not ops:
+                            send_message(conn, {"ok": True, "token": md.instantiation_token})
+                            continue
+                        ops.append(req.get("op"))
+                        if kind == "truncated":
+                            conn.sendall(struct.pack(">I", 70000) + b'{"ok":true' + b"x" * 100)
+                            break                                 # hang up mid-frame
+                        if kind == "garbage":
+                            conn.sendall(struct.pack(">I", 12) + b"\xff\x00garbage!!!!")
+                        else:
+                            send_message(conn, {"ok": True, "values": "notalist", "state": 5})
+                self.seen.append((kind, ops))
 
     script = tmp_path / "drive.py"
     script.write_text('''
 import json, sys
-from fmpy import simulate_fmu
-fmu, hostile, dt = sys.argv[1], sys.argv[2], float(sys.argv[3])
+from fmpy import extract, read_model_description, simulate_fmu
+from fmpy.simulation import instantiate_fmu
+fmu, hostile, dt, n_hostile = sys.argv[1], sys.argv[2], float(sys.argv[3]), int(sys.argv[4])
 res = simulate_fmu(fmu, start_time=0.0, stop_time=0.2, step_size=dt, output_interval=dt,
                    start_values={"spring.params.stiffness": 45.0},
                    output=["ball.position", "spring.position"])
-out = {"spring": float(res["spring.position"][-1]), "ball": float(res["ball.position"][-1])}
-try:
-    simulate_fmu(hostile, start_time=0.0, stop_time=0.05, step_size=dt, output=["ball.position"])
-    out["hostile"] = "returned"
-except Exception as exc:
-    out["hostile"] = type(exc).__name__
+out = {"spring": float(res["spring.position"][-1]), "ball": float(res["ball.position"][-1]),
+       "hostile": []}
+# One importer session per hostile connection.  The instance is made here
+# and freed in ``finally``, because simulate_fmu frees nothing when a call
+# raises, and a leaked instance would keep its connection open.
+unz = extract(hostile)
+desc = read_model_description(unz)
+for _ in range(n_hostile):
+    inst = None
+    try:
+        inst = instantiate_fmu(unz, desc, fmi_type="CoSimulation")
+        simulate_fmu(unz, start_time=0.0, stop_time=0.05, step_size=dt, output=["ball.position"],
+                     fmu_instance=inst)
+        out["hostile"].append("returned")
+    except Exception as exc:
+        out["hostile"].append(type(exc).__name__)
+    finally:
+        if inst is not None:
+            inst.freeInstance()
 print("RESULT " + json.dumps(out))
 ''')
     env = {**os.environ, "LD_PRELOAD": libasan, "ASAN_OPTIONS": "detect_leaks=0:halt_on_error=1",
@@ -152,10 +351,13 @@ print("RESULT " + json.dumps(out))
         fmu = write_fmu(md, tmp_path / "plant.fmu", binary=so, endpoint=bridge.endpoint)
         h = Hostile()
         fmu2 = write_fmu(md, tmp_path / "hostile.fmu", binary=so, endpoint=h.endpoint)
-        proc = subprocess.run([sys.executable, str(script), str(fmu), str(fmu2), str(DT)],
+        proc = subprocess.run([sys.executable, str(script), str(fmu), str(fmu2), str(DT),
+                               str(len(Hostile.KINDS))],
                               capture_output=True, text=True, env=env, timeout=600)
     assert proc.returncode == 0, f"exit {proc.returncode}\nstdout:\n{proc.stdout[-3000:]}\nstderr:\n{proc.stderr[-6000:]}"
     assert "AddressSanitizer" not in proc.stderr and "runtime error" not in proc.stderr, proc.stderr[-6000:]
+    # the sanitized wrapper negotiated protocol 2: bulk traffic went raw
+    assert bridge.binary_frames_served > 0 and bridge.binary_frames_received > 0
     line = next(l for l in proc.stdout.splitlines() if l.startswith("RESULT "))
     got = json.loads(line[7:])
     ref = _graph()
@@ -164,13 +366,23 @@ print("RESULT " + json.dumps(out))
     out = ref.run_scan(int(round(0.2 / DT)), params=p)
     assert got["spring"] == pytest.approx(float(out["spring"]["position"]), rel=1e-5)
     assert got["ball"] == pytest.approx(float(out["ball"]["position"]), rel=1e-5)
-    assert got["hostile"] != "returned" or True     # the importer must not crash; erroring is fine
+    h.thread.join(timeout=30)       # it records the last connection at its EOF
+    # The hostile half: every kind of reply was actually served to the
+    # wrapper -- a request after the hello, before the instance was freed --
+    # and each session ended in an FMI error the importer could catch, not
+    # in a crash (the sanitizers and the exit code) and not in a success
+    # built from a reply the wrapper should not have trusted.
+    assert [kind for kind, _ in h.seen] == list(Hostile.KINDS), h.seen
+    for kind, ops in h.seen:
+        assert [op for op in ops if op != "terminate"], (kind, ops)
+    assert got["hostile"] == ["FMICallException"] * len(Hostile.KINDS), (got["hostile"], h.seen)
 
 
 VALGRIND = shutil.which("valgrind")
 CLANG = shutil.which("clang")
 
 
+@pytest.mark.slow  # 25-40 s on CI; slow-tests.yml installs valgrind and clang
 @pytest.mark.skipif(VALGRIND is None, reason="valgrind not installed")
 def test_c_unit_tests_under_valgrind(tmp_path):
     """Memcheck over the whole unit-test binary: no invalid reads/writes,
@@ -180,7 +392,7 @@ def test_c_unit_tests_under_valgrind(tmp_path):
            "--track-origins=yes", "-q", str(exe)]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
     assert proc.returncode == 0, f"exit {proc.returncode}\n{proc.stdout[-2000:]}\n{proc.stderr[-6000:]}"
-    assert "0 failures" in proc.stdout
+    assert "checks, 0 failures" in proc.stdout
 
 
 @pytest.mark.skipif(VALGRIND is None, reason="valgrind not installed")
@@ -190,8 +402,10 @@ def test_fuzz_under_valgrind(tmp_path):
            "-q", str(exe), "42", "300"]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
     assert proc.returncode == 0, f"exit {proc.returncode}\n{proc.stderr[-6000:]}"
+    _assert_fuzz_reached_the_parsers(proc.stdout, 300)
 
 
+@pytest.mark.slow  # 25-40 s on CI; slow-tests.yml installs valgrind and clang
 @pytest.mark.skipif(CLANG is None, reason="clang (libFuzzer) not installed")
 def test_libfuzzer_short_campaign(tmp_path):
     """Coverage-guided fuzzing of the reply parser for a bounded time.
@@ -207,7 +421,7 @@ def test_libfuzzer_short_campaign(tmp_path):
     """
     exe = tmp_path / "libfuzz"
     cmd = ["clang", "-g", "-O1", "-DLIBFUZZER", "-fsanitize=fuzzer,undefined",
-           "-fno-sanitize-recover=undefined",
+           "-fno-sanitize-recover=undefined", f'-DMADDENING_FMU_C="{C_SOURCE}"',
            f"-I{FMI3_INCLUDE_DIR}", str(C_DIR / "fuzz_maddening_fmu.c"), "-o", str(exe), "-lpthread"]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:

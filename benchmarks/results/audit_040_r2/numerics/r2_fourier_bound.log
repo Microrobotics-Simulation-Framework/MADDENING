@@ -1,0 +1,27 @@
+MAX_FOURIER_NUMBER = {2: 0.5, 4: 0.3125}
+
+--- stencil_order=2; declared limit 0.5 ---
+  n=   5  sharp Fo = 0.500000
+  n=   6  sharp Fo = 0.500000
+  n=   8  sharp Fo = 0.500000
+  n=  10  sharp Fo = 0.500000
+  n=  16  sharp Fo = 0.500000
+  n=  20  sharp Fo = 0.500000
+  n=  40  sharp Fo = 0.500000
+  n=  80  sharp Fo = 0.500000
+  n= 160  sharp Fo = 0.500000
+  n= 320  sharp Fo = 0.500000
+  monotone increasing in n: True
+
+--- stencil_order=4; declared limit 0.3125 ---
+  n=   5  sharp Fo = 0.316920
+  n=   6  sharp Fo = 0.320629
+  n=   8  sharp Fo = 0.323688
+  n=  10  sharp Fo = 0.324543
+  n=  16  sharp Fo = 0.324846
+  n=  20  sharp Fo = 0.324851
+  n=  40  sharp Fo = 0.324851
+  n=  80  sharp Fo = 0.324851
+  n= 160  sharp Fo = 0.324851
+  n= 320  sharp Fo = 0.324851
+  monotone increasing in n: True

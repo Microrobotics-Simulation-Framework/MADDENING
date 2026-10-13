@@ -172,8 +172,9 @@ class MockCloudSession:
         # Optional preemption timer
         preempt_event = threading.Event()
         if self._preempt_after is not None:
+            preempt_after = self._preempt_after
             def _trigger_preemption():
-                time.sleep(self._preempt_after)
+                time.sleep(preempt_after)
                 preempt_event.set()
             pt = threading.Thread(target=_trigger_preemption, daemon=True)
             pt.start()

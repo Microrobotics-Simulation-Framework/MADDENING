@@ -14,7 +14,7 @@ from maddening.fmi.fmu_state import FMUState
 from maddening.fmi.sidecar import FmuSidecar, SidecarConfig
 
 
-def _make_sidecar(unknown_fn=None):
+def _make_sidecar(unknown_fn=None, *, allow_pickle_rpc=False):
     def step(state, ext):
         new = {}
         for k, fields in state.items():
@@ -32,6 +32,7 @@ def _make_sidecar(unknown_fn=None):
         step_fn=step,
         initial_state=initial,
         unknown_fn=unknown_fn,
+        allow_pickle_rpc=allow_pickle_rpc,
     ))
 
 
@@ -93,9 +94,15 @@ class TestStateRoundTrip:
 
 
 class TestWireProtocol:
+    """The pickled RPC protocol, which only answers when opted into."""
+
+    def test_the_pickled_rpc_protocol_is_refused_unless_opted_into(self):
+        sc = _make_sidecar()                       # allow_pickle_rpc defaults off
+        with pytest.raises(RuntimeError, match="allow_pickle_rpc"):
+            sc.handle(pickle.dumps(("step", {"node": {"x": 2.5}})))
 
     def test_handle_step(self):
-        sc = _make_sidecar()
+        sc = _make_sidecar(allow_pickle_rpc=True)
         request = pickle.dumps(("step", {"node": {"x": 2.5}}))
         response = sc.handle(request)
         ok, result = pickle.loads(response)
@@ -103,7 +110,7 @@ class TestWireProtocol:
         np.testing.assert_allclose(float(result["node"]["x"]), 3.5)
 
     def test_handle_get_state(self):
-        sc = _make_sidecar()
+        sc = _make_sidecar(allow_pickle_rpc=True)
         response = sc.handle(pickle.dumps(("get_state",)))
         ok, fmu_state = pickle.loads(response)
         assert ok == "ok"
@@ -112,7 +119,7 @@ class TestWireProtocol:
     def test_handle_get_dd_forward(self):
         def f(x):
             return {"y": 2.0 * x["a"]}
-        sc = _make_sidecar(unknown_fn=f)
+        sc = _make_sidecar(unknown_fn=f, allow_pickle_rpc=True)
         request = pickle.dumps((
             "get_dd",
             DirectionalDerivativeKind.FORWARD,
@@ -125,14 +132,14 @@ class TestWireProtocol:
         np.testing.assert_allclose(float(result["y"]), 2.0, atol=1e-5)
 
     def test_handle_unknown_request_errors(self):
-        sc = _make_sidecar()
+        sc = _make_sidecar(allow_pickle_rpc=True)
         response = sc.handle(pickle.dumps(("bogus_kind",)))
         kind, msg = pickle.loads(response)
         assert kind == "err"
         assert "unknown" in msg.lower()
 
     def test_handle_set_state_round_trip(self):
-        sc = _make_sidecar()
+        sc = _make_sidecar(allow_pickle_rpc=True)
         snapshot_resp = sc.handle(pickle.dumps(("get_state",)))
         _, fmu_state = pickle.loads(snapshot_resp)
         sc.step({"node": {"x": 100.0}})

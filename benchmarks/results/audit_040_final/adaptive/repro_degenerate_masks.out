@@ -1,0 +1,26 @@
+--- mask_kind=empty
+   c      = [0. 0. 0. 0. 0. 0. 0. 0.]
+   mask   = [0 0 0 0 0 0 0 0]
+   n_active = 0
+   dJ/dtheta = 0.0
+   ratio  = 0.0
+   trapped= True
+   symmetry_break -> {'theta': Array(0.45, dtype=float32)}
+--- mask_kind=half
+   c      = [2.         1.         0.66666667 0.5        0.         0.
+ 0.         0.        ]
+   mask   = [1 1 1 1 0 0 0 0]
+   n_active = 4
+   dJ/dtheta = -8.333333333333332
+   ratio  = 0.766535237144655
+   trapped= False
+   symmetry_break -> {'theta': Array(0.45, dtype=float32)}
+--- mask_kind=all
+   c      = [2.         1.         0.66666667 0.5        0.4        0.33333333
+ 0.28571429 0.25      ]
+   mask   = [1 1 1 1 1 1 1 1]
+   n_active = 8
+   dJ/dtheta = -10.87142857142857
+   ratio  = 1.0
+   trapped= False
+   symmetry_break -> {'theta': Array(0.45, dtype=float32)}

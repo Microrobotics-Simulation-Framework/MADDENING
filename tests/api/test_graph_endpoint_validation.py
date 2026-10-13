@@ -17,7 +17,7 @@ import os
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import pytest
-from fastapi.testclient import TestClient
+from tests._loopback_client import LoopbackTestClient as TestClient
 
 from maddening.api.server import SimulationServer
 from maddening.core.graph_manager import GraphManager
@@ -99,6 +99,28 @@ def test_add_edge_checks_nodes_and_fields():
                                      "source_field": "nope", "target_field": "anchor_position"})
     assert r.status_code == 400 and "Available" in r.json()["detail"]
     assert gm.edges == []
+    assert c.post("/sim/step").status_code == 200
+
+
+def test_validate_reports_an_edge_from_a_node_to_itself_and_the_graph_still_compiles_and_steps():
+    """``POST /graph/validate`` returns ``validate()``'s list as it is.
+
+    An edge from a node to itself draws one ``INFO:`` line, which says
+    which of its own values the node reads.  It is not an error: the graph
+    compiles and steps over REST as it did before the line existed.
+    """
+    gm = _spring()
+    c = _client(gm)
+    assert c.post("/graph/validate").json() == {"issues": []}
+    r = c.post("/graph/edges", json={"source_node": "s", "target_node": "s",
+                                     "source_field": "position",
+                                     "target_field": "anchor_position"})
+    assert r.status_code == 201, r.text
+    assert c.post("/graph/validate").json() == {"issues": [
+        "INFO: edge s.position -> s.anchor_position is from node 's' to itself. Outside a "
+        "coupling group it is a back edge: the node reads its state of the previous step, so "
+        "the term the edge carries is explicit."]}
+    assert c.post("/graph/compile").status_code == 200
     assert c.post("/sim/step").status_code == 200
 
 

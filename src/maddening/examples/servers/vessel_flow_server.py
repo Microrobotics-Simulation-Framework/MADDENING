@@ -7,9 +7,15 @@ signs streamed via WebSocket.
 
 Usage::
 
-    JAX_PLATFORMS=cpu python -m maddening.examples.servers.vessel_flow_server
+    python -m maddening.examples.servers.vessel_flow_server
+    python -m maddening.examples.servers.vessel_flow_server --port 0 --grid 32 16 16
+    python -m maddening.examples.servers.vessel_flow_server --gpu
 
-Then open http://localhost:8000 in your browser.
+Then open http://localhost:8000 in your browser (the server prints the
+address it is serving on; ``--port 0`` lets the OS pick a free port).
+It binds 127.0.0.1 by default and has no authentication: to reach it
+from another machine, forward the port (``ssh -L 8000:127.0.0.1:8000
+<host>``) rather than passing ``--host 0.0.0.0``.
 
 Design note -- FSI and wall_mask_update
 ---------------------------------------
@@ -27,12 +33,19 @@ clot mask is set once per REST call and remains constant between calls.
 """
 
 import os
-# Don't override JAX_PLATFORMS if already set (e.g. JAX_PLATFORMS=gpu)
-if "JAX_PLATFORMS" not in os.environ:
-    os.environ["JAX_PLATFORMS"] = "cpu"
+import sys
+
+# Decide the JAX backend before anything imports JAX: JAX reads
+# JAX_PLATFORMS once, at import, so setting it later has no effect.
+# An explicit JAX_PLATFORMS in the environment is left alone.
+if "--gpu" in sys.argv:
+    os.environ["JAX_PLATFORMS"] = ""   # let JAX pick CUDA/ROCm if present
+else:
+    os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import asyncio
 import logging
+import socket
 import time
 
 import jax.numpy as jnp
@@ -100,9 +113,10 @@ def create_app(grid_shape=(64, 32, 32), vessel_params=None):
 
     Architecture note (HPC / remote deployment)
     --------------------------------------------
-    The server binds to ``0.0.0.0`` so it accepts connections from
-    any network interface.  For HPC deployments where physics runs
-    on a remote GPU node:
+    ``main`` binds 127.0.0.1 unless told otherwise (``--host``); this
+    app has no authentication, so reach a remote node through an SSH
+    tunnel.  For HPC deployments where physics runs on a remote GPU
+    node:
 
     - ``/ws/render`` streams server-rendered JPEG frames (no GPU
       needed on the client).  Works over any network.
@@ -176,40 +190,39 @@ def create_app(grid_shape=(64, 32, 32), vessel_params=None):
         _clot_pos[0] = None
         _clot_mask[0] = _base_mask
         runner.reset_time()
-        relay._step_count = 0
-        relay._sim_time = 0.0
-        relay._snapshot = None
+        relay.reset()
         return {"status": "reset"}
 
     # --- Parameter tuning ---
+    #
+    # Through the graph's parameter pytree, ``gm.params``: the compiled
+    # step reads it on every call, so an edit takes effect on the next
+    # step with no recompile.  (Writing ``node.params`` instead takes
+    # effect only at the next compile.)
+
+    def _set_heart_param(key, value):
+        gm.params["nodes"]["heart"][key] = jnp.asarray(value, dtype=jnp.float32)
+        return {key: float(gm.params["nodes"]["heart"][key])}
 
     @app.put("/sim/heart_rate")
     async def set_heart_rate(bpm: float):
         """Adjust heart rate in real time."""
-        gm._nodes["heart"].node.params["heart_rate"] = bpm
-        gm._dirty = True
-        return {"heart_rate": bpm}
+        return _set_heart_param("heart_rate", bpm)
 
     @app.put("/sim/stroke_volume")
     async def set_stroke_volume(sv: float):
         """Adjust stroke volume (LBM units)."""
-        gm._nodes["heart"].node.params["stroke_volume"] = sv
-        gm._dirty = True
-        return {"stroke_volume": sv}
+        return _set_heart_param("stroke_volume", sv)
 
     @app.put("/sim/resistance")
     async def set_resistance(r: float):
         """Adjust vascular resistance."""
-        gm._nodes["heart"].node.params["resistance"] = r
-        gm._dirty = True
-        return {"resistance": r}
+        return _set_heart_param("resistance", r)
 
     @app.put("/sim/compliance")
     async def set_compliance(c: float):
         """Adjust arterial compliance."""
-        gm._nodes["heart"].node.params["compliance"] = c
-        gm._dirty = True
-        return {"compliance": c}
+        return _set_heart_param("compliance", c)
 
     # --- Clot injection ---
 
@@ -259,7 +272,6 @@ def create_app(grid_shape=(64, 32, 32), vessel_params=None):
     _orig_step = gm.step
 
     def _step_with_clot(external_inputs=None):
-        import warnings as _w
         if _clot_active[0]:
             _ensure_mask_external()
             if external_inputs is None:
@@ -267,9 +279,7 @@ def create_app(grid_shape=(64, 32, 32), vessel_params=None):
             if "vessel" not in external_inputs:
                 external_inputs["vessel"] = {}
             external_inputs["vessel"]["wall_mask_update"] = _clot_mask[0]
-        with _w.catch_warnings():
-            _w.simplefilter("ignore")
-            return _orig_step(external_inputs)
+        return _orig_step(external_inputs)
 
     gm.step = _step_with_clot
 
@@ -359,7 +369,7 @@ def create_app(grid_shape=(64, 32, 32), vessel_params=None):
     def _print_banner():
         nx, ny_g, nz_g = grid_shape
         n_fluid = int(jnp.sum(~vessel_mask))
-        hp = gm._nodes["heart"].node.params
+        hp = {k: float(v) for k, v in gm.params["nodes"]["heart"].items()}
         print()
         print("=" * 60)
         print("  MADDENING Vessel Flow Server")
@@ -386,9 +396,7 @@ def create_app(grid_shape=(64, 32, 32), vessel_params=None):
         print(f"    GET  /sim/vitals          Current vital signs")
         print(f"    GET  /sim/geometry         Vessel centerlines (for 3D)")
         print(f"    WS   /ws/state            Live vitals + velocity data")
-        print(f"\n  Open http://localhost:8000 in your browser")
-        print(f"  3D rendering: client-side (Three.js, no server GPU needed)")
-        print(f"  (Works from any machine — server binds to 0.0.0.0)")
+        print(f"\n  3D rendering: client-side (Three.js, no server GPU needed)")
         print()
 
     _print_banner()
@@ -406,14 +414,18 @@ def main():
                         metavar=("NX", "NY", "NZ"),
                         help="LBM grid resolution (default: 64 32 32)")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--host", type=str, default="0.0.0.0")
+    # Loopback by default.  This demo builds its own FastAPI app with no
+    # credential of any kind, so a 0.0.0.0 default handed the simulation
+    # to anyone who could reach the port -- while every other shipped
+    # example server moved to 127.0.0.1 in 0.4.0.  Pass --host 0.0.0.0
+    # deliberately if you mean it; the warning below still prints.
+    parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--profile", action="store_true",
                         help="Run profiler before starting server")
     args = parser.parse_args()
 
     if args.gpu:
-        # Override to auto-detect (CUDA or ROCm)
-        os.environ["JAX_PLATFORMS"] = ""
+        # JAX_PLATFORMS was already cleared at the top of this module.
         print(f"  GPU mode: JAX will auto-detect available backend")
     else:
         print(f"  CPU mode (use --gpu for GPU)")
@@ -438,8 +450,32 @@ def main():
         raise SystemExit(0)
     signal.signal(signal.SIGINT, _shutdown)
 
+    # This demo builds its own FastAPI app rather than using
+    # SimulationServer, so it does NOT get the bearer token a non-loopback
+    # SimulationServer bind requires.  Its routes only drive this one
+    # simulation (no /cloud/launch, no caller-chosen paths), but with
+    # --host set to a routable address they are open to anyone who can
+    # reach the port, so do not leave the message to the docs.
+    from maddening.api.auth import is_loopback
+    if not is_loopback(args.host):
+        print(
+            f"\n  WARNING: listening on {args.host}:{args.port}, which is not"
+            f"\n  loopback. This demo has no authentication and no TLS:"
+            f"\n  anyone who can reach the port can drive the simulation."
+            f"\n  Use --host 127.0.0.1 unless you mean it.\n"
+        )
+
+    family = socket.AF_INET6 if ":" in args.host else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((args.host, args.port))
+    host_for_url = f"[{args.host}]" if family == socket.AF_INET6 else args.host
+    print(f"  Serving on http://{host_for_url}:{sock.getsockname()[1]}", flush=True)
+
     try:
-        uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+        uvicorn.Server(uvicorn.Config(app, log_level="warning", proxy_headers=False)).run(sockets=[sock])
+    except (KeyboardInterrupt, SystemExit):   # Ctrl-C, after shutdown
+        pass
     finally:
         runner.stop()
 

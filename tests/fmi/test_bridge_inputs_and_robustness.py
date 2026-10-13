@@ -53,7 +53,11 @@ def test_unset_input_is_the_advertised_zero_like_the_graph():
     got = np.asarray(bridge.handle({"op": "get", "vr": [temp]})["values"])
     ref = np.asarray(_heat_graph().run_scan(5)["h"]["temperature"])
     np.testing.assert_allclose(got, ref, rtol=1e-5)
-    assert got[0] < 50.0                                   # the zero left boundary acted
+    # The zero left boundary acted: heat is leaving through the left end,
+    # so the first cell is the coldest and has fallen well off its initial
+    # 100.  It is not *at* zero -- the datum is imposed at the rod end and
+    # the first cell centre is half a cell inside it (MADD-ANO-007).
+    assert got[0] < 80.0 and got[0] == min(got)
     # after reset and after set_state from a snapshot taken before any set
     snap = bridge.handle({"op": "get_state"})["state"]
     assert bridge.handle({"op": "reset"})["ok"]

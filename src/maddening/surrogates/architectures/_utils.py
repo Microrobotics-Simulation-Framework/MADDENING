@@ -6,13 +6,15 @@ from typing import Sequence
 import jax
 import jax.numpy as jnp
 
+from maddening.surrogates.types import MutableStateDict, SpecDict, StateDict
+
 try:
     import equinox as eqx
 except ImportError:
     eqx = None
 
 
-def check_equinox():
+def check_equinox() -> None:
     if eqx is None:
         raise ImportError(
             "This architecture requires equinox. "
@@ -20,7 +22,10 @@ def check_equinox():
         )
 
 
-def compute_sizes(state_spec, boundary_spec):
+def compute_sizes(
+    state_spec: SpecDict,
+    boundary_spec: SpecDict,
+) -> tuple[int, int]:
     """Compute input and output sizes from specs."""
     input_size = sum(math.prod(s) if s else 1 for s in state_spec.values())
     input_size += sum(math.prod(s) if s else 1 for s in boundary_spec.values())
@@ -29,7 +34,14 @@ def compute_sizes(state_spec, boundary_spec):
     return input_size, output_size
 
 
-def flatten_inputs(state, boundary_inputs, dt, state_spec, boundary_spec):
+# Dynamic keys (the node's own fields): an alias, not a TypedDict.
+def flatten_inputs(
+    state: StateDict,
+    boundary_inputs: StateDict,
+    dt: float,
+    state_spec: SpecDict,
+    boundary_spec: SpecDict,
+) -> jax.Array:
     """Flatten state + boundary_inputs + dt into a single vector."""
     parts = []
     for field in sorted(state_spec.keys()):
@@ -44,7 +56,11 @@ def flatten_inputs(state, boundary_inputs, dt, state_spec, boundary_spec):
     return jnp.concatenate(parts)
 
 
-def unflatten_output(output_vec, state_spec):
+# Dynamic keys (the node's own fields): an alias, not a TypedDict.
+def unflatten_output(
+    output_vec: jax.Array,
+    state_spec: SpecDict,
+) -> MutableStateDict:
     """Reshape a flat output vector back into a state dict."""
     result = {}
     offset = 0
@@ -57,12 +73,16 @@ def unflatten_output(output_vec, state_spec):
     return result
 
 
-def get_state_spec(state):
+# Dynamic keys (the node's own fields): an alias, not a TypedDict.
+def get_state_spec(state: StateDict) -> dict[str, tuple[int, ...]]:
     """Infer state_spec from a state dict."""
     return {k: state[k].shape for k in sorted(state.keys())}
 
 
-def get_boundary_spec(boundary_inputs):
+# Dynamic keys (the node's own fields): an alias, not a TypedDict.
+def get_boundary_spec(
+    boundary_inputs: StateDict,
+) -> dict[str, tuple[int, ...]]:
     """Infer boundary_spec from a boundary_inputs dict."""
     if not boundary_inputs:
         return {}

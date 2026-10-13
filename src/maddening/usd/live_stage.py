@@ -1,7 +1,7 @@
-"""LiveStage — generic per-timestep USD writer pulled into MADDENING (v0.3.0 §A3).
+"""LiveStage — generic per-timestep USD writer pulled into MADDENING (v0.3.0).
 
-The plan deliberately *demoted* A3 from "substantial new feature" to
-"small consolidation": the live-stage architecture already existed in
+This was a small consolidation, not a new feature: the live-stage
+architecture already existed in
 MIME's :mod:`mime.viz.stage_bridge`.  MICROROBOTICA already rendered
 those stages.  What was missing was a domain-neutral generalisation
 that non-MIME MADDENING consumers (the bouncing-ball demo, future
@@ -38,8 +38,8 @@ Stability
 ~~~~~~~~~
 The generic surface is tagged ``@stability(EVOLVING)`` — the wire
 format (USD stage layout) is settled, but new generic primitives may
-be added.  v0.4.0+ will harden specific shapes; the freeze happens at
-the M4 (v0.9.0) stability gate per STACK_V1.
+be added.  Promotion is decided in the stability freeze rounds that
+lead to 1.0 (``docs/developer_guide/api_freeze_proposal.md``).
 """
 
 from __future__ import annotations
@@ -47,12 +47,23 @@ from __future__ import annotations
 import math
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Protocol
+from collections.abc import Mapping
+from typing import Any, Callable, Optional, Protocol, TypeAlias
 
 import numpy as np
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
+
+#: One node's state as :meth:`LiveStage.update` receives it:
+#: ``{field_name: array_or_scalar}``.
+#:
+#: Dynamic keys: an alias, not a TypedDict.  The fields are whichever
+#: ones the inner node declares, and the updaters below do not even fix
+#: the names they read
+#: -- ``make_translate_updater(field=...)`` takes the field name as an
+#: argument -- so there is no static key set to describe.
+NodeStateDict: TypeAlias = Mapping[str, Any]
 
 
 logger = logging.getLogger(__name__)
@@ -146,7 +157,7 @@ class PrimUpdater(Protocol):
         self,
         stage: "Usd.Stage",
         prim_path: str,
-        node_state: dict[str, Any],
+        node_state: NodeStateDict,
         time_code: Optional[Any] = None,
     ) -> None: ...
 
@@ -444,7 +455,12 @@ def make_translate_updater(
     bouncing-ball demo, a 1-DOF mass on a spring, etc.).  The
     prim must have a single ``AddTranslateOp`` xform op already.
     """
-    def updater(stage, prim_path, node_state, time_code=None):
+    def updater(
+        stage: "Usd.Stage",
+        prim_path: str,
+        node_state: NodeStateDict,
+        time_code: Optional[Any] = None,
+    ) -> None:
         pos = node_state.get(field)
         if pos is None:
             return
@@ -473,7 +489,12 @@ def make_translate_orient_updater(
     quaternion).  Prim must have ``AddTranslateOp`` + ``AddOrientOp``
     in that order.
     """
-    def updater(stage, prim_path, node_state, time_code=None):
+    def updater(
+        stage: "Usd.Stage",
+        prim_path: str,
+        node_state: NodeStateDict,
+        time_code: Optional[Any] = None,
+    ) -> None:
         prim = stage.GetPrimAtPath(prim_path)
         if not prim.IsValid():
             return
@@ -499,6 +520,7 @@ def make_translate_orient_updater(
 
 __all__ = [
     "LiveStage",
+    "NodeStateDict",
     "PrimUpdater",
     "make_translate_updater",
     "make_translate_orient_updater",

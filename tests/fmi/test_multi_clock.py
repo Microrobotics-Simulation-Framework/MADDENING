@@ -137,9 +137,19 @@ def test_external_inputs_of_a_real_graph_are_fmu_inputs(multirate_graph):
     assert [v.name for v in inputs] == ["spring.anchor_position"]
     assert inputs[0].unit == "m"                      # from boundary_input_spec
     assert inputs[0].description                      # ditto
-    only = build_model_description(multirate_graph, model_name="m",
-                                   selected_inputs=["nope"])
+    # Exporting none of them: the graph still reads the input, so the
+    # description says it is held at zero (and warns), rather than
+    # dropping it in silence.
+    with pytest.warns(UserWarning, match="will be held at zero"):
+        only = build_model_description(multirate_graph, model_name="m",
+                                       selected_inputs=[])
     assert not [v for v in only.variables if v.causality == "input"]
+    assert only.held_inputs == {
+        "spring.anchor_position": ("spring", "anchor_position", (), "float32")}
+    # A name the graph does not declare is refused, not an empty export.
+    with pytest.raises(ValueError, match=r"selected_inputs names \['nope'\]"):
+        build_model_description(multirate_graph, model_name="m",
+                                selected_inputs=["nope"])
 
 
 def test_default_step_size_is_the_fastest_node_timestep(multirate_graph):

@@ -97,9 +97,12 @@ CASES = {
 MIGRATED = {"lbm_d2q9", "lbm_d3q19", "lbm_pipe", "lbm_pipe_multiphase", "surrogate"}
 
 
-# D3Q19 dominates the wall-clock (~3 min on CPU): slow lane.
+# Every lattice battery is over the 5 s test budget on the CI runner --
+# D3Q19 dominates (~3 min on CPU), D2Q9 and the pipe nodes take 26-41 s
+# each: slow lane.  The surrogate keeps a battery here on every push.
+_SLOW_CASES = {"lbm_d2q9", "lbm_d3q19", "lbm_pipe", "lbm_pipe_multiphase"}
 _PARAMS = [
-    pytest.param(n, marks=pytest.mark.slow) if n == "lbm_d3q19" else n
+    pytest.param(n, marks=pytest.mark.slow) if n in _SLOW_CASES else n
     for n in sorted(CASES)
 ]
 
@@ -121,8 +124,8 @@ def test_node_passes_battery(name):
 
 
 def test_lbm_pipe_multiphase_constants_are_trainable_only_in_multiphase():
-    single = LBMPipeNode("a", 1.0, nx=6, ny=5, nz=5)
-    multi = LBMPipeNode("b", 1.0, nx=6, ny=5, nz=5, G=-5.0)
+    single = LBMPipeNode("a", 1.0, nx=6, ny=5, nz=5, propeller_x=2)
+    multi = LBMPipeNode("b", 1.0, nx=6, ny=5, nz=5, propeller_x=2, G=-5.0)
     for key in ("G", "rho_0", "rho_wall", "rho_liquid", "rho_gas"):
         assert single.param_specs()[key].trainable is False
         assert multi.param_specs()[key].trainable is True

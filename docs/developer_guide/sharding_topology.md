@@ -1,7 +1,7 @@
 # Sharding topology: structured vs unstructured
 
 :::{versionadded} 0.3.0
-The unstructured-sharding contract (``ShardedUnstructuredNode`` +
+The unstructured-{term}`sharding <Sharding>` contract (``ShardedUnstructuredNode`` +
 ``StaticArray(replication="partition")`` + the
 ``halo_unstructured.exchange_unstructured`` collective) landed in
 v0.3.0 as a sibling of the v0.2.1 structured path
@@ -11,12 +11,12 @@ v0.3.0 as a sibling of the v0.2.1 structured path
 ## Choice criteria
 
 MADDENING ships **two** first-class sharding wrappers — pick the one
-whose topology matches your node's stencil:
+whose topology matches your {term}`node <Node>`'s {term}`stencil <Stencil>`:
 
 | Wrapper | When to use it | Performance |
 |---|---|---|
-| `ShardedPointwiseNode` | Pointwise nodes (no spatial topology, no halo). | Trivial — every shard runs its slice independently. |
-| `ShardedStencilNode` | **Cartesian** grids — `(nx, ny, nz)`-shaped state, axis-aligned halos via `halo_width()`. | XLA SIMD-vectorised, contiguous memory, ~10–100× faster than the equivalent unstructured topology at the same cell count. |
+| `ShardedPointwiseNode` | Pointwise nodes (no spatial topology, no {term}`halo <Halo>`). | Trivial — every {term}`shard <Shard>` runs its slice independently. |
+| `ShardedStencilNode` | **Cartesian** grids — `(nx, ny, nz)`-shaped state, axis-aligned halos via `halo_width()`. | {term}`XLA` SIMD-vectorised, contiguous memory, ~10–100× faster than the equivalent unstructured topology at the same cell count. |
 | `ShardedUnstructuredNode` | **Arbitrary connectivity** — FVM on unstructured meshes, GNNs over real graphs, finite-element on irregular grids. | Sparse halo exchange via `lax.all_to_all`; pays a per-cell scatter/gather cost compared to the Cartesian path. |
 
 When both topologies are technically viable (some structured-on-irregular
@@ -30,6 +30,41 @@ problems can be expressed either way), the rule is:
   wasteful (large blanked-out regions, very high anisotropy in the
   mesh, mesh adapts dynamically, etc.).
 
+### The grid extent must divide by the device count (Cartesian paths only)
+
+Both Cartesian wrappers split each {term}`sharded <Sharded>` axis **evenly**, so a sharded
+extent has to be a multiple of the devices on its mesh axis: 16 cells over
+3 devices has no layout.  Since v0.4.0 `ShardedStencilNode` and
+`ShardedPointwiseNode` refuse that at construction, with a `ValueError`
+naming the node, the cell count and the device count; before that it
+surfaced much later as a `jax.errors.IndivisibleError` raised from inside
+`device_put`, naming none of them.
+
+The ways out, in the order most people want them:
+
+1. **Size the grid to a multiple of the device count.**  A sharded axis of
+   `n_devices * k` cells is the cheapest fix and keeps the Cartesian
+   performance in the table above.
+2. **Run on a device count that divides the grid.**  The error message
+   lists the ones that do.
+3. **For a pointwise node only: use `ShardedUnstructuredNode`.**  It
+   carries an explicit padded layout and accepts **any** (device, cell)
+   pair — 17 cells over 3 devices included — at the per-cell
+   scatter/gather cost the table above describes.  A pointwise node reads
+   no neighbour, so a layout from `build_unstructured_partition` with an
+   empty `edges` table does.  The constraint is a property of the
+   Cartesian pencil decomposition, not of the framework.
+
+`ShardedUnstructuredNode` is **not** a way out for a stencil node (one
+that declares a `halo_width()`).  It hands `update_padded` the partition
+layout — `[the shard's own cells | ghost cells]` — where a Cartesian
+stencil node reads `[halo | interior | halo]`, so the node would read the
+wrong cells.  Since v0.4.0 it refuses such a node at construction.  Before
+that the node was accepted and stepped wrong with no error: a `HeatNode`
+rod ran 43 K off on two devices, every cell, and an `LBMNode` channel's
+velocity was 100% off.  Until v0.4.0 this section, and the stencil
+wrapper's own refusal, recommended exactly that.
+
 ## Class hierarchy
 
 ```text
@@ -39,39 +74,149 @@ ShardedNode (Protocol — surface contract only)
 └── ShardedUnstructuredNode   (graph-partition, sparse halos)     v0.3.0
 ```
 
-All three share the same substrate:
+All three share the same substrate, with one difference that decides
+which wrapper a node is written for:
 
-* The wrapped inner node's `update_padded(state_padded,
-  boundary_inputs, dt, *, static_padded=None, shard_info=None)`
-  signature is identical.
-* Outputs are classified the same way: keys in `state_fields()` have
-  halo/padding stripped; keys in `domain_integral_fields()` get
-  `lax.psum`-ed across the mesh — or across the subset of mesh axes
+* `ShardedPointwiseNode` calls the inner node's `update`.  The other two
+  call `update_padded(state_padded, boundary_inputs, dt, *,
+  static_padded=None, shard_info=None)` — the same signature, but **not
+  the same contract**, because the padded arrays are laid out
+  differently:
+
+  | | `ShardedStencilNode` | `ShardedUnstructuredNode` |
+  |---|---|---|
+  | each padded field | `[halo \| interior \| halo]` along each axis of `halo_width()` | `[own cells \| ghost cells]` on axis 0, in the layout's order; the own block padded to `n_local_max` |
+  | `shard_info` | `{axis: (offset, extent)}` per sharded axis | `{0: (offset, n_local_max), "n_local": n_owned}` — `n_owned` (traced, v0.4.0) is where the padding starts |
+  | the node declares | a non-empty `halo_width()` | an empty `halo_width()`: the halo is the layout's ghost cells |
+
+  `shard_info`'s keys are `int` spatial axes, each mapped to an
+  `(offset, extent)` tuple, except `"n_local"`, which only the unstructured
+  wrapper passes and which maps to a scalar.  **Iterate over the integer
+  keys only; `n_local` is the one string key.**  A loop written as
+  `for axis, (offset, extent) in shard_info.items()` unpacks that scalar
+  as a tuple and fails under `ShardedUnstructuredNode`:
+
+  <!-- snippet: no-run, reason: fragment: lines inside update_padded -->
+  ```python
+  for axis in (k for k in shard_info if isinstance(k, int)):
+      offset, extent = shard_info[axis]
+  ```
+
+  A node reads one layout or the other, so `ShardedUnstructuredNode`
+  refuses a node with a non-empty `halo_width()` (v0.4.0), and
+  `ShardedStencilNode` refuses one with an empty `halo_width()`.  A node
+  whose `update_padded` genuinely reads both — a pointwise update, say —
+  can tell the unstructured wrapper so with a private
+  `_reads_partition_layout = True`.  That flag is provisional and not
+  part of the node contract.
+* Outputs are classified the same way: keys in `domain_integral_fields()`
+  get `lax.psum`-ed across the mesh — or across the subset of mesh axes
   `domain_integral_axes()` names for them, keeping a leading axis per
-  unreduced mesh axis; other keys raise.
+  unreduced mesh axis; other keys in `state_fields()` have halo/padding
+  stripped; other keys raise.  A key in both lists is an integral (the
+  default `state_fields()` lists every `initial_state` key, so a node that
+  declares its integral's initial value lists it; before 0.4.0 that
+  failed under both wrappers).
 * Both wrappers take part in the graph parameter contract: if the inner
   node's `update_padded` accepts `params`, the wrapper exposes the inner
   `params_pytree()` and hands the node's entry of `gm.params` (replicated
-  to every shard) to `update_padded(..., params=)`.
+  to every shard) to `update_padded(..., params=)`.  A
+  `ShardedStencilNode` wrapping another `ShardedStencilNode` answers for
+  the node inside, and its `update_padded` forwards `params` to it.
 * The sharded Krylov solvers (`sharded_cg` / `sharded_gmres`) take a
   `preconditioner=` (`jacobi_preconditioner`, `block_jacobi_preconditioner`
   ship) and `differentiable=True`, which routes the solve through
   `lax.custom_linear_solve` so a node that solves inside a differentiated
   step gets an exact linear-solve adjoint with the same preconditioner
   applied in the adjoint solve; the iteration count is then reported as
-  -1.
+  -1.  A call WITHOUT `differentiable=True` refuses to be differentiated:
+  `jax.jvp`, `jax.grad`, `jax.jacfwd` and `jax.jacrev` through it raise a
+  `ValueError` that says to pass the flag (differentiating the iteration
+  is not differentiating the solve, and was silently wrong when the
+  tangent was not of `b`'s size: MADD-ANO-266).  With the flag, the
+  tangent and cotangent solves start from zero and are purely relative
+  to their own right-hand side, whatever `x0` and `atol` the call was
+  given.  Nothing reports whether those solves converged: `converged` is
+  the value's, so with the flag give `max_iters` what a solve from zero
+  needs, not what a warm-started one does (MADD-ANO-270, open).
+  `residual_norm` is `||b - A x||` of the returned value on every
+  route, from one product.  On the loop backend (`backend="loop"`, or the
+  default with a preconditioner) and under `differentiable=True`,
+  `converged` is that norm against `max(atol, rtol * ||b||)`, with no
+  allowance for rounding; on the lineax backend it is lineax's own verdict
+  (the docstring of `sharded_cg` says it for each route).  The loop stops
+  on a residual it updates by recurrence, which in float32 drifts from
+  the true one by about `eps * kappa`: a solve asked for more than float32
+  gives -- the default `rtol=1e-6` above a condition number of about 17 --
+  reads `converged=False` with its true residual.  Ask for an `rtol` a few
+  times above `eps * kappa`, or solve in float64.  (Until 0.4.0 such a
+  solve read `converged=True` with a norm under `rtol`: MADD-ANO-263.)
+  The default route without a preconditioner is lineax's CG, which
+  returns NaN in float32 above about 1e5 unknowns; from 0.4.0 the default
+  call solves such a system with the loop backend instead.
+  `backend="lineax"`, asked for by name, still returns the NaN
+  (MADD-ANO-264): pass `backend="loop"`, or solve in float64.
+  An operator that returns a NaN or an infinity is answered, on every
+  route, as a non-finite right-hand side is: NaN in every entry,
+  `converged=False`.  `sharded_cg` can also be called INSIDE a `shard_map`
+  body, one solve per device; the lineax route (the default) then takes
+  only an operator that closes over nothing, and `backend="loop"` any
+  callable.  `sharded_gmres` cannot: every route of it raises there.
+  The same NaN answer is given to a solution too large for the dtype (the
+  answer is tested after it is scaled back: MADD-ANO-272) and to an
+  `rtol` or `atol` that is negative or NaN and arrives as a traced value;
+  given as a concrete number such a tolerance raises a `ValueError`
+  (MADD-ANO-271).  A result is so every entry of `value` finite beside a
+  finite `residual_norm`, or NaN in both (one exception, open: under
+  `differentiable=True` a solution within a factor of the operator's
+  diagonal of the dtype's largest number reads `converged=False` beside an
+  infinite `residual_norm`, or NaN with an `x0` or an `atol`, where the
+  ordinary call answers: MADD-ANO-282).  Where the floor lineax is
+  handed is under the dtype's smallest normal number `tiny` -- `rtol=0`,
+  an explicit `atol=0.0`, a tolerance that underflows, and a positive
+  `atol` under `tiny / p`, `p` the power of two that brings `max|b|`
+  into `[0.5, 1)` (between `tiny * max|b|` and twice that; float32:
+  about 1.2e-8 beside `max|b| = 1e30`) -- lineax's entrywise test is
+  `0 / 0` at an exactly zero entry and lineax stops there reporting
+  success: `converged` on the lineax backend is then not its verdict but
+  `residual_norm <= max(atol, rtol * ||b||)` (MADD-ANO-281).  Across
+  `tiny / p` the flag of one `b` changes from one rule to the other, so
+  it is not monotone in `atol`; every `True` is true of
+  `residual_norm`.  Prefer `atol=None`.  One thing is registered open:
+  on its default (lineax) route `sharded_gmres` counts `max_iters` and
+  `.iters` in restart CYCLES of up to `restart` operator products, not
+  in steps (MADD-ANO-280: on 1000 unknowns `max_iters=10` executed 1,583
+  to 4,490 products over 24 white-noise right-hand sides); for a bound
+  on the work pass `backend="loop"`.  That route does not read `x0`
+  either.
 * `StaticArray` carries the per-array sharding policy via
   `replication=` (`"replicate"` / `"shard"` / `"partition"`).
-* Boundary inputs are classified by shape.  A **grid-shaped** input (on
+* {term}`Boundary inputs` are classified by shape.  A **grid-shaped** input (on
   the stencil path: same extent as the state fields on every sharded
-  spatial axis, e.g. an LBM per-cell `body_force` map or a
+  spatial axis, e.g. an {term}`LBM` per-cell `body_force` map or a
   `wall_mask_update`; on the unstructured path: leading axis of length
   `n_devices * n_local_max` in partition layout, i.e. what
   `partition_value` produces) is sharded and halo/ghost-padded exactly
   like a state field, so `update_padded` receives it at the padded local
   shape.  Everything else (a scalar pressure, a uniform `(D,)` force
-  vector) is replicated to every shard.  The unstructured wrapper refuses
+  vector) is replicated to every shard, whole, where it cannot be told
+  from the shard's own block.  So on the stencil path a replicated input
+  that the node's `boundary_input_spec()` declares per cell (its declared
+  shape leads with the grid's) must broadcast to that declared shape — a
+  scalar, a uniform vector — and anything else is refused, naming the
+  shape given (v0.4.0; a `heat_source` of 4 values on a 16-cell rod split
+  four ways used to be applied on every block).  The unstructured wrapper refuses
   a per-cell input given in *global* cell order rather than misreading it.
+  When every shard is full (`n_global == n_devices * n_local_max`) the two
+  orders have the same length and the shape cannot say which one an array
+  is in: if the partition keeps cells in global order (each device owns a
+  contiguous, ascending block of ids) the two are the same array and it is
+  accepted; otherwise every per-cell input is refused.  Renumber the cells
+  in the order `np.argsort(partition_assignment, kind="stable")` and both
+  readings agree.  The state is in partition layout too: a state field
+  with another row count is refused by name, and on a full, reordered
+  partition a global-order state must go through `partition_value` before
+  it is written, because there nothing can tell it apart.
 
 ## Halo-exchange transport (unstructured path)
 
@@ -88,6 +233,41 @@ moved per shard for both, plus the useful count, straight from the
 layout.  Which transport is *faster* under NCCL is hardware-dependent
 and is measured in the real multi-GPU session; the correctness and the
 byte counts are settled here.
+
+The counts come from the layout alone, so they can be read on the host
+before any device is involved.  A 64-cell ring split into four
+contiguous blocks: each block reads one cell from each neighbouring
+block.
+
+```python
+import numpy as np
+
+from maddening.cloud.multigpu.halo_unstructured import (
+    build_unstructured_partition,
+    exchange_traffic,
+)
+
+n_cells, n_devices = 64, 4
+ring = np.array([[i, (i + 1) % n_cells] for i in range(n_cells)])
+layout = build_unstructured_partition(
+    partition_assignment=np.arange(n_cells) * n_devices // n_cells,
+    edges=ring,
+    n_devices=n_devices,
+)
+traffic = exchange_traffic(layout)
+print(traffic)
+# all_to_all sends n_devices * n_ghost_max = 4 * 2 cells per device;
+# ppermute sends one cell to each of the two neighbouring devices.
+assert traffic == {"all_to_all": 8, "ppermute": 2, "useful": 2, "ppermute_messages": 2}
+```
+
+`python -m maddening.examples.advanced.unstructured_sharding_demo` runs
+the whole unstructured path on four emulated CPU devices: a diffusion
+node on an irregular graph wrapped with `exchange="ppermute"` and checked
+against the unsharded node, the traffic of a compact and of a random
+partition, and `sharded_cg(differentiable=True)` with a Jacobi
+preconditioner, its gradient checked against a dense solve.  It takes
+about ten seconds on three cores.
 
 ## Partition-assignment handoff (unstructured path)
 
@@ -120,7 +300,19 @@ lists, ghost-cell global IDs, and the send/recv index tables the
 ``ShardedUnstructuredNode(node, mesh, layout)``.  Any
 ``StaticArray(replication="partition", partition_assignment=...)`` on
 the inner node must use the same assignment (the layout is
-authoritative).
+authoritative).  Every state field but a domain integral must have one
+row per cell of the layout: since v0.4.0 a node with more or fewer cells
+is refused at construction, naming both counts, where before the cells
+past the layout's count were silently dropped (`partition_value` refuses
+the same thing for any other caller).
+
+Build the inner node's `static_data` once, in its constructor, and
+return the same `StaticArray` objects on every access.  The wrapper keeps
+its per-device copy of each partitioned static keyed on the identity of
+its array, so a `static_data` property that builds new arrays each time
+makes every eager `update()` partition them again: on four GPUs at 10⁷
+cells that cost 242 ms a step against 4.45 ms.  After rewriting a
+static's buffer in place, call `invalidate_static_cache()`.
 
 Reproducibility: the partition assignment is part of the experiment's
 reproducibility bundle (alongside seeds and version pins).  It is not
@@ -141,28 +333,99 @@ the equivalent expressed as a graph with the same number of cells.
 For the MICROROBOTICA Light cloud-rendered demos at 30 fps the gap is
 load-bearing — that's why we keep both paths.
 
-For the v0.3.0 §A6 substrate the toy test is 16 cells and the
-intermediate smoke is 1024 cells; v0.4.0 work will tune the sparse
-halo exchange for real-mesh sizes (10⁴–10⁶ cells) and add NCCL
-fast-paths for actual GPUs.
+CI tests the unstructured path on CPU virtual devices: a 16-cell toy
+mesh, a 1024-cell smoke, and a 10⁵-cell ring in the slow lane for the
+two transports' bit identity.  It was checked once on GPUs, on
+2026-10-12, with `benchmarks/multigpu/run_pod.py`: four NVIDIA RTX PRO
+6000 Blackwell cards joined by PCIe, jax and jaxlib 0.11.2.
 
-## v0.4.0 commitment (hard downstream gate)
+- Sharded and unsharded results agreed from 10⁵ to 10⁸ cells and on a
+  body-fitted tetrahedral mesh of 1,001,664 cells, and `all_to_all`
+  and `ppermute` gave identical results at every size.
+- Per exchange, `ppermute` took 4–5% less time than `all_to_all` at
+  10⁵ and 3×10⁵ cells, and `all_to_all` 17% less at 10⁶.  With five
+  fields per cell `all_to_all` was faster at every size from 10⁵ to
+  10⁶; with one field at 10⁷ cells `ppermute` took half the time.
+  `all_to_all` stays the default.
+- The compiled step of a cheap neighbour-mean node took 3.4 ms at 10⁷
+  cells and 4.0 ms at 10⁸.  At 10⁷ cells the sharded step took 3.82 ms
+  against 1.25 ms on one card: for a node this cheap the step is bound
+  by dispatch and by the halo exchange (43 kernels a step against 2).
 
-By MADDENING v0.4.0 (MIME v0.5.0) the unstructured sharded path must
-support a real FVM `FVMFluidNode` in MIME.  That commitment is what
-makes the v0.3.0 contract load-bearing: the constructor signature,
-`update_padded` plumbing, output classification, and partition-
-assignment handoff documented above are
-``@stability(stable)``-ready.  Any breaking change here cascades into
-a MIME rewrite; v0.4.0 hardens, it doesn't redesign.
+The files are in `benchmarks/results/multigpu/2026-10-12_rtxpro6000/`.
 
-If you find a flaw in the v0.3.0 contract while implementing v0.4.0,
-fix it back in v0.3.0 — surface the break here, not in v0.4.0.
+## Sharding spreads the work, not the size limit, in 0.4.0
+
+In 0.4.0 `ShardedStencilNode` spreads a grid that fits on one device
+across the mesh.  It does not let you run a grid that one device cannot
+hold, because it builds the wrapped node's whole initial state on one
+device before it places the state on the mesh.  Measured on four CPU
+virtual devices (jax 0.11.0):
+
+- constructing the wrapper around an `LBMNode` called the node's
+  `initial_state()` twice, and each call returned every field whole on
+  `cpu:0`;
+- the wrapper's own `initial_state()` called it a third time, whole on
+  `cpu:0`, and only then placed the state across the four devices;
+- around a `HeatNode`, `GraphManager.add_node` and `compile()` called it
+  twice more, again whole on `cpu:0`.
+
+So the largest grid a sharded stencil node can be constructed around, or
+started from its own `initial_state()`, is set by one device's memory, not
+by the mesh's.  Going past it fails loudly, with the runtime's
+out-of-memory error, before the first step.  This is MADD-ANO-262, open in
+0.4.0.
+
+For a grid larger than one device, build the state one device's block at
+a time and assemble it with `jax.make_array_from_single_device_arrays`
+under the sharding the wrapper steps; give the wrapped node a
+`state_fields()` that returns the field names outright, and an
+`initial_state()` that raises (the wrapper then skips its
+construction-time check that the grid divides by the device count, so
+check that yourself); and step it with the wrapper's `update()`, without
+calling its `initial_state()`.
+`benchmarks/multigpu/run_capacity.py` does exactly this (`build_state`,
+`_make_lattice_class`).  The registry entry has the details.  Built this
+way, a 471,905,280-cell D3Q19 `LBMNode` ran on four 96 GB cards on
+2026-10-12 (jax and jaxlib 0.11.2) and stayed within 1.2e-6 of its
+reference.  The sharded lattice step peaked at about 4.3 times its
+state on each device: size a run on that.
+
+## What 0.4.0 does with the unstructured contract
+
+The surface documented above has been `@stability(STABLE)` since v0.3.0:
+the constructor signature, `update_padded` plumbing, output
+classification and partition-assignment handoff of
+`ShardedUnstructuredNode`.  0.4.0 kept it, and redesigned none of it.
+What 0.4.0 added:
+
+* the per-neighbour `ppermute` transport and `exchange_traffic(layout)`
+  (see "Halo-exchange transport" above);
+* per-cell boundary inputs, sharded like state, with a global-order
+  input refused;
+* `shard_info["n_local"]`, each shard's own cell count, so a domain
+  integral can leave out the padding of a short shard's block;
+* refusals of a node declaring a Cartesian `halo_width()` and of a node
+  whose cell count is not the layout's (both silently wrong before);
+* a domain integral carried in the state (an initial value the node
+  declares, or a step's output handed back to the wrapper) is placed as
+  the step returns it — replicated once reduced, stacked along the mesh
+  axis otherwise — rather than partitioned, so such a node runs in a
+  {codeterm}`GraphManager` (the stencil wrapper had the same defect for a vector or
+  per-shard integral, fixed the same way).  In a graph the node gives the
+  integral an initial value in `initial_state()`: a step that adds a field
+  to the state is refused (`GraphManager.step`, as `run_scan`);
+* the session runner `benchmarks/multigpu/run_pod.py` (and its CPU
+  `--dry-run`).
+
+What 0.4.0 does not do: validate the path on real multi-GPU hardware.
+The default transport stays `all_to_all` until NCCL timings from that
+session justify a change, and the only FVM-shaped node that has run on
+the path here is a mock on a small mesh
+(`tests/cloud/multigpu/test_a6_contract_stress.py`).
 
 ## See also
 
 * {doc}`node_authoring` — the inner-node side of the contract.
-* {doc}`stability_report` — current @stability tagging of the
+* {doc}`stability_report` — current `@stability` tagging of the
   sharding API surface.
-* ``plans/MADDENING_v0.3.0_PLAN.md`` §A6 — the source-of-truth scope
-  document (not version-controlled; lives next to the repo).

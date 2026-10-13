@@ -137,6 +137,14 @@ def _grad_through_compiled_step(gm: GraphManager, perturbed_node: str):
     return jax.grad(loss_of_pert)(p0)
 
 
+# Slow-marked (still run by slow-tests.yml): forward and gradient of a 20-node
+# chain under both solvers, 13-16 s on the CI runner, nearly all of it
+# linearising the IFT rule over 40 coupled floats.  The IFT adjoint is held
+# on every push by the analytic-gradient tests below and in
+# ``tests/core/test_coupling_ift_gradient.py``.
+# Per push: tests/core/test_coupling_ift_gradient.py::test_backward_parity_through_jit and
+# tests/core/test_coupling_ift_lineax.py::test_default_adjoint_solve_returns_the_analytic_gradient_when_stiff
+@pytest.mark.slow
 def test_small_chain_backward_parity():
     """N=20 chain: jax.grad through jitted step agrees fori vs ift."""
     n = 20
@@ -157,6 +165,9 @@ def test_small_chain_backward_parity():
 # ----------------------------------------------------------------------
 
 
+# Per push: tests/core/test_coupling_ift_gradient.py::test_backward_parity_through_jit and
+# tests/core/test_coupling_ift_lineax.py::test_default_adjoint_solve_returns_the_analytic_gradient_when_stiff
+# (the IFT adjoint on small groups; the 120-node scale is slow-lane only).
 @pytest.mark.slow
 def test_large_chain_backward_finite_diff():
     """N=120 chain (~240 floats of group state): IFT backward via
@@ -299,6 +310,11 @@ def test_bicgstab_known_breakdown_with_function_operator():
         )
 
 
+# Slow-marked (still run by slow-tests.yml), for the reason above: 12-15 s on
+# the CI runner.  ``test_stiff_adjoint_agrees_across_linear_solvers`` keeps
+# dense-vs-gmres agreement on every push on a four-float group.
+# Per push: tests/core/test_coupling_ift_lineax.py::test_stiff_adjoint_agrees_across_linear_solvers
+@pytest.mark.slow
 def test_dense_matches_gmres_gradient_small_chain():
     """``linear_solver='dense'`` agrees with ``'gmres'`` on a small chain.
 
@@ -354,6 +370,43 @@ def test_dense_matches_gmres_gradient_small_chain():
 # small fixtures where the empirical bug wouldn't be detectable.
 
 
+def _make_wide_cycle(width: int) -> GraphManager:
+    """Two nodes, ``2 * width`` coupled floats: ``x <- 0.5 * y + 1``, ``y <- x``.
+
+    Default ``solver`` and ``linear_solver``, compiled but not stepped.
+    """
+    from maddening.core.node import BoundaryInputSpec, SimulationNode
+
+    class _Half(SimulationNode):
+        def initial_state(self):
+            return {"x": jnp.zeros(width)}
+
+        def boundary_input_spec(self):
+            return {"u": BoundaryInputSpec(shape=(width,), description="u")}
+
+        def update(self, state, bi, dt):
+            return {"x": 0.5 * bi.get("u", jnp.zeros(width)) + 1.0}
+
+    class _Relay(SimulationNode):
+        def initial_state(self):
+            return {"y": jnp.zeros(width)}
+
+        def boundary_input_spec(self):
+            return {"v": BoundaryInputSpec(shape=(width,), description="v")}
+
+        def update(self, state, bi, dt):
+            return {"y": bi.get("v", jnp.zeros(width))}
+
+    gm = GraphManager()
+    gm.add_node(_Half("a", 0.01))
+    gm.add_node(_Relay("b", 0.01))
+    gm.add_edge("a", "b", "x", "v")
+    gm.add_edge("b", "a", "y", "u")
+    gm.add_coupling_group(["a", "b"], max_iterations=30, tolerance=1e-8)
+    gm.compile()
+    return gm
+
+
 def test_gmres_call_uses_explicit_restart_at_least_minN50(monkeypatch):
     """Production IFT backward must call ``lx.GMRES`` with
     ``restart >= min(N, 50)``, not the lineax default of 20.
@@ -374,36 +427,42 @@ def test_gmres_call_uses_explicit_restart_at_least_minN50(monkeypatch):
 
     monkeypatch.setattr(lx, "GMRES", _spy_gmres)
 
-    # N=60 chain ⇒ group state size 120 floats, well above the
-    # lineax default restart of 20.  We expect the production code
-    # to pass restart=50 (= min(120, 50)).
-    n = 60
-    gm = _make_chain_gm(n, "ift")
-    _ = gm.step()
+    # A group state of 60 floats, well above the lineax default restart
+    # of 20 and above the cap, so the production code must pass
+    # restart=50 (= min(60, 50)).  GMRES is sized by the *flat* group
+    # state, not the node count, so two nodes carrying 30-float fields
+    # reach the same construction a 30-node spring chain does, and the
+    # adjoint of two nodes traces in a second where the chain took ten.
+    width = 30
+    n_state = 2 * width
+    gm = _make_wide_cycle(width)
     compiled = gm._compiled_step
     initial_state = gm._state
-    names = [k for k in initial_state.keys() if k != "_meta"]
 
-    # Force the backward to be traced by computing a gradient.
-    def loss_fn(pos):
+    # Force the backward to be traced.  The solver is constructed while
+    # the adjoint is traced, which is all the spy needs, so the gradient
+    # is traced (``make_jaxpr``) and never compiled or run: compiling and
+    # running the forward step and the gradient of a 60-node chain made
+    # this 30 s on the CI runner for a check on two constructor arguments.
+    def loss_fn(x0):
         state = {
             k: dict(v) if isinstance(v, dict) else v
             for k, v in initial_state.items()
         }
-        state["s0"] = dict(state["s0"])
-        state["s0"]["position"] = pos
+        state["a"] = dict(state["a"])
+        state["a"]["x"] = x0
         new_state = compiled(state, {})
-        return _loss_chain(new_state, names)
+        return jnp.sum(new_state["a"]["x"] ** 2) + jnp.sum(new_state["b"]["y"] ** 2)
 
-    _ = jax.grad(loss_fn)(initial_state["s0"]["position"])
+    jax.make_jaxpr(jax.grad(loss_fn))(initial_state["a"]["x"])
 
     assert seen_kwargs, (
         "lx.GMRES was never called during the IFT backward — the spy "
         "is not reaching the production solver."
     )
     # All calls (there may be more than one if the bwd is re-traced)
-    # must use restart >= min(2*N, 50) = 50.
-    expected_min_restart = min(2 * n, 50)
+    # must use restart >= min(n_state, 50) = 50.
+    expected_min_restart = min(n_state, 50)
     for kw in seen_kwargs:
         restart = kw.get("restart")
         assert restart is not None, (
@@ -428,3 +487,152 @@ def test_gmres_call_uses_explicit_restart_at_least_minN50(monkeypatch):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
+
+
+# ----------------------------------------------------------------------
+# 5. Stiff small group — the adjoint solve must not crash on the
+#    default path
+# ----------------------------------------------------------------------
+#
+# Coupling audit 2026-09-19 (audit_040_final/coupling): ``jax.grad``
+# through ``solver="ift", linear_solver="gmres"`` -- both defaults --
+# raised ``_EquinoxRuntimeError: iterative breakdown`` on a *4-DOF*
+# two-node cycle whose slow contraction mode is 0.999.  ``jax.jvp`` on
+# the same graph was fine and ``linear_solver="dense"`` was fine, so it
+# was the transpose (adjoint) solve specifically.
+#
+# The mechanism is a tolerance-versus-conditioning interaction, not a
+# Krylov breakdown: ``cond(I - dF/dx) ~ 1/(1 - rho)`` puts the
+# attainable float32 accuracy (``eps * cond``) *below* the tolerance
+# lineax is asked for, GMRES exhausts its Krylov space without passing
+# the test, and the redundant restart cycle reports breakdown.  The
+# remedy lineax prints -- raise ``restart`` -- cannot help, because
+# ``restart`` is already ``min(N, 50)``.  See the long-form comment in
+# ``coupling._ift._ift_linear_solve``.
+#
+# It is also non-monotone in stiffness (0.998 and 0.999 raised, 0.9995
+# did not), because whether the float32 iterate lands inside an
+# unreachable tolerance is a round-off lottery in the cotangent.  So
+# the scan below covers the whole band rather than the one rate that
+# happened to fail.
+
+
+_STIFF_MODES = (0.9, 0.95, 0.98, 0.99, 0.995, 0.998, 0.999, 0.9995)
+
+
+def _make_two_mode_cycle(rho_slow: float, linear_solver: str = "gmres"):
+    """A two-node cycle whose flat group state is 4 floats.
+
+    ``a`` applies a diagonal contraction ``diag(rho_slow, 0.2)`` to its
+    boundary input and adds ``gain * (1e-5, 1.0)``; ``b`` is the
+    identity that closes the cycle.  The fixed point is
+    ``gain * c / (1 - rho)`` per mode, so
+    ``d(sum x*)/d(gain) = sum(c / (1 - rho))`` in closed form.
+    """
+    from maddening.core.node import BoundaryInputSpec, SimulationNode
+
+    rho = jnp.asarray([rho_slow, 0.2])
+    c = jnp.asarray([1e-5, 1.0])
+
+    class _Contract(SimulationNode):
+        def __init__(self, name, dt, gain=1.0):
+            super().__init__(name, dt, gain=gain)
+
+        def initial_state(self):
+            return {"x": jnp.zeros(2)}
+
+        def boundary_input_spec(self):
+            return {"u": BoundaryInputSpec(shape=(2,), description="u")}
+
+        def update(self, state, bi, dt, *, params=None):
+            p = self.params if params is None else {**self.params, **params}
+            return {"x": rho * bi.get("u", jnp.zeros(2)) + p["gain"] * c}
+
+    class _Relay(SimulationNode):
+        def initial_state(self):
+            return {"y": jnp.zeros(2)}
+
+        def boundary_input_spec(self):
+            return {"v": BoundaryInputSpec(shape=(2,), description="v")}
+
+        def update(self, state, bi, dt, *, params=None):
+            return {"y": bi.get("v", jnp.zeros(2))}
+
+    gm = GraphManager()
+    gm.add_node(_Contract("a", 0.01))
+    gm.add_node(_Relay("b", 0.01))
+    gm.add_edge("a", "b", "x", "v")
+    gm.add_edge("b", "a", "y", "u")
+    gm.add_coupling_group(
+        ["a", "b"], max_iterations=60, tolerance=1e-4, diagnostics=True,
+        solver="ift", linear_solver=linear_solver,
+    )
+    gm.compile()
+    return gm
+
+
+def _gain_gradient(rho_slow: float, linear_solver: str = "gmres") -> float:
+    def loss(p):
+        gm = _make_two_mode_cycle(rho_slow, linear_solver)
+        return jnp.sum(gm.run_scan(1, params=p)["a"]["x"])
+
+    base = _make_two_mode_cycle(rho_slow, linear_solver).params
+    return float(jax.grad(loss)(base)["nodes"]["a"]["gain"])
+
+
+@pytest.mark.parametrize("rho_slow", _STIFF_MODES)
+def test_default_adjoint_solve_returns_the_analytic_gradient_when_stiff(
+    rho_slow,
+):
+    """``jax.grad`` on the default solver path neither raises nor lies.
+
+    Regression for the audit's 4-DOF breakdown.  The closed-form
+    gradient is available here, so this asserts the *answer* and not
+    merely the absence of an exception -- a fallback that silently
+    returned the unconverged Krylov iterate would pass the weaker test.
+    """
+    exact = float(1e-5 / (1.0 - rho_slow) + 1.0 / (1.0 - 0.2))
+    got = _gain_gradient(rho_slow)
+    assert got == pytest.approx(exact, rel=2e-3), (
+        f"rho_slow={rho_slow}: adjoint gradient {got} != analytic {exact}"
+    )
+
+
+@pytest.mark.parametrize("rho_slow", (0.998, 0.999))
+def test_stiff_adjoint_agrees_across_linear_solvers(rho_slow):
+    """The two rates that used to raise agree with the dense backend.
+
+    ``"gmres"`` now re-solves densely when lineax reports failure, so
+    the two backends must produce the same number on exactly the
+    configurations where they used to produce a number and an
+    exception.
+    """
+    assert _gain_gradient(rho_slow, "gmres") == pytest.approx(
+        _gain_gradient(rho_slow, "dense"), rel=1e-5,
+    )
+
+
+def test_unaffordable_dense_fallback_names_the_remedies_that_work(
+    monkeypatch,
+):
+    """Above the fallback size a failed adjoint raises MADDENING's error.
+
+    The matrix-free path exists so that large groups never materialise
+    ``N**2``, so the fallback is deliberately capped; above the cap the
+    failure has to surface.  What it must *not* do is surface lineax's
+    own message, whose only remedy ("increase ``restart``") is already
+    at its maximum and does not address the mechanism.
+
+    Driving a genuine >50-DOF breakdown is a round-off lottery, so the
+    cap is lowered to 0 instead and the 4-DOF case that reliably fails
+    is reused.  That exercises the same branch on the same failure.
+    """
+    from maddening.core.coupling import _ift as ift_mod
+
+    monkeypatch.setattr(ift_mod, "_DENSE_ADJOINT_FALLBACK_MAX_DOF", 0)
+    with pytest.raises(Exception) as excinfo:  # noqa: PT011 — eqx runtime error
+        _gain_gradient(0.999)
+    message = str(excinfo.value)
+    assert "linear_solver='dense'" in message, message
+    assert "MADDENING_IFT_DENSE_SOLVE" in message, message
+    assert "restart" in message and "NOT help" in message, message

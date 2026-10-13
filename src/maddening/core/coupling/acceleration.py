@@ -11,10 +11,21 @@ inside ``jax.lax.fori_loop``.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+import math
+from typing import Any, Optional, Union
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+
+from maddening.core._pow2_frame import pow2_frame, pow2_rescue
+from maddening.core.coupling._interface_plan import (
+    KERNEL_LENGTH,
+    InterfacePlan,
+    _position_lattices,
+    _read_in_kernel_lengths,
+    interface_records,
+)
 
 
 # ------------------------------------------------------------------
@@ -25,23 +36,303 @@ def _is_float_leaf(v) -> bool:
     return jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating)
 
 
+def _has_entries(v) -> bool:
+    """Does the field *v* hold at least one entry?
+
+    **A field with no entries is not read.**  A member of a coupling group
+    may hold a floating field of size zero (an empty contact set, a list
+    with none this configuration), and an edge may deliver one.  Such a
+    field has no magnitude to be measured against -- ``max|v|`` over no
+    entries is not a number -- so it carries no norm, no weight, no floor
+    term and no gain: every reduction the coupling machinery takes over a
+    field (the three norms and their float floor, the report's weights,
+    magnitudes, coarsest ``eps`` and measured evaluation count) is taken
+    over the fields this is true of, and a group with such a field reports
+    what the same group without it does.  Static -- a shape, never a value
+    -- so a group whose fields all have entries compiles the program it
+    always did.
+    """
+    return 0 not in np.shape(v)
+
+
 def float_fields_of(state: dict[str, dict], node_names) -> dict[str, tuple[str, ...]]:
     """``{node: (float fields...)}`` for the given nodes -- the fields a
     coupling norm, a predictor or a fixed-point vector may contain.  A
-    counter, a flag or a PRNG key is recomputed from the pre-step state
-    on every pass and has no place in a floating-point norm."""
+    counter, a flag or a PRNG key is computed by every pass and has no
+    place in a floating-point norm, an extrapolation or a relaxation."""
     return {
         nn: tuple(f for f in sorted(state[nn]) if _is_float_leaf(state[nn][f]))
         for nn in node_names
     }
 
 
+def _field_reference(new_val, old_val):
+    """The field's own magnitude, used as the scale of its criterion.
+
+    ``max |v|`` over the whole field rather than element by element:
+    the question a convergence criterion answers is "has *this
+    quantity* stopped moving", and a quantity is one field, not one
+    array entry.  Taking the maximum over both iterates makes the
+    reference monotone in the iterate rather than oscillating with it.
+    """
+    return jnp.maximum(jnp.max(jnp.abs(new_val)), jnp.max(jnp.abs(old_val)))
+
+
+def _scaled_change(new_val, old_val, atol: float, rtol: float, kept=None):
+    """``(|dx| / (rtol * ref), active)`` for one field.
+
+    *kept* (a traced boolean, or ``None``) keeps the field out of the
+    dead band whatever its own magnitude: what an interface edge read at
+    its source delivers is above ``atol``
+    (:func:`_kept_by_what_is_delivered`).  ``None``, which is every field
+    of the L2 and mixed norms and every reading of a group that declares
+    no dead band, adds nothing to the expressions below.
+
+    ``active`` is the dead band: a field whose own magnitude does not
+    exceed ``atol`` is *at zero within the tolerance the caller
+    declared*, and contributes nothing.  That is the only place an
+    absolute number enters, and it is the only place one can: "how
+    small is indistinguishable from zero" is the one question that
+    genuinely has units.  Everywhere above the dead band the criterion
+    is a ratio, so this measurement of a given change says the same
+    thing whether a force is quoted in newtons or micronewtons.  That is
+    the measurement, not the run it is taken on: the accelerated
+    iterations form their steps over all the fields together and repeat
+    a run under one common factor only (``CouplingGroup.convergence_norm``;
+    MADD-ANO-285).
+
+    **The dead band is an assertion the caller makes, so its default
+    asserts nothing (``atol=0.0``).**  Leaving the norm is not the same
+    as being held to a looser threshold: an excluded field contributes
+    exactly zero, so a group every one of whose moving fields is
+    excluded reports ``residual=0.0, converged=True`` after one pass
+    however far it is from its fixed point, and no ``tolerance`` can
+    contradict it.  Only the caller knows which of their quantities is
+    noise -- a float32 holding 1e-9 carries the same seven significant
+    digits as one holding 1.0, so nothing here can tell "small because
+    it is nothing" from "small because it is measured in metres".
+    0.4.0 changed ``atol`` from a floor under the scale, where 1e-8
+    merely *loosened* a small field's criterion, into this exclusion,
+    where 1e-8 *removes* it; the default had to move with the meaning.
+    Leave it at ``0.0`` in 0.4.0: a change that has to cross an excluded
+    field is not seen until it reaches a kept one, and every group that
+    sets ``atol > 0`` is advised on (MADD-ANO-254;
+    ``_group_layout._dead_band_advisories``).
+
+    Dividing is safe by construction — the denominator is only ever
+    used where ``ref > atol``, and elsewhere the ``where`` selects a
+    zero contribution — so a field that is legitimately at zero neither
+    divides by something tiny nor blocks convergence forever.  At the
+    default that ``scale > 0`` term is the whole of the guard, and it
+    is the only exclusion that needs no units: a field with no scale
+    has no ratio to contribute.
+
+    **A field the criterion cannot be evaluated on fails it; it does
+    not leave it.**  Two conditions make a field unevaluable, and both
+    return ``(inf, True)``: every entry reads ``inf``, the field counts
+    as active, and every norm built on this helper is ``inf`` -- so
+    ``converged`` is False, ``residual`` is reported non-finite,
+    ``error_amplification`` rejects the ratio and ``strict_convergence``
+    raises.  The dead band above is untouched for finite fields: a
+    field that is genuinely at zero still drops out exactly as before.
+
+    1. *A non-finite reference.*  One ``NaN`` or ``inf`` entry in either
+       iterate makes ``ref`` non-finite.  Before 0.4.0 that fed straight
+       into the norm and the residual read ``NaN``, which no criterion
+       accepts.  The dead band changed that: ``NaN > atol`` is False, so
+       a NaN field was *inactive* and contributed exactly zero, and a
+       relaxed iteration that diverged past float32 range reported
+       ``residual=0.0, converged=True`` on the state it had just
+       destroyed (MADD-ANO-019).
+    2. *A reference too large for its own scale.*  ``diff / scale`` is a
+       broadcast divide, which XLA's CPU backend lowers to a multiply by
+       the reciprocal of ``scale``; above ``1 / finfo.tiny`` (about
+       ``8.5e37`` in float32, only reachable under the L2 norm's
+       ``rtol=1.0``) that reciprocal is subnormal and is flushed to
+       zero, so a field moving by twice its own size read as not moving
+       at all, and the same iteration reported ``converged=True`` one
+       pass *before* it overflowed, with a finite state of ``-1.2e38``.
+       Rather than depend on how a backend lowers a divide, a scale
+       whose reciprocal is not a normal number of the field's dtype is
+       out of range.  The boundary this draws: a float32 field within a
+       factor of four of overflow can never read as converged.  No
+       simulation state lives there on purpose, and one that does has
+       already lost every digit of the step it is being asked about.
+
+    **The other end of the range: a scale too small to be a number.**
+    Under the ``"mixed"`` and ``"interface"`` norms the scale is
+    ``rtol * ref``, and for a field whose own magnitude is a perfectly
+    normal float32 but below ``finfo.tiny / rtol`` (about ``1.2e-32``
+    at ``rtol=1e-6``) that product is subnormal.  The CPU backend
+    flushes it to zero, ``scale > 0`` was False, and the field was
+    *inactive* -- the dead band by another route, one the caller never
+    declared: a field at ``1e-33`` was reported ``iterations=1,
+    residual=0.0, converged=True`` while 90% from its fixed point.
+    Failing closed there, as the overflow end does, would be wrong in
+    the other direction: the field holds its full 24 bits and its
+    change is perfectly measurable, it is only the product that is not.
+    So a field above the dead band whose scale is not a normal number
+    is measured on the rescaled pair ``|new * 2**k - old * 2**k| / (rtol
+    * (ref * 2**k))`` with ``2**k = 1 / finfo.tiny``, which is the same
+    quotient -- a power of two scales exactly -- computed where every
+    operand is normal.
+
+    **The change is rescaled before it is taken, not after.**  The
+    *difference* of two normal numbers is subnormal whenever it is below
+    ``finfo.tiny``, which for a field of magnitude ``ref`` is every
+    change of less than ``tiny / ref`` of itself -- one ulp as soon as
+    ``ref < tiny / eps`` (about ``9.9e-32`` in float32), whatever the
+    norm's ``rtol``.  The CPU backend flushes that difference to zero,
+    so rescaling ``|new - old|`` afterwards rescaled a zero: a field at
+    ``1e-35`` read ``residual=0.0, converged=True`` 43 passes into an
+    iteration that takes 126-130 at ``1e-29``, under all three norms and
+    both solvers, and the spectral bound built on that residual read
+    6e-4 of the true distance with ``spectral_usable=True``.  So wherever
+    a one-ulp change of the field is below the normal range the pair is
+    multiplied by ``2**k`` first and the difference is taken between two
+    normal numbers; the norm then says the same thing about a group at
+    ``1e-35`` as about the same group scaled by any power of two into
+    the normal range -- to the bit, pinned by
+    ``test_the_verdict_does_not_change_below_the_change_underflow``.
+
+    A field whose magnitude is *itself* subnormal is below what the
+    dtype resolves: a flush-to-zero backend (XLA's CPU backend is one)
+    reads it as zero and it leaves the norm as a field at zero does;
+    elsewhere it is rescaled like the rest.  Every other field is
+    measured by the expressions the norms always evaluated, selected by a
+    ``where``, so its value -- and the compiled loop it sits in -- is
+    bit-identical to what it was before either guard existed.
+    """
+    ref = _field_reference(new_val, old_val)
+    scale = rtol * ref
+    dtype = jnp.asarray(scale).dtype
+    info = jnp.finfo(dtype)
+    tiny = info.tiny
+    # ``scale * tiny`` is exact (``tiny`` is a power of two) unless it
+    # underflows, and an underflow means the scale is small, which is
+    # the evaluable side.  Non-finite ``ref`` fails ``isfinite``; an
+    # ``inf`` scale also fails the product test, so the two agree.
+    evaluable = jnp.logical_and(
+        jnp.isfinite(ref),
+        scale * tiny <= 1.0,
+    )
+    # The underflow end of the *scale*: above the caller's dead band (so
+    # ``ref > 0``) but a scale below the smallest normal number (or
+    # flushed to zero).  There numerator and denominator are both
+    # multiplied by ``k = 1 / tiny``, a power of two, so the quotient is
+    # the same one; everywhere else ``k`` is exactly ``1.0`` and
+    # multiplying by it is exact.  NaN ``ref`` and ``scale`` compare
+    # False, so this is finite-only.
+    #
+    # These are the expressions the norms have always evaluated, kept
+    # verbatim -- the L2 norm's two-op form included -- because the
+    # residual shares a compiled loop body with the node updates, and
+    # XLA fuses the two: rewritten in an equivalent form (the pair
+    # rescaled before subtracting, ``k`` exactly 1.0 in range) the
+    # arithmetic of the *node updates* moved by an ulp under
+    # ``solver="ift"`` and the L2 norm, and one group stopped on a
+    # different pass.  So the rescaled pair below is an alternative the
+    # ``where`` selects, not a change to these.
+    diff = jnp.abs(new_val - old_val)
+    above = ref > atol
+    if kept is not None:
+        # Beside the band's own test, never in place of it, and only for
+        # a field that has a magnitude: everything below reads ``above``
+        # as "``ref > 0``" (the rescaled quotients divide by ``ref``), and
+        # a field at exactly zero has no scale to be measured against
+        # whatever a transform delivers from it.  A non-finite field
+        # still fails (``evaluable``).
+        above = jnp.logical_or(above, jnp.logical_and(kept, ref > 0))
+    if isinstance(rtol, (int, float)) and float(rtol) >= 1.0:
+        # ``scale >= ref`` here (the L2 norm passes ``rtol=1.0``), so a
+        # field with a normal magnitude has a normal scale.
+        active = jnp.logical_and(above, scale > 0)
+        safe = jnp.where(active, scale, jnp.ones_like(scale))
+        scaled = jnp.where(active, diff / safe, jnp.zeros_like(diff))
+    else:
+        underflow = jnp.logical_and(above, scale < tiny)
+        k = jnp.where(underflow, pow2_rescue(dtype), 1.0).astype(dtype)
+        active = jnp.logical_or(jnp.logical_and(above, scale > 0), underflow)
+        safe = jnp.where(active, rtol * (ref * k), jnp.ones_like(scale))
+        scaled = jnp.where(active, (diff * k) / safe, jnp.zeros_like(diff))
+    # The underflow end of the *change*: a field so small that a change
+    # of one ulp of it is subnormal (``ref < tiny / eps``), which the
+    # subtraction above flushes to zero, whatever ``rtol``.  There the
+    # pair is multiplied by ``K = 1 / tiny`` *before* it is subtracted,
+    # so the difference is taken between two normal numbers, and the
+    # scale by the same ``K``: the same quotient, to the bit, as the
+    # same group scaled by a power of two into the normal range.  This
+    # covers the scale's underflow end too wherever ``rtol >= eps``.
+    # ``ref * K`` stays below ``1 / eps`` on the fields it is applied to.
+    small = jnp.logical_and(above, ref < float(tiny) / float(info.eps))
+    big_k = float(pow2_rescue(dtype))
+    active = jnp.logical_or(active, small)
+    pair = jnp.abs(new_val * big_k - old_val * big_k)
+    small_safe = jnp.where(small, rtol * (ref * big_k), jnp.ones_like(scale))
+    scaled = jnp.where(small, pair / small_safe, scaled)
+    # ``where`` with the finite computation in the *selected* branch:
+    # an evaluable field's value, and its gradient, are exactly what
+    # they were before this guard existed.
+    scaled = jnp.where(evaluable, scaled, jnp.full_like(diff, jnp.inf))
+    active = jnp.logical_or(active, jnp.logical_not(evaluable))
+    return scaled, active
+
+
+def _widened(v):
+    """*v* in at least float32: the dtype every norm measures a change in.
+
+    **A 16-bit field is measured in float32, and the norms accumulate
+    there.**  Every norm forms a ratio ``|dx| / (rtol * max|v|)``,
+    squares it and sums the squares over the fields.  In float16 each
+    step overflowed on ordinary data: at the default ``rtol=1e-6`` a
+    change of one float16 ulp is a ratio of about 977, its square is
+    past float16's 65 504, and a mixed or interface residual read
+    ``inf`` on a finite state, which ``strict_convergence`` then
+    reported as divergence; a change of 6.5% overflowed before it was
+    squared.  And the running sum was a weakly typed ``jnp.array(0.0)``,
+    which took the field's float16, so the int32 entry count it was
+    divided by became float16 ``inf`` above 65 504 entries: the RMS of a
+    finite sum read exactly ``0.0``, and a group 4% from its fixed point
+    stopped with ``converged=True``.
+
+    Widening is exact -- every bfloat16 and float16 value is a float32
+    one -- so what is measured is the field's own change, with
+    float32's range and resolution for the arithmetic after it, and the
+    running sums start from a strongly typed float32 zero.  A float32 or
+    float64 field is returned as it is, and adding a zero is exact, so
+    those groups' norms are bit for bit what they were.
+
+    **The 16-bit value is the one the state holds.**  XLA may compute a
+    16-bit operation in float32 and skip the rounding between a node's
+    output and a widening of it (``xla_allow_excess_precision``, on by
+    default, folds a float32 -> bfloat16 -> float32 conversion pair), and
+    the norm then measured the node's *unrounded* output against the
+    stored iterate: half an ulp of motion on a stalled group, and a
+    different half ulp under each solver's fusion -- ``"fori"`` and
+    ``"ift"`` stopped on different passes.  The value is passed through
+    ``optimization_barrier`` before it is widened, so the rounding to its
+    own dtype happens first, as it does for the state.
+    """
+    v = jnp.asarray(v)
+    wide = jnp.promote_types(v.dtype, jnp.float32)
+    if wide == v.dtype:
+        return v
+    return jax.lax.optimization_barrier(v).astype(wide)
+
+
 def coupling_residual_l2(
     s_new: dict[str, dict],
     s_old: dict[str, dict],
     node_names: list[str],
+    atol: float = 0.0,
 ) -> jnp.ndarray:
-    """Compute the L2 norm of state change between iterations.
+    """L2 norm of the *relative* state change between iterations.
+
+    Each field's change is divided by the field's own magnitude before
+    the norm is taken, so the number is dimensionless and a group whose
+    fields happen to be quoted in small units is held to the same
+    standard as one quoted in large ones.  For fields of order one this
+    is the unscaled ``||dx||`` it replaces.
 
     Parameters
     ----------
@@ -51,19 +342,34 @@ def coupling_residual_l2(
         Previous iteration state.
     node_names : list of str
         Node names to include in the norm.
+    atol : float
+        Dead band: a field whose magnitude does not exceed ``atol`` is
+        treated as being at zero and contributes nothing, so the group
+        stops being held to any criterion on it.  The default asserts
+        no noise floor and excludes only a field with no scale at all;
+        see :func:`_scaled_change` for why the caller owns this number.
 
     Returns
     -------
     jnp.ndarray
-        Scalar L2 norm.
+        Scalar norm, compared against ``CouplingGroup.tolerance``, which
+        is therefore a *relative* tolerance.
     """
-    total = jnp.array(0.0)
+    # A strongly typed float32 zero: the sum is at least float32 whatever
+    # the fields' dtypes (``_widened``).
+    total = jnp.zeros((), jnp.float32)
     for nn in node_names:
         for field_name in s_new[nn]:
-            if not _is_float_leaf(s_new[nn][field_name]):
+            new_val = s_new[nn][field_name]
+            if not _is_float_leaf(new_val):
                 continue        # counters / flags / keys: not part of the norm
-            diff = s_new[nn][field_name] - s_old[nn][field_name]
-            total = total + jnp.sum(diff ** 2)
+            old_val = s_old[nn][field_name]
+            if not _has_entries(new_val):
+                continue        # no entries: not read (``_has_entries``)
+            # ``rtol=1.0``: the L2 norm carries its threshold in
+            # ``tolerance``, so the scale here is the bare magnitude.
+            scaled, _active = _scaled_change(_widened(new_val), _widened(old_val), atol, 1.0)
+            total = total + jnp.sum(scaled ** 2)
     return jnp.sqrt(total)
 
 
@@ -74,15 +380,29 @@ def coupling_residual_mixed(
     atol: float,
     rtol: float,
 ) -> jnp.ndarray:
-    """Compute a mixed absolute/relative convergence norm.
+    """Scale-aware RMS convergence norm over every float field.
 
     Uses the formula::
 
-        err_i = |new_i - old_i| / (atol + rtol * max(|new_i|, |old_i|))
+        err_i = |new_i - old_i| / (rtol * ref_field)
 
-    Returns the RMS norm.  Convergence is achieved when the result
-    is <= 1.0.  This is the same pattern used by the adaptive
-    timestepping error estimator.
+    where ``ref_field = max |v|`` over the field, and a field whose
+    ``ref_field`` does not exceed ``atol`` is treated as being at zero
+    and is left out of the norm entirely.  Converged when the result is
+    <= 1.0.
+
+    This replaces the elementwise ``atol + rtol * |v_i|`` scale, which
+    was ``atol`` alone — an absolute criterion — for every field
+    smaller than ``atol / rtol``.  A 1.7e-05 N force against the default
+    ``atol=1e-8`` was being asked to move by less than 6e-04 of itself,
+    not by less than ``rtol``, and satisfied that on its first pass
+    while still percent-sized from its fixed point.  Above the dead band
+    the new scale is a pure ratio, so ``rtol`` means the same thing in
+    every field's units.  For a scalar field (or an entry at its field's
+    largest magnitude) well above ``atol / rtol`` the two formulas agree
+    to within ``1 + atol/(rtol*|v|)``.  An entry smaller than its field's
+    largest is measured against the field's scale, so the new norm can be
+    smaller than the old elementwise one by up to ``max|v| / |v_i|``.
 
     Parameters
     ----------
@@ -93,45 +413,531 @@ def coupling_residual_mixed(
     node_names : list of str
         Node names to include in the norm.
     atol : float
-        Absolute tolerance.
+        Dead band, in the field's own units: below this a field counts
+        as zero and leaves the norm, so the group is no longer held to
+        any criterion on it.  ``CouplingGroup``'s default is ``0.0`` --
+        see :func:`_scaled_change` for why the caller owns this number.
     rtol : float
-        Relative tolerance.
+        Relative change demanded of every field above the dead band.
 
     Returns
     -------
     jnp.ndarray
         Scalar RMS error norm.  Converged when <= 1.0.
     """
-    sum_sq = jnp.array(0.0)
+    # Strongly typed, and every term widened (``_widened``): the sum and
+    # the quotient by the entry count are at least float32.
+    sum_sq = jnp.zeros((), jnp.float32)
     count = jnp.array(0, dtype=jnp.int32)
     for nn in node_names:
         for field_name in s_new[nn]:
             new_val = s_new[nn][field_name]
-            old_val = s_old[nn][field_name]
             if not _is_float_leaf(new_val):
-                continue        # counters / flags / keys: not part of the norm
-            diff = jnp.abs(new_val - old_val)
-            scale = atol + rtol * jnp.maximum(
-                jnp.abs(new_val), jnp.abs(old_val)
-            )
-            scaled = jnp.where(scale > 0, diff / jnp.maximum(scale, 1e-300), 0.0)
+                # Counters / flags / keys: not part of the norm, and not
+                # looked up in ``s_old`` either -- an iterate rebuilt from
+                # its floating fields (a predictor's start) need not
+                # carry them.
+                continue
+            old_val = s_old[nn][field_name]
+            if not _has_entries(new_val):
+                continue        # no entries: not read (``_has_entries``)
+            scaled, active = _scaled_change(_widened(new_val), _widened(old_val), atol, rtol)
             sum_sq = sum_sq + jnp.sum(scaled ** 2)
-            count = count + scaled.size
+            count = count + jnp.where(active, scaled.size, 0)
     return jnp.sqrt(sum_sq / jnp.maximum(count, 1))
+
+
+def _interface_readings(interface_edges, *states, mappings=None, pre_step=None,
+                        band: bool = False, lattices=None):
+    """What ``convergence_norm="interface"`` reads on each internal edge, at each of *states*.
+
+    **The one definition of how an interface edge is read: on its compact
+    side.**  As the step delivers it -- the edge's source field, through
+    the edge's interface mapping and then its transform
+    (:func:`maddening.core.edge._delivered`, the function the step's
+    boundary resolution calls), with the mapping weights the step ran
+    with -- except where a static mapping delivers more entries than the
+    source field holds: that edge is read at its source, the field itself
+    before the mapping and the transform, so a few values scattered onto
+    a large field are judged as the few values they are.  A mapping onto
+    fewer entries, a tie and an unmapped edge are read as delivered.  A
+    view of the group's description
+    (``core/coupling/_interface_plan.py``): which edges, in what order
+    (``interface_records``) and on which side each is read
+    (``InterfaceEdge.reading``) are its; *interface_edges* is a group's
+    plan, or a bare sequence of edges read in the order given.  The residual
+    (:func:`coupling_residual_interface`), its float floor
+    (:func:`residual_precision_floor`) and the spectral analysis the
+    report's bound is taken on (``_reading_values`` in
+    ``core/coupling/_coupled_block.py``) all iterate this generator, so they
+    cannot disagree about what the norm measures or on which side.
+
+    **A geometry-dependent mapping** (experimental) is read by the same
+    rule, in the parts the group's description gives it
+    (``InterfaceEdge.parts``): as delivered, at the geometry the step
+    uses (the iterate's own for a source anchor, the target's pre-step
+    state for a target anchor); or, where it delivers more entries than
+    its source holds, at its inputs -- the source field, and the
+    positions a source anchor takes from the iterate, as a part of their
+    own in units of the mapping kind's length scale.
+
+    Yields one ``PartReading`` per part, in the order of
+    *interface_edges*: the tuple ``(edge, source_dtype, value, ...)`` --
+    one value per state, and the dtype of the stored field the part is
+    read from at the first -- carrying ``part`` (what the value is
+    measured against: :func:`_part_scaled_change`,
+    :func:`_part_resolution`).  The first state decides which edges are
+    read: an edge whose source field is not floating there (a counter, a
+    flag, a key) carries no norm, and neither does a part with no
+    entries.  Later states are read at the same edges and need not hold
+    the fields the first one skips.
+
+    ``mappings`` is the ``"mappings"`` section of the graph parameter
+    pytree the step ran with (``{edge.key: weights}``); ``None`` reads
+    each mapping with its own weights.  ``pre_step`` gives a member's
+    pre-step state (a callable of its name, or a dict): what a
+    target-anchored geometry is read from
+    (``InterfaceEdge.geometry_at``).  ``band`` is that the reader's group
+    declares a dead band (``atol > 0``): the source-field part of an edge
+    read at its source then carries what the edge delivers as well
+    (``PartReading.delivered``), for :func:`_kept_by_what_is_delivered`.
+
+    ``lattices`` names, for each geometry field, the mappings of the
+    edges that read it (``_interface_plan._position_lattices``): where a
+    position is rounded is the largest over them
+    (``PartReading.positions``, which only the float floor reads).
+    ``None`` takes them from *interface_edges*, which is every reader
+    but one's case; :func:`_positions_floors` reads one edge at a time
+    and hands the group's.
+    """
+    records = interface_records(interface_edges, states[0])
+    if lattices is None:
+        lattices = _position_lattices(records)
+    for record in records:
+        node, field = record.source
+        source = states[0][node][field]
+        # Decided on the state handed, not on ``record.source_kind`` (the
+        # state the group's plan was built from): the two agree wherever a
+        # pass keeps each field's dtype kind.
+        if not _is_float_leaf(source):
+            continue            # an integer interface field cannot carry a norm
+        for reading in record.read(states, mappings, pre_step, band=band,
+                                   lattices=lattices):
+            if not _has_entries(reading[2]):
+                continue        # no entries: not read (``_has_entries``)
+            yield reading
+
+
+def _declares_a_band(atol) -> bool:
+    """Does a group with this ``atol`` declare a dead band?  ``atol > 0``
+    (``CouplingGroup`` holds a Python float, validated non-negative)."""
+    return float(atol) > 0.0
+
+
+def _kept_by_what_is_delivered(reading, atol):
+    """Is a reading taken at an edge's source kept out of the dead band by
+    what the edge delivers?
+
+    **The one place this is decided**, for the residual
+    (:func:`_part_scaled_change`), its float floor
+    (:func:`residual_precision_floor`) and the weights of the spectral
+    analysis (``_coupled_block.py``: ``_norm_weights`` and
+    ``_reading_weights``), which is where the report's bound takes the
+    dead-banded share from.
+
+    **The rule.**  ``atol`` is "how small is indistinguishable from
+    zero", in the interface quantity's own units.  An edge that is read
+    at its source (a static mapping onto more entries than the field
+    holds: :func:`~maddening.core.coupling._interface_plan._norm_side`)
+    has two quantities, the field and what the mapping and the transform
+    make of it, and they need not share units: a force of 1e-8 N that the
+    edge hands on as 17 to 520 uN (``transform=lambda f: f * 1e9``).  A
+    reading taken at the source is therefore dropped by the dead band
+    only where **both** the source field and what the edge delivers are
+    at or below ``atol``: what is negligible in only one of its two units
+    is not dropped.  Asked of the source field alone, that pair left the
+    norm at ``atol = 1e-6`` and a Jacobi pair accepted after one pass 34%
+    to 74% from its fixed point with ``converged=True``.
+
+    Only the band changes.  The reading itself, its scale and its float
+    floor stay the source field's (the compact-side rule: a few values
+    scattered onto a large field are judged as the few values they are),
+    and a source field that is exactly zero, or not finite, is treated as
+    every such field is (:func:`_scaled_change`).
+
+    ``None`` where the reading carries nothing delivered: every reading
+    of a group that declares no dead band (nothing is built for it),
+    every edge read as delivered (the band is asked of the value read,
+    which is the delivered one), and positions in a kind's length scale
+    (always read).  Otherwise a traced boolean: the largest magnitude of
+    what the edge delivers, over the states read, is above ``atol``.
+    """
+    delivered = getattr(reading, "delivered", None)
+    if delivered is None:
+        return None
+    first, last = jnp.asarray(delivered[0]), jnp.asarray(delivered[-1])
+    if not (_is_float_leaf(first) and _has_entries(first)):
+        return None             # nothing delivered that has a magnitude
+    return _field_reference(_widened(first), _widened(last)) > atol
+
+
+def _part_scaled_change(reading, atol: float, rtol: float):
+    """``(scaled change, active)`` of one part between its two states, by the part's unit.
+
+    Against its own magnitude (:func:`_scaled_change`, the rule of every
+    field of every norm), or -- a part already in the mapping kind's
+    length scale -- against one unit of it: ``|du| / rtol``.  Such a part
+    is always read: the dead band asks whether a quantity is at zero
+    within ``atol`` of its own units, which a position is nowhere.  A
+    non-finite position fails the criterion as a non-finite field does
+    (every entry ``inf``).
+    """
+    _edge, _source_dtype, new_val, old_val = reading
+    if reading.part.unit != KERNEL_LENGTH:
+        return _scaled_change(_widened(new_val), _widened(old_val), atol, rtol,
+                              kept=_kept_by_what_is_delivered(reading, atol))
+    diff = jnp.abs(new_val - old_val)
+    finite = jnp.logical_and(jnp.all(jnp.isfinite(new_val)), jnp.all(jnp.isfinite(old_val)))
+    scaled = jnp.where(finite, diff / rtol, jnp.full_like(diff, jnp.inf))
+    return scaled, jnp.array(True)
+
+
+def _part_counted(reading, value, atol: float, rtol: float):
+    """Does the residual read the part *reading*, whose value at the
+    state asked about is *value*?  A traced boolean.
+
+    **The one place the float floor decides which parts it counts**, and
+    it is the residual's own decision (:func:`_part_scaled_change`):
+    positions in a kind's length scale are always read; any other part
+    is read unless the dead band drops it (:func:`_scaled_change`, with
+    what the edge delivers for a reading taken at its source:
+    :func:`_kept_by_what_is_delivered`).  Read by
+    :func:`residual_precision_floor` and by :func:`_positions_floors`
+    (``compile()``'s advisory), so the advisory cannot speak of a part
+    the floor counts nothing for.
+    """
+    if reading.part.unit == KERNEL_LENGTH:
+        return jnp.array(True)
+    _scaled, active = _scaled_change(
+        _widened(value), _widened(value), atol, rtol,
+        kept=_kept_by_what_is_delivered(reading, atol))
+    return active
+
+
+def _held_out_by_the_dead_band(reading, value, atol: float, rtol: float) -> bool:
+    """Does the dead band the caller declared hold the part *reading*
+    out of the norm at a state where its value *value* has a magnitude?
+
+    On the host, of concrete values: what ``compile()``'s advisory asks
+    of the state it sees (:func:`_positions_floors`).  The decision is
+    the floor's (:func:`_part_counted`); two cases are kept apart from
+    it because the advisory speaks of the steps to come:
+
+    * a group that declares **no dead band** (``atol == 0``) holds
+      nothing out, and nothing is built or asked for it;
+    * a value that is **exactly zero** at that state (a field not yet
+      computed: the commonest initial condition) has no magnitude to
+      compare with ``atol``.  The floor counts nothing for it there and
+      counts it from its first non-zero value, so the advisory asks it.
+
+    ``True`` therefore only for a value with a magnitude at or below a
+    declared ``atol``: the float floor of that part is 0.0 at that state,
+    and an advisory quoting a floor for it would be about a reading the
+    norm does not take.  (The parts the advisory asks are positions,
+    which are always read, and delivered values, which the band asks by
+    their own magnitude; a reading taken at an edge's source, whose band
+    also asks what the edge delivers, rests on no stored position.)
+    """
+    if not _declares_a_band(atol):
+        return False
+    value = jnp.asarray(value)
+    if not bool(jnp.any(value != 0)):
+        return False
+    return not bool(_part_counted(reading, value, atol, rtol))
+
+
+def _part_reference(reading, value):
+    """What *value*, a part's value at one state, is measured against:
+    its own largest magnitude, or one unit of the kind's length scale."""
+    if reading.part.unit == KERNEL_LENGTH:
+        return jnp.ones((), jnp.asarray(value).dtype)
+    return _field_reference(value, value)
+
+
+def _part_resolution(reading, state_index: int = 0, group_eps: Optional[float] = None):
+    """The float resolution of one part, per entry, over what it is measured against.
+
+    For a part measured against its own magnitude this is an ``eps``:
+    :func:`_reading_eps`, the coarsest of the value's dtype, its source
+    field's and, where it was delivered through a geometry-dependent
+    mapping, the geometry's.  Such a delivered value also carries the
+    rounding of the positions it was computed at: a position is rounded
+    at the larger of its own magnitude and of the coordinate the kernel
+    forms from it (``PartReading.positions``, from
+    ``_interface_plan._rounded_at``), ``r`` lengths say, to ``eps * r``
+    lengths, which moves a kernel weight by as much, so the resolution
+    is at least ``eps`` times the largest such ``r``.  A part that *is*
+    positions, in lengths, is measured against one length: its
+    resolution is ``eps`` of the geometry's dtype times the largest
+    ``r`` of its own entries (:func:`_positions_resolution` in both
+    cases: one function, one magnitude).
+
+    *group_eps* is the coarsest ``eps`` among the group's floating fields
+    (:func:`_group_coarsest_eps`), which no **value** entry of a group's
+    floor is finer than: a value's ``eps`` above is taken as the larger
+    of itself and that one.  **Positions are exempt**: a part that is
+    positions, and the stored rounding ``eps * |u|`` of the positions a
+    value was delivered through, are counted at the geometry's own
+    dtype (see :func:`_group_coarsest_eps` for why, and for the corner
+    this leaves).  ``None`` (a reading described outside a group) leaves
+    each as it is.
+
+    A Python float where nothing depends on the state; otherwise a traced
+    scalar, with no derivative (a resolution is not a quantity of the
+    solve).
+    """
+    _edge, source_dtype, *values = reading
+    value = jnp.asarray(values[state_index])
+    positions = reading.positions[state_index]
+    eps_floor = 0.0 if group_eps is None else float(group_eps)
+    if reading.part.unit == KERNEL_LENGTH:
+        # Where the part's positions are rounded, not what the residual
+        # reads of them (``value``: no origin subtracted): the two differ
+        # wherever the kernel's own coordinate is the larger.
+        return _positions_resolution(positions)
+    if positions is None:
+        return max(_reading_eps(source_dtype, value), eps_floor)
+    positions = jnp.asarray(positions)
+    # units: dimensionless -- two eps, each relative to a value's own
+    # magnitude: the geometry's dtype's and, the delivered value being a
+    # value entry, the group's coarsest.
+    eps_geometry = max(float(jnp.finfo(positions.dtype).eps), eps_floor)
+    # units: dimensionless -- each eps is relative to a magnitude.  Taken
+    # as it stands, the positions' is the resolution of a value computed
+    # from positions of that dtype, over the value's own magnitude, like
+    # the value's own eps it is compared with; times the magnitude the
+    # positions are rounded at in the kind's lengths
+    # (``_positions_resolution``) it is their rounding in lengths, which
+    # is what moves a kernel weight.
+    static = max(_reading_eps(source_dtype, value), eps_geometry)
+    return jnp.maximum(static, _positions_resolution(positions))
+
+
+def _positions_resolution(positions):
+    """The rounding of stored positions, in the lengths they are given
+    in, from the magnitude *positions* each of them is rounded at.
+
+    ``eps`` of their dtype times the largest of those magnitudes.
+    *positions* is ``PartReading.positions``: per coordinate, the larger
+    of the stored position's own magnitude (``u`` lengths from the
+    coordinates' zero: stored to ``eps * |u|``) and of the coordinate
+    the kernel forms from it in the same dtype (for ``multilinear_grid``
+    the lattice coordinate ``(x - origin) / spacing``: a weight is
+    resolved to ``eps`` of *that*), the largest over the lattices that
+    read the position (``_interface_plan._rounded_at``, where the
+    comparison is made and why).
+
+    **The one term through which stored positions enter the float
+    floor** (:func:`_part_resolution`): the whole resolution of a part
+    that is positions, and what a value delivered through a
+    geometry-dependent mapping is no finer than.  ``compile()``'s
+    advisory about positions a dtype cannot resolve
+    (:func:`_positions_floors`) is this number of the same magnitudes
+    and no other, so the advisory and the floor cannot locate a rounding
+    differently.  Traced where the positions are, with no derivative.
+
+    Always the positions' own dtype, inside a group's floor too: the
+    group's coarsest eps (:func:`_group_coarsest_eps`) is for value
+    entries.  A stored position has the resolution of its dtype; what a
+    coarser member adds to it in a pass is a rounding of the increment,
+    not of the position.
+    """
+    positions = jnp.asarray(positions)
+    # units: dimensionless -- eps is relative to the magnitude a position
+    # is rounded at; the product is in the lengths the positions are in.
+    eps = float(jnp.finfo(positions.dtype).eps)
+    return eps * jax.lax.stop_gradient(jnp.max(jnp.abs(positions)))
+
+
+def _group_coarsest_eps(state, node_names, interface_edges=(),
+                        mappings: Optional[dict] = None) -> Optional[float]:
+    """``eps`` of the coarsest floating dtype a group's pass goes through.
+
+    **The one resolution a group's float floor is counted at.**  Over
+    every floating field of ``state[node]`` for the nodes named that
+    holds entries (:func:`_has_entries`), **and over what every internal
+    edge of the group delivers** (*interface_edges*: the group's plan, or
+    its internal edges; after the mapping, with the weights in
+    *mappings*, and the transform); ``None`` where there is none.
+    Static: dtypes, never values.
+
+    **What an edge delivers counts like a field.**  A transform that
+    narrows (``lambda v: v.astype(float32)`` between two float64
+    members) puts a float32 rounding into every pass although no field
+    is float32: such a pair stalled on it with ``residual`` exactly
+    ``0.0``, ``converged=True`` at ``rtol = 1e-12``, 2.8e5 to 3.6e5
+    tolerances from its fixed point, and read ``spectral_error_bound``
+    at 5e-8 to 1e-7 of the distance with both usable flags set, under
+    all three norms and both schedules (CPU, jaxlib 0.11.0).  The
+    delivered dtype is read by ``InterfaceEdge.delivered_leaves``
+    (abstract evaluation: the transform is never run on numbers).  A
+    non-floating delivery, and one with no entries, does not enter.
+    **Not seen:** a narrowing *inside* a member's ``update`` (a cast
+    down and back) -- assumption (2) below -- and an edge whose source
+    is not a state field (a boundary flux), whose dtype nothing outside
+    the producing node holds.
+
+    **Why the coarsest, and not each field's own.**  One pass of a
+    coupling group computes every member's fields from the group's
+    fields.  A value is no finer than what it was computed from: a
+    float64 field a node computes from a float32 neighbour's output
+    holds float64 numbers that carry float32 rounding, relative to their
+    own magnitude, so a group that stalls a float32 rounding from its
+    fixed point leaves *every* field downstream of the float32 member
+    that far off, in each field's own units.  Counted at float64's
+    ``eps`` those entries put nothing into the floor: a float32 member
+    of one value beside a float64 field of ``n`` values, stalled 500
+    float32 ulps short (407 tolerances at every ``n``), read
+    ``spectral_error_bound`` at 0.92 of the distance at ``n = 1e3`` and
+    0.21 at ``n = 2e4`` with ``spectral_usable`` and
+    ``gradient_bound_usable`` set (Gauss-Seidel; ``"mixed"`` and
+    ``"interface"`` alike; CPU, jaxlib 0.11.0), because the pooled floor
+    is ``4 m eps32 / (rtol sqrt(1 + n))``.
+
+    The rule rests on three assumptions, each stated so it can be
+    attacked.  (1) *Every field of the group may be downstream of its
+    coarsest member within a pass or two.*  Which fields are is a
+    property of the nodes' updates that nothing outside them can see, so
+    all are taken to be; where a fine field is in fact computed from
+    fine fields only, its entries are counted too coarsely and the floor
+    is too large, never too small.  (2) *A node's own arithmetic is no
+    coarser than the coarsest field it reads or writes.*  A node that
+    rounds through a narrower dtype inside ``update`` and declares
+    neither is outside it, as a node that sub-steps without declaring
+    ``update_evaluations`` is outside the evaluation count.  (3) *What
+    enters the group from outside is a constant of the solve.*  An
+    external input of a coarser dtype perturbs the problem the group
+    solves, not the iteration's rounding, and is not counted.
+
+    **Positions are exempt.**  The rule is for value entries.  A position
+    part of a geometry reading (a geometry field read in a mapping
+    kind's lengths under ``"interface"``; under ``"l2"`` and ``"mixed"``
+    a field an internal edge anchors a geometry-dependent mapping at,
+    :func:`_position_fields`), and the stored rounding ``eps * |u|`` of
+    the positions a value was delivered through, keep the geometry's own
+    dtype's ``eps``.  A stored float64 position has float64 resolution,
+    and what a float32 member adds to it in a pass is a rounding of the
+    *increment*, not of the position: float64 positions beside float32
+    fields otherwise read ``precision_limited=True`` on a floor of
+    hundreds of tolerances (``eps32 * |u|`` lengths at ``|u|`` of tens of
+    spacings) where the same drift ends 8e-4 tolerances from the exact
+    fixed point, and float64 positions are the documented way out of the
+    float32-positions advisory.  **The corner this leaves:** a float64
+    position that a member computes within the pass *purely* from
+    float32 data (positions set from a sampled float32 value, not
+    advanced by an increment) is as coarse as that data and is counted
+    finer than it is.  A geometry field anchored only by an edge from
+    outside the group is not exempt (it is counted at the group's
+    coarsest, which only raises the floor).
+
+    **It only raises a floor.**  Each value entry is taken at the larger
+    of this and the ``eps`` it had (its own dtype's; for what an edge
+    delivers, the coarser of the delivered dtype's and its source
+    field's, :func:`_reading_eps`; a geometry's), so no entry is counted
+    more finely than before.  In a group whose floating fields share one
+    dtype it *is* each field's own ``eps``, the same Python float, and
+    the floor and the program that computes it are unchanged to the bit.
+    Read by :func:`residual_precision_floor` and by the step's own
+    analysis (``_coupled_block.py``: the per-entry resolution of the
+    bounds, the reading's, and the products' rounding), so the report's
+    floor and the bounds' cannot take different numbers.
+    """
+    coarsest: Optional[float] = None
+    for node in node_names or ():
+        for value in (state.get(node) or {}).values():
+            if _is_float_leaf(value) and _has_entries(value):
+                eps = float(jnp.finfo(jnp.asarray(value).dtype).eps)
+                # units: dimensionless -- each eps is relative to its own
+                # field's magnitude, the coordinates every norm measures
+                # a field in; the largest is the coarsest resolution.
+                coarsest = eps if coarsest is None else max(coarsest, eps)
+    for record in interface_records(interface_edges, state):
+        for dtype, size in record.delivered_leaves(state, mappings):
+            if jnp.issubdtype(dtype, jnp.floating) and size:
+                eps = float(jnp.finfo(dtype).eps)
+                # units: dimensionless -- relative to the delivered value's
+                # own magnitude, like a field's.
+                coarsest = eps if coarsest is None else max(coarsest, eps)
+    return coarsest
+
+
+def _reading_eps(source_dtype, value) -> float:
+    """The float resolution of one reading: the coarser of its own dtype's and its source's.
+
+    *value* is what the norm reads on the edge
+    (``InterfaceEdge.reading``).  An edge read at its source hands the
+    stored field itself, so this is that field's own eps; the dtype its
+    mapping or transform delivers enters through the group's coarsest
+    (:func:`_group_coarsest_eps`, which counts what every internal edge
+    delivers), not here.
+
+    A delivered value is no finer than the field it was computed from.
+    Under ``jax_enable_x64`` a float64 mapping matrix applied to a
+    float32 field, or a transform that returns float64, delivers float64
+    numbers that carry float32 rounding; taken at the delivered dtype's
+    eps the floor was ``2**-29`` of what the source resolves, and a
+    float32 pair stalled at ``residual=0.0`` behind edges that widen
+    read its bound at 6.7e-7 of the true distance with
+    ``spectral_usable=True`` (jaxlib 0.11.0, CPU).  An edge that delivers
+    its source's dtype, or a narrower one, keeps the eps it had.
+
+    Inside a group's floor neither is taken below the group's coarsest
+    (:func:`_group_coarsest_eps`, applied by :func:`_part_resolution`):
+    the source field may itself carry a coarser member's rounding.
+    """
+    delivered = jnp.asarray(value).dtype
+    eps = float(jnp.finfo(delivered).eps)
+    if jnp.issubdtype(source_dtype, jnp.floating):
+        # units: dimensionless -- each eps is relative to its own value's
+        # magnitude (the floor counts it per entry in the norm's units,
+        # where every field is divided by its own max|field|); the larger
+        # of the two is the resolution the delivered value really has.
+        eps = max(eps, float(jnp.finfo(source_dtype).eps))
+    return eps
 
 
 def coupling_residual_interface(
     s_new: dict[str, dict],
     s_old: dict[str, dict],
-    interface_edges: list,
-    atol: float = 1e-8,
+    interface_edges: Union[list, InterfacePlan],
+    atol: float = 0.0,
     rtol: float = 1e-6,
+    mappings: Optional[dict] = None,
+    pre_step=None,
 ) -> jnp.ndarray:
-    """Check interface consistency rather than iterate change.
+    """Interface consistency, on the scale of each interface quantity.
 
-    Computes the difference in interface values (edge source fields)
-    between two successive iterations.  Only the fields that appear
-    on intra-group edges are compared.
+    Computes the difference in interface values between two successive
+    iterations: for each intra-group edge, **the value the edge
+    delivers** -- its source field through the edge's interface mapping
+    and then its transform, exactly as the step hands it to the target
+    -- or, for an edge whose mapping delivers more entries than its
+    source field holds, **the source field itself**, before the mapping
+    and the transform (:func:`_interface_readings`: each mapped edge is
+    read on its compact side; a tie is read as delivered).  Only the
+    fields that appear on intra-group edges are compared.  The scaling
+    is the one
+    :func:`coupling_residual_mixed` documents: relative to the
+    quantity's own magnitude, with ``atol`` as a dead band rather than
+    as a floor under the scale.
+
+    An edge with a geometry-dependent mapping (experimental) is read by
+    the same rule: as delivered at the geometry the step uses, or --
+    where it delivers more entries than its source holds, a scatter of
+    points onto a grid -- at its inputs: the source field, and the
+    positions it takes from the iterate **in units of the mapping
+    kind's own length scale** (the grid spacing), each position's change
+    over ``rtol`` lengths, pooled with the other entries.
 
     Parameters
     ----------
@@ -140,35 +946,1986 @@ def coupling_residual_interface(
     s_old : dict
         Previous iteration state.
     interface_edges : list of EdgeSpec
-        Edges internal to the coupling group.
+        Edges internal to the coupling group.  (The compiled step hands
+        the group's own description of them, an ``InterfacePlan``.)
     atol : float
-        Absolute tolerance.
+        Dead band, in the interface quantity's own units: below this a
+        quantity leaves the norm and stops being held to any criterion.
+        An edge read at its source has two quantities, the field and
+        what the edge delivers, and leaves only where both are at or
+        below ``atol`` (:func:`_kept_by_what_is_delivered`).
+        ``CouplingGroup``'s default is ``0.0``; see
+        :func:`_scaled_change` for why the caller owns this number.
     rtol : float
-        Relative tolerance.
+        Relative change demanded of every interface quantity above the
+        dead band.
+    mappings : dict, optional
+        The ``"mappings"`` section of the graph parameter pytree the
+        step runs with (``{edge.key: weights}``), for the edges that
+        carry an interface mapping; ``None`` applies each mapping with
+        its own weights.  EXPERIMENTAL (new in 0.4.0).
+    pre_step : callable or dict, optional
+        A member's pre-step state, by name: what an edge whose
+        geometry-dependent mapping is anchored at its target is read
+        with (the geometry the step uses for it).  EXPERIMENTAL (new in
+        0.4.0).
 
     Returns
     -------
     jnp.ndarray
-        Scalar RMS error norm.  Converged when <= 1.0.
+        Scalar RMS error norm.  Converged when <= 1.0.  Each reading
+        is measured in at least float32 (see :func:`_widened`).
+
+    Notes
+    -----
+    The terms are summed in the order of *interface_edges*, and
+    floating-point addition does not associate, so another order can
+    move the result in its last bits -- enough to move a verdict, and with
+    it the pass and the state, wherever the estimate sits within an ulp of
+    the threshold.  The step builder therefore passes a group's internal
+    edges in an order fixed by the group itself: by each edge's source's
+    place in the group's sweep, then its source field, its target's place,
+    its target field and its ordinal (``_interface_edge_order`` in
+    ``core/coupling/_interface_plan.py``), the order the L2 and mixed norms sum the
+    members in.  So the norm depends neither on the order of the
+    ``add_edge`` calls nor on the nodes' names.  Before 0.4.0 it summed in
+    the order the edges had been added: the same group built with its
+    ``add_edge`` calls reversed reported a residual that differed in its
+    last bits.
     """
-    sum_sq = jnp.array(0.0)
+    # Strongly typed, and every term widened (``_widened``): the sum and
+    # the quotient by the entry count are at least float32.
+    sum_sq = jnp.zeros((), jnp.float32)
     count = jnp.array(0, dtype=jnp.int32)
-    for edge in interface_edges:
-        new_val = s_new[edge.source_node][edge.source_field]
-        old_val = s_old[edge.source_node][edge.source_field]
-        if not _is_float_leaf(new_val):
-            continue            # an integer interface field cannot carry a norm
-        if edge.transform is not None:
-            new_val = edge.transform(new_val)
-            old_val = edge.transform(old_val)
-        diff = jnp.abs(new_val - old_val)
-        scale = atol + rtol * jnp.maximum(
-            jnp.abs(new_val), jnp.abs(old_val)
-        )
-        scaled = jnp.where(scale > 0, diff / jnp.maximum(scale, 1e-300), 0.0)
+    for reading in _interface_readings(
+            interface_edges, s_new, s_old, mappings=mappings, pre_step=pre_step,
+            band=_declares_a_band(atol)):
+        scaled, active = _part_scaled_change(reading, atol, rtol)
         sum_sq = sum_sq + jnp.sum(scaled ** 2)
-        count = count + scaled.size
+        count = count + jnp.where(active, scaled.size, 0)
     return jnp.sqrt(sum_sq / jnp.maximum(count, 1))
+
+
+# ------------------------------------------------------------------
+# Distance to the fixed point, estimated from the residual sequence
+# ------------------------------------------------------------------
+
+def error_amplification(residual, prev_residual, prev2_residual=None):
+    """Estimate ``1 / (1 - rho)`` from the last two or three residuals.
+
+    For a linear contraction with rate ``rho``, the distance from the
+    current iterate to the fixed point is bounded by
+    ``||x_k - x*|| <= r_k / (1 - rho)`` (sum the remaining steps of a
+    geometric series), and ``rho`` is free: it is ``r_k / r_{k-1}``.
+
+    That one-step ratio is the estimate the brief calls unreliable, and
+    the case that breaks it is *alternation*, not growth.  A non-normal
+    group whose residuals run ``0.5, 5, 0.25, 2.5`` is converging at
+    ``rho = 0.71`` per pass, but every second one-step ratio reads
+    ``0.05`` and flatters the bound by a factor of fourteen.  So the
+    rate taken is the worst of the one-step ratio and the two-step
+    ``sqrt(r_k / r_{k-2})``, which is the same number on a monotone
+    geometric sequence and is immune to alternation:
+
+        rho = max(r_k / r_{k-1}, sqrt(r_k / r_{k-2}))
+
+    Written as ``r_{k-1} / (r_{k-1} - r_k)`` where it can be, so the
+    cancellation happens between two measured numbers rather than
+    against 1.
+
+    ``prev2_residual`` defaults to ``prev_residual``, which is what the
+    first pass of a loop has; the two-step term is then
+    ``sqrt`` of the one-step one, i.e. slightly conservative, which is
+    the right way to be wrong about a rate nothing has confirmed yet.
+
+    Returns ``0.0`` — an impossible amplification, since a valid one is
+    always ``>= 1`` — when the estimate must be rejected: a
+    non-decreasing residual (``rho >= 1``, so there is no contraction
+    to extrapolate), a zero or non-finite predecessor, or a non-finite
+    current residual.  ``rho >= 1`` can also be float rounding on a
+    sequence that *is* contracting: each residual carries about its
+    float floor of rounding (:func:`residual_precision_floor`), so the
+    ratio carries about ``2 floor / residual``, and at a rate within
+    that of 1 noise alone rejects it (a rate of 0.995 is noise within
+    about 400 floors).  The fallback then decides on the raw residual,
+    far from the fixed point (MADD-ANO-005's residual risk).  Callers fall back to the raw residual test and
+    report that they did; see
+    ``GraphManager.coupling_diagnostics``' ``ratio_usable``.  Rejecting
+    is deliberate: a trusted bad estimate is worse than an honest
+    fallback, and the fallback is exactly the criterion that shipped
+    before 0.4.0.
+
+    **What a non-rejected rate does not promise.**  This rate describes
+    the mode that dominates the *step*, which is not always the mode
+    that dominates the remaining error.  On a two-mode contraction the
+    residual sequence is a clean geometric decay at the fast rate until
+    the fast mode's amplitude falls below the slow one's, and over that
+    stretch it is *indistinguishable* from a single-mode decay — the
+    consecutive ratios are stationary, so the ``sqrt`` term above
+    agrees with the one-step term and a longer window would agree with
+    both.  Measured on modes ``(0.999, 0.2)``: ``rho`` reads 0.2 while
+    the distance still to travel is 122x the estimate that rate
+    produces.  Nothing computable from the residual norms alone
+    separates that from a genuine 0.2 contraction; it needs the
+    spectrum.  So a rate this function accepts is an estimate, and
+    ``ratio_usable`` (renamed from ``bound_valid`` during 0.4.0's
+    development, for exactly this reason; no release carried the old
+    name) reports a usable *ratio*, not a valid *bound*.  The
+    full list of what the estimate rests on is in
+    ``coupling._fixed_point._fixed_point_while``; the decision it feeds is in
+    ``benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md``.
+
+    **The spectrum is measured, beside this, under ``solver="ift"``
+    with ``diagnostics=True``.**  :func:`arnoldi_spectral_radius` takes
+    nine Jacobian-vector products of the one-pass map at the returned
+    iterate and :func:`spectral_error_bound` turns them into
+    ``coupling_diagnostics()['spectral_error_bound']``, which on the
+    same two-mode case reads 8x *over* the true distance where this
+    rate's estimate reads 122x under.  This function is unchanged
+    because the criterion both solvers stop on is built from it and
+    438 recorded step verdicts depend on that; the spectral keys are
+    reported next to it, not in place of it.
+    """
+    if prev2_residual is None:
+        prev2_residual = prev_residual
+    finite = jnp.logical_and(
+        jnp.isfinite(residual),
+        jnp.logical_and(jnp.isfinite(prev_residual),
+                        jnp.isfinite(prev2_residual)),
+    )
+    positive = jnp.logical_and(prev_residual > 0, prev2_residual > 0)
+    usable = jnp.logical_and(finite, positive)
+    safe1 = jnp.where(usable, prev_residual, jnp.ones_like(prev_residual))
+    safe2 = jnp.where(usable, prev2_residual, jnp.ones_like(prev2_residual))
+    rho = jnp.maximum(residual / safe1, jnp.sqrt(residual / safe2))
+    ok = jnp.logical_and(usable, rho < 1)
+    den = jnp.where(ok, 1.0 - rho, jnp.ones_like(rho))
+    return jnp.where(ok, 1.0 / den, jnp.zeros_like(residual))
+
+
+def relaxation_step_scale(acceleration: str, relaxation: float) -> float:
+    """How much longer the iterate's step is than the measured residual.
+
+    The residual every acceleration reports is ``||F(x) - x||``, but
+    what the iterate actually moves is ``||x_next - x||``, and the two
+    are only the same under ``acceleration="none"``.  Constant
+    relaxation moves ``omega`` times as far
+    (``x + omega * (F(x) - x)``), so a geometric series of *residuals*
+    is short of the distance the iterate still has to travel by exactly
+    ``omega``.  Over-relaxation therefore made ``estimated_error``
+    understate: measured ``est/true`` tracked ``1/omega`` to three
+    figures (0.68 at ``omega=1.5``, 0.51 at ``omega=1.95``) on an
+    affine two-node group.  Returning ``omega`` here is what puts the
+    series back on the step the iteration takes.
+
+    ``1.0`` for every other acceleration, and that is *not* the same
+    statement for each of them:
+
+    * ``"none"`` — exact, the step is the residual.
+    * ``"aitken"`` — **an underestimate**, and a known one.  Aitken's
+      relaxation factor is re-derived each pass and clipped to
+      ``[0.01, 2.0]``; on the same affine group it saturates at 2.0 and
+      the estimate understates by 2.04x.  It is not corrected here
+      because the factor is dynamic: it would have to be carried
+      through both solvers' loop state and the ``_meta`` diagnostics
+      payload, and the value that matters is the one the *next* step
+      will use, which nothing has measured.  A static ``2.0`` would be
+      a bound but would tighten the criterion for every Aitken group.
+    * ``"iqn-ils"`` / ``"iqn-imvj"`` — the quasi-Newton step is not a
+      scalar multiple of ``F(x) - x`` at all, so no scale exists.  The
+      estimate understates there too (4.5x measured), but by the
+      *rate* mechanism rather than this one: a superlinear residual
+      sequence reads ``rho -> 0``, so the amplification collapses to 1
+      while the true remaining error is still ``1/(1 - rho_spectral)``
+      of the residual.
+
+    See ``benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md``.
+    A loop's first pass is the one exception to "``omega`` is exact";
+    see :func:`first_pass_relaxed_amplification`.
+    """
+    return float(relaxation) if acceleration == "fixed" else 1.0
+
+
+def first_pass_relaxed_amplification(amplification, acceleration: str,
+                                     relaxation: float, first):
+    """The amplification a loop's *first* pass may use: the relaxed one.
+
+    Every coupling loop starts with one plain, unrelaxed pass (the one
+    ``_run_coupling_inner`` runs before the loop), and the first loop
+    pass reads its rate from that pass's residual: ``r_1 / r_0`` spans an
+    *unrelaxed* step, so it is the map's own rate ``rho`` (read as
+    ``sqrt(rho)``, the seed filling both slots of
+    :func:`error_amplification`).  Every later ratio spans a relaxed
+    step and reads the relaxed rate ``mu = 1 - omega (1 - rho)``, which
+    is what :func:`relaxation_step_scale`'s ``omega`` assumes:
+    ``omega r / (1 - mu) = r / (1 - rho)``, the distance.  On the first
+    pass ``omega r / (1 - sqrt(rho))`` falls short of ``r / (1 - rho)``
+    whenever ``omega < 1 / (1 + sqrt(rho))``.  Measured under
+    ``acceleration="fixed"`` at ``rho = 0.5``, ``omega = 0.3``: a group
+    started two thresholds from its fixed point stopped on that pass
+    with ``ratio_usable=True``, an ``error_estimate`` of 0.72 thresholds
+    and ``converged=True``, 1.41 thresholds away.
+
+    So, on the first pass only, an under-relaxed group translates the
+    rate it read into the relaxed iteration's: a linear map's mode
+    ``lambda`` contracts at ``1 - omega (1 - lambda)`` under the
+    relaxation, whose amplification is ``1 / (omega (1 - rho))`` --
+    *amplification* divided by ``omega``.  The estimate then reads
+    ``r / (1 - sqrt(rho))``, never below the distance on one mode.
+    Over-relaxation (``omega >= 1``) is left alone: there
+    ``omega r / (1 - sqrt(rho))`` already exceeds ``r / (1 - rho)``, and
+    the translated amplification could fall below one, which reads as a
+    rejected ratio.  Every other acceleration's step scale is 1, and its
+    first pass is unchanged too.
+
+    ``first`` is the traced "this is the loop's first pass" predicate.
+    Where nothing is rescaled -- statically, :func:`relaxes_first_pass`
+    -- *amplification* is returned untouched, so the program is the one
+    it always was; callers build ``first`` only where it is read.  A
+    rejected ratio (``0.0``) stays rejected.
+    """
+    if not relaxes_first_pass(acceleration, relaxation):
+        return amplification
+    amp = jnp.asarray(amplification)
+    return jnp.where(first, amp / jnp.asarray(relaxation, amp.dtype), amp)
+
+
+def relaxes_first_pass(acceleration: str, relaxation: float) -> bool:
+    """Whether :func:`first_pass_relaxed_amplification` rescales anything.
+
+    Static: ``acceleration="fixed"`` with ``relaxation < 1``.
+    """
+    return acceleration == "fixed" and float(relaxation) < 1.0
+
+
+def estimated_error(residual, amplification, step_scale=1.0):
+    """``residual * step_scale * amplification``, floored at ``residual``.
+
+    The quantity a convergence criterion should be testing: an estimate
+    of ``||x - x*||`` in the group's own norm, rather than of how far
+    the last pass moved.
+
+    ``step_scale`` is :func:`relaxation_step_scale` -- the ratio of the
+    step the iterate takes to the residual that is measured.  The
+    geometric series being summed is over *steps*, so leaving it out
+    understated the distance by ``omega`` under over-relaxation.
+
+    Still never smaller than ``residual``, so a group that meets this
+    criterion also meets the raw residual test it replaces.  The floor
+    binds only under *under*-relaxation of a strongly oscillatory mode
+    (``step_scale * amplification < 1`` needs ``rho < 1 - omega``,
+    reachable only for a negative eigenvalue), where it keeps the
+    compatibility guarantee at the cost of being conservative -- the
+    safe direction.
+    """
+    scaled = jnp.asarray(step_scale) * amplification
+    return residual * jnp.maximum(scaled, jnp.ones_like(scaled))
+
+
+def convergence_criterion(group) -> tuple[float, float]:
+    """``(threshold, step_scale)``: what a coupling group's ``converged`` compares.
+
+    A group has converged when
+    ``estimated_error(residual, amplification, step_scale) <= threshold``.
+    ``threshold`` is ``tolerance`` under the L2 norm and ``1.0`` under
+    the mixed and interface norms, whose tolerances are inside the
+    norm.  ``step_scale`` is :func:`relaxation_step_scale`.
+
+    ``GraphManager.coupling_diagnostics()``, the profiler's
+    ``converged_fraction`` and ``sysid.windowed_loss(mask_unconverged=True)``
+    re-derive ``converged`` from a step's ``_meta`` slots, and all three
+    read the criterion from here.  The profiler used to test
+    ``residual * amplification`` without the step scale, so under
+    ``acceleration="fixed"`` it overstated convergence when over-relaxed
+    and understated it when under-relaxed.
+
+    **The comparison is made in the residual's own dtype**, float32 for
+    a float32 group, with ``threshold`` rounded to it: that is what the
+    solvers' loops, ``strict_convergence`` and the sysid mask compute
+    in-graph, and :func:`reported_converged` repeats it on the host for
+    the report and the profiler.  So ``converged`` can be ``True`` for an
+    estimate a float64 comparison would put a fraction of a float32 ulp
+    above ``threshold``.
+    """
+    threshold = (1.0 if group.convergence_norm in ("mixed", "interface")
+                 else float(group.tolerance))
+    return threshold, relaxation_step_scale(group.acceleration, group.relaxation)
+
+
+def _reported_dtype(residual) -> np.dtype:
+    """The floating dtype a stored residual is in; float64 for a Python float."""
+    dtype = np.asarray(residual).dtype
+    return dtype if jnp.issubdtype(dtype, jnp.floating) else np.dtype(np.float64)
+
+
+def reported_error_estimate(residual, amplification, step_scale: float) -> float:
+    """:func:`estimated_error` on a reported ``(residual, amplification)`` pair.
+
+    Host-side, for readers of a step's ``_meta`` slots.  There
+    ``amplification`` is ``1 / (1 - rho)`` when the contraction ratio was
+    usable and ``0.0`` when it was rejected, so anything below one falls
+    back to the raw residual.  This is the number
+    ``coupling_diagnostics()`` reports as ``"error_estimate"``.
+
+    **Computed in the residual's own dtype** -- pass the slots' values as
+    stored (a float32 scalar for a float32 group; a Python float is
+    float64) -- and by the same two operations :func:`estimated_error`
+    performs in-graph, a multiply and a ``maximum``, each rounded to that
+    dtype.  It is therefore the estimate the solve itself compared, not
+    the float64 product of its factors, which differs from it by up to
+    half a float32 ulp.  That difference is what let the report and the
+    profiler call a step unconverged that the loop, ``strict_convergence``
+    and the sysid mask had called converged.
+    """
+    dtype = _reported_dtype(residual)
+    with np.errstate(all="ignore"):     # an overflow to inf is the answer
+        r = np.asarray(residual, dtype=dtype)
+        scaled = np.asarray(step_scale, dtype=dtype) * np.asarray(amplification, dtype=dtype)
+        return float(r * np.maximum(scaled, np.ones_like(scaled)))
+
+
+def reported_converged(residual, amplification, step_scale: float,
+                       threshold: float) -> bool:
+    """``converged`` for a reported ``(residual, amplification)`` pair.
+
+    :func:`reported_error_estimate` ``<= threshold``, the comparison made
+    in the residual's dtype with ``threshold`` rounded to it -- exactly as
+    the loops, ``strict_convergence`` and the sysid mask make it in-graph
+    (see :func:`convergence_criterion`).  The one definition of a group's
+    ``converged`` that ``GraphManager.coupling_diagnostics()`` and the
+    profiler read.
+    """
+    dtype = _reported_dtype(residual)
+    estimate = np.asarray(
+        reported_error_estimate(residual, amplification, step_scale), dtype=dtype)
+    with np.errstate(all="ignore"):
+        return bool(estimate <= np.asarray(threshold, dtype=dtype))
+
+
+# ------------------------------------------------------------------
+# The spectral bound (``solver="ift"``, ``diagnostics=True``)
+# ------------------------------------------------------------------
+
+#: Arnoldi steps per group per timestep.  Each step is one ``jax.jvp``
+#: of the group's one-pass map -- roughly the price of one coupling pass
+#: -- and the spectral bound costs one more than this, the product its
+#: result is checked against (:func:`_compressed_spectrum`).  A coupling Jacobian's rank is at most the number of
+#: boundary scalars that cross the group's edges, and a Krylov space of
+#: that dimension *is* the Jacobian's range, so eight steps give the
+#: exact non-zero spectrum of any group with up to eight independent
+#: interface scalars and report, through the Arnoldi residual, when a
+#: group has more (see :func:`arnoldi_spectral_radius`).
+SPECTRAL_KRYLOV_STEPS = 8
+
+#: How many times the Arnoldi residual ``h_{k+1,k}`` is added to the
+#: Ritz spectral radius before the spectral-radius form of the bound is
+#: formed.  That residual is the norm of the part of ``A q_k`` the
+#: Krylov space does not contain, in the same units as the eigenvalues;
+#: for a normal ``A`` every Ritz value lies within it of a true
+#: eigenvalue (Bauer-Fike with constant one).  It is zero, up to
+#: rounding, when the Krylov space is invariant, so the margin costs a
+#: resolved spectrum nothing.  The residual reported is the largest of
+#: that, of any direction a breakdown discarded, and of how far one more
+#: product moved the radius -- which is what stands in for it where
+#: ``A`` is not normal (:func:`_compressed_spectrum`).
+SPECTRAL_MARGIN = 2.0
+
+#: The convergence test behind ``spectral_usable``: the Arnoldi
+#: residual as a fraction of the gap ``1 - rho`` the bound divides by.
+#: A shift of the dominant eigenvalue by the residual would move the
+#: bound by this fraction of itself, so it is the quantity that decides
+#: whether the number is settled to a few percent.
+SPECTRAL_SETTLED_FRACTION = 0.05
+
+#: Arnoldi breakdown threshold, in units of the Jacobian-vector
+#: product's own rounding: a new direction is kept when its norm is above
+#: ``_ARNOLDI_NOISE_ULPS * eps * a``, with ``eps`` that of the coarsest
+#: dtype the map evaluates in and ``a`` the largest ``||A q_i||`` seen so
+#: far (a lower bound on ``||A||_2``).
+#:
+#: **Derivation.**  What is discarded at a breakdown is the part of
+#: ``A q_j`` outside the Krylov space, ``h_{j+1,j}``, and setting it to
+#: zero replaces ``A`` by ``A - h q_{j+1} q_j^T``: a perturbation of the
+#: matrix of norm exactly ``h``.  The product ``A q_j`` is itself only
+#: known to its evaluation error, each entry a sum of terms rounded at
+#: ``eps`` of their own size, ``|fl(A q) - A q| <= c eps |A| |q|``, whose
+#: norm is ``c eps ||A||`` whatever ``||A q_j||`` is -- so a direction of
+#: that size cannot be told from rounding, and one above it is a
+#: direction of ``A``.  The threshold is therefore a multiple of
+#: ``eps ||A||``, not of ``||A q_j||``, and not a fixed 1e-5 in every
+#: dtype: that discarded genuine directions up to 1e-5 of the product in
+#: float64, a perturbation eleven orders above the product's rounding,
+#: which a non-normal Jacobian (norm 56 beside a radius of 0.084)
+#: turned into a radius 0.9% low and a field 1e-4 of its driver into
+#: 0.379 for 0.5, both with the spectrum reported settled.  The multiple
+#: is measured: what the test discarded, in units of ``eps * a``, over
+#: 1 291 steps of the cells of
+#: ``tests/property/test_coupling_targeted_search.py`` in float32 and
+#: float64 had a median of 0.06, a 99th percentile of 3.6 to 4.8 and a
+#: largest value of 5.4, 3.7 and 4.8 on jaxlib 0.11.0, 0.10.2 and 0.11.2;
+#: eight is 1.5x the largest.  A rounding left above it is kept as a
+#: direction, which costs a column and no correctness: the compression is
+#: then on a larger space.  Whatever was discarded is not forgotten: it
+#: is a part of ``A q_j`` the space does not hold, so its norm is
+#: reported in the Arnoldi residual beside ``h_{k+1,k}``.
+#:
+#: A second, scale-free test stands beside it (Daniel, Gragg, Kaufman
+#: and Stewart's reorthogonalisation criterion): the vector is
+#: orthogonalised twice, and one that lost more than half its norm to
+#: the second sweep was, to rounding, inside the space -- which is all
+#: that is left once the space is the whole of a small state, where a
+#: rounding-sized leftover normalised into a "basis vector" is
+#: orthogonal to nothing.
+_ARNOLDI_NOISE_ULPS = 8.0
+
+#: The reorthogonalisation criterion's ratio: a new direction must keep
+#: this fraction of its norm through the second Gram-Schmidt sweep.
+_ARNOLDI_REORTH_KEEP = 0.5
+
+#: The last Arnoldi residual ``h_{k+1,k}``, in units of the products'
+#: rounding, above which the space is taken to be still growing and the
+#: one more product is spent on the next Arnoldi column; at or below it
+#: (a breakdown, a space continued from the residual, or a last
+#: direction within a few roundings of one) the space is invariant to
+#: rounding, the next column says nothing about it, and the product is
+#: spent on the rounding probe (:func:`_compressed_spectrum`).
+_ARNOLDI_GROWING_ULPS = 64.0
+
+#: Perturbations of the compressed Jacobian by which the radius's
+#: sensitivity to rounding is measured (:func:`_compressed_spectrum`):
+#: the first is the measured disagreement of a fresh product, the others
+#: carry its magnitudes, component by component, under fixed-seed signs
+#: and along fixed-seed directions.
+_SENSITIVITY_PROBES = 8
+
+#: Squarings in the Gelfand estimate of a small matrix's spectral
+#: radius, ``||H^(2^J)||_F ** (1 / 2^J)``.  The estimate is never below
+#: the true radius and its excess after ``J`` squarings is bounded by
+#: ``2**-J`` times the log of the eventual squaring ratio, i.e. below
+#: 1e-6 relative for anything float32 can distinguish.
+_GELFAND_SQUARINGS = 24
+
+
+def _spectral_radius_small(H, n_squarings: int = _GELFAND_SQUARINGS):
+    """``rho(H)`` of a small dense matrix by repeated squaring, from above.
+
+    Gelfand: ``rho(H) = lim ||H^m||^(1/m)``, and ``||H^m||_F >= rho^m``
+    for every ``m``, so the truncated estimate is an upper bound that
+    converges to the radius.  Computed in log space over normalised
+    powers, ``log rho = log ||H|| + sum_j 2^-(j+1) log ||N_j^2||_F``,
+    so neither ``0.999**(2**24)`` nor ``0.2**(2**24)`` is ever formed.
+    Only matrix products and norms: it lowers on every backend, where a
+    non-symmetric ``eigvals`` does not.  A nilpotent ``H`` (some
+    ``N_j^2 == 0``) reports exactly ``0.0``.
+    """
+    H = jnp.asarray(H)
+    c0 = jnp.linalg.norm(H)
+    alive0 = c0 > 0
+    N0 = jnp.where(alive0, H / jnp.where(alive0, c0, 1.0), H)
+    log_rho0 = jnp.where(alive0, jnp.log(jnp.where(alive0, c0, 1.0)), 0.0)
+
+    def body(j, carry):
+        N, log_rho, alive = carry
+        M = N @ N
+        s = jnp.linalg.norm(M)
+        alive = jnp.logical_and(alive, s > 0)
+        safe = jnp.where(alive, s, 1.0)
+        N = jnp.where(alive, M / safe, M)
+        log_rho = log_rho + jnp.log(safe) / (2.0 ** (j + 1))
+        return N, log_rho, alive
+
+    _N, log_rho, alive = jax.lax.fori_loop(
+        0, int(n_squarings), body, (N0, log_rho0, alive0),
+    )
+    return jnp.where(alive, jnp.exp(log_rho), jnp.zeros_like(log_rho))
+
+
+def _lapack_input(A):
+    """``(A, ok)``: *A*, or zeros where an SVD must not be handed it.
+
+    LAPACK's SVD drivers do not return on some matrices that hold an
+    ``inf``, or whose entries' squares leave the float range (measured on
+    CPU, jaxlib 0.11.0, float32 and float64, with a wall-clock limit:
+    ``jnp.linalg.svd`` and ``pinv`` of 4 x 4 to 16 x 16 matrices with one
+    ``inf`` entry or an ``inf`` column, and of one with a row and a column
+    at ``finfo.max``; a NaN beside the ``inf`` returns).  Under ``jit``
+    both sides of a ``where`` are computed, so a select *after* the
+    factorisation still runs it: the matrix is replaced *before* the call.
+    ``ok`` is that the sum of the squares is finite, per matrix (the last
+    two axes); a matrix that passes is returned unchanged, bit for bit.
+    """
+    A = jnp.asarray(A)
+    ok = jnp.isfinite(jnp.sum(A * A, axis=(-2, -1)))
+    return jnp.where(ok[..., None, None], A, jnp.zeros_like(A)), ok
+
+
+def _spectral_norm(A):
+    """``||A||_2`` per matrix (the last two axes), NaN where
+    :func:`_lapack_input` withholds the matrix (what the SVD of a
+    non-finite matrix returns where it returns)."""
+    safe, ok = _lapack_input(A)
+    return jnp.where(ok, _largest_singular_value(safe), jnp.nan)
+
+
+def _largest_singular_value(A):
+    """The largest singular value per matrix (the last two axes), from
+    the singular values alone.
+
+    ``jnp.linalg.norm(A, ord=2)`` is ``max(svd(A, compute_uv=False))``
+    with ``full_matrices=True``, and the lowered SVD then declares the
+    full ``U`` (``m x m``) and ``V^T`` (``n x n``) as outputs although
+    nobody reads them: on the ``(probes, k, n)`` tensors of the bounds
+    (``k`` Krylov directions against a group of ``n`` entries) that asks
+    for ``probes * n * n`` floats, 160 GB at ``n = 1e5`` in float32, and
+    the step raised ``RESOURCE_EXHAUSTED`` with ``diagnostics=True``.
+    The same call with ``full_matrices=False`` is the same LAPACK
+    routine on the same matrix (values only), declares
+    ``min(m, n)``-sized outputs, and returns the same singular values
+    bit for bit (pinned on every jaxlib CI runs by
+    ``tests/core/test_spectral_norm_takes_singular_values_only.py``).
+    Its working memory is the matrix and ``O(min(m, n)^2)``; its time is
+    ``O(max(m, n) min(m, n)^2)``.  ``initial=0`` is the norm of a matrix
+    with no rows or columns, as ``jnp.linalg.norm`` has it.
+    """
+    values = jnp.linalg.svd(A, full_matrices=False, compute_uv=False)
+    return jnp.max(values, axis=-1, initial=0)
+
+
+#: Backends on which ``jax.numpy.linalg.eigvals`` of a non-symmetric
+#: matrix lowers (the supported JAX range implements it on CPU and, by
+#: calling LAPACK on the host, on GPU).
+_EIGVALS_BACKENDS = ("cpu", "gpu")
+
+
+def _spectral_radius(H):
+    """``rho(H)`` of a small dense matrix: its largest eigenvalue in modulus.
+
+    From ``eigvals`` (LAPACK's QR algorithm, backward stable: the radius
+    of a matrix within a few ``eps ||H||`` of ``H``) on the backends that
+    have it (:data:`_EIGVALS_BACKENDS`), and from
+    :func:`_spectral_radius_small` elsewhere.  Repeated squaring is not
+    backward stable for a non-normal matrix -- each square cancels to
+    ``||N^2|| / ||N||^2`` of its terms, and what rounding leaves is
+    squared again -- and in float32 it read a Hessenberg matrix whose
+    five eigenvalues all have modulus 0.8918 as 0.8969, a float32 ring
+    of five relays (one field a fiftieth of its driver) as 0.0512 for
+    0.0500, and graded cyclic matrices of five as 0.9555 for 0.9152 and
+    0.5986 for 0.5141, each with the spectrum reported settled; over
+    1 500 random graded matrices of dimension 2 to 8 it was off by
+    more than 1% of ``1 - rho`` on 237, ``eigvals`` on 40 (the float32
+    rounding of the matrix itself).  NaN for a matrix that is not finite.
+    """
+    H = jnp.asarray(H)
+    if jax.default_backend() not in _EIGVALS_BACKENDS:
+        return _spectral_radius_small(H)
+    finite = jnp.all(jnp.isfinite(H))
+    eig = jnp.linalg.eigvals(jnp.where(finite, H, jnp.zeros_like(H)))
+    rho = jnp.max(jnp.abs(eig)).astype(H.dtype)
+    return jnp.where(finite, rho, jnp.full_like(rho, jnp.nan))
+
+
+def _noise_eps(dtype, noise_eps) -> float:
+    """``eps`` of the coarsest dtype in play: the analysis's or the map's."""
+    eps = float(jnp.finfo(dtype).eps)
+    # units: dimensionless -- two dtypes' relative roundings, compared with each other
+    return eps if noise_eps is None else max(eps, float(noise_eps))
+
+
+def _probe_coefficients(active):
+    """A fixed-seed unit combination of the basis vectors a Krylov space filled."""
+    c = jax.random.normal(jax.random.PRNGKey(1), active.shape, active.dtype) * active
+    nrm = jnp.linalg.norm(c)
+    return c / jnp.where(nrm > 0, nrm, 1.0)
+
+
+#: Points per circle in :func:`_rounding_keeps_the_radius`.
+_CERTIFICATE_ANGLES = 32
+
+#: How far above ``SPECTRAL_SETTLED_FRACTION * (1 - rho)`` a spectrum
+#: that is not certified is reported unsettled by, as a factor of that
+#: margin: any amount above it reads ``spectral_usable=False``; a
+#: sixteenth is far above the comparison's own rounding and raises the
+#: margin :func:`spectral_error_bound` adds by no more than that.
+_UNSETTLED_OVER_MARGIN = 1.0625  # units: dimensionless -- a factor of the settle margin
+
+
+def _rounding_keeps_the_radius(Hk, defect, active, rho, margin):
+    """Whether rounding of the measured size can move ``rho(Hk)`` by *margin*.
+
+    *defect* is the disagreement of one fresh product with the Arnoldi
+    relation, component by component along the basis: the measured size
+    of a product's rounding in each row of ``Hk``.  Every column of ``Hk``
+    is such a product, so the matrix the exact products would have given
+    is ``Hk + E`` with ``|E_ij| <= d_i`` on the active columns, ``d`` the
+    defect's magnitudes.  ``z`` is an eigenvalue of ``Hk + E`` only if
+    ``v = R(z) E v`` for some ``v``, ``R(z) = (z I - Hk)^{-1}``, and then
+    ``|v| <= |R(z)| d (1_a^T |v|)`` entry by entry, which needs
+    ``g(z) = 1_a^T |R(z)| d >= 1`` (``1_a`` the active columns).  So where
+    ``g < 1`` at every point of the circle ``|z| = rho + margin`` and of
+    the circle of radius *margin* about the dominant eigenvalue, no member
+    of the family has an eigenvalue on either circle, the count inside
+    each is the same for every member (the family is connected), and the
+    radius of each is within *margin* of ``rho``: a statement about every
+    sign pattern and every combination of columns, and exact in the
+    perturbation's size (a near-defective eigenvalue moves by a root of
+    it), where eight sampled perturbations read 0.013 and 0.023 against
+    margins of 0.037 and 0.045 on two float32 groups of rank six whose
+    radius the exact products put 0.044 and 0.051 away.  Componentwise, so
+    a graded Jacobian (an offset, a small field) is held to the rounding
+    its own rows show and not to its norm's.  The circles are sampled at
+    :data:`_CERTIFICATE_ANGLES` points each.  ``True`` on a backend
+    without ``eigvals`` (nothing is certified there; the sampled movement
+    stands alone).
+    """
+    if jax.default_backend() not in _EIGVALS_BACKENDS:
+        return jnp.ones((), bool)
+    k = Hk.shape[0]
+    dtype = Hk.dtype
+    finite = jnp.logical_and(jnp.all(jnp.isfinite(Hk)), jnp.all(jnp.isfinite(defect)))
+    Hs = jnp.where(finite, Hk, jnp.zeros_like(Hk))
+    on = active != 0
+    d = jnp.where(jnp.logical_and(finite, on), jnp.abs(defect), jnp.zeros_like(defect))
+    eig = jnp.linalg.eigvals(Hs)
+    lead = eig[jnp.argmax(jnp.abs(eig))]
+    angles = (jnp.arange(_CERTIFICATE_ANGLES, dtype=dtype) + 0.5) * (
+        2.0 * jnp.pi / _CERTIFICATE_ANGLES)
+    radius = jnp.maximum(margin, jnp.zeros_like(margin))
+    cos, sin = jnp.cos(angles), jnp.sin(angles)
+    re = jnp.concatenate([(rho + radius) * cos, jnp.real(lead).astype(dtype) + radius * cos])
+    im = jnp.concatenate([(rho + radius) * sin, jnp.imag(lead).astype(dtype) + radius * sin])
+    eye = jnp.eye(k, dtype=dtype)
+    # The family lives on the active block (a basis vector that was never
+    # filled is zero, and so are its row and column of ``Hk`` and of every
+    # ``E``): the identity stands in for the rest.
+    block = jnp.logical_and(on[:, None], on[None, :])
+    idle = jnp.diag(jnp.where(on, jnp.zeros_like(d), jnp.ones_like(d)))
+    on_f = on.astype(dtype)
+
+    def reach(x, y):
+        # ``z I - Hk`` for complex ``z = x + i y`` as a real matrix of
+        # twice the size, whose inverse holds the real and imaginary
+        # parts of ``R(z)``.
+        a = jnp.where(block, x * eye - Hs, 0.0) + idle
+        b = jnp.where(block, y * eye, 0.0)
+        inv = jnp.linalg.inv(jnp.block([[a, -b], [b, a]]))
+        modulus = jnp.sqrt(inv[:k, :k] ** 2 + inv[k:, :k] ** 2)
+        return on_f @ (modulus @ d)
+
+    g = jax.vmap(reach)(re, im)
+    # NaN or inf (a point of a circle on an eigenvalue) is not below one.
+    clear = jnp.all(g < 1.0)
+    return jnp.logical_and(finite, jnp.logical_and(clear, margin > 0))
+
+
+def _compressed_spectrum(H, coefficients, column, extended):
+    """``(rho, unsettled, amplification)`` of a Krylov-compressed Jacobian.
+
+    ``H`` is the ``(k + 1) x k`` Hessenberg matrix and ``Hk`` its square
+    part.  ``rho`` is the spectral radius of ``Hk`` and ``amplification``
+    is ``1 / sigma_min(I - Hk)``, the norm of the compressed map's
+    resolvent at 1.  ``unsettled`` is how far one more product moves the
+    radius, the product the caller spent in one of two ways (*extended*
+    says which) and passes as *column*, its components along the
+    ``k + 1`` basis vectors:
+
+    * **The space was still growing** (*extended*: ``h_{k+1,k}`` is above
+      :data:`_ARNOLDI_GROWING_ULPS` roundings of the products).  The product is ``A q_{k+1}``, the next Arnoldi
+      column, and ``unsettled`` is ``|rho(H_{k+1}) - rho(Hk)|``: the
+      radius measured on eight vectors and on nine.  The Arnoldi residual
+      ``h_{k+1,k}`` bounds how far a Ritz value is from an eigenvalue
+      only for a normal Jacobian; a non-normal one of norm 109 read 0.941
+      for a radius of 0.735 with a residual under 5% of ``1 - rho``, on a
+      group of twelve scalars, and the ninth vector moves it.
+    * **The space broke down** (invariant).  The product is ``A z`` for
+      a fixed-seed combination ``z = Q c`` of the basis (*coefficients*),
+      which the Arnoldi relation says is ``Q Hk c``.  The disagreement
+      ``Q^T A z - Hk c`` is rounding's doing (and a discarded
+      direction's) and has rounding's own shape: large only where the
+      products' entries are large.  ``Hk + defect c^T`` is the
+      compression that agrees with the fresh product, and ``unsettled``
+      is the largest ``|rho(Hk + d c'^T) - rho(Hk)|`` over it and
+      :data:`_SENSITIVITY_PROBES` - 1 more of its kind: ``d`` the defect
+      under fixed-seed signs (its magnitudes, component by component, are
+      the measurement; one sample's signs are luck) and ``c'`` fixed-seed
+      unit combinations.  A measured sample of what rounding did to the
+      radius.  For a normal Jacobian it is of the order of
+      the defect; a non-normal one can turn a rounding into far more,
+      and nothing in a Ritz value says so: a field 1e-4 of its driver on
+      a float32 fan-out hub read 0.574 for a radius of 0.092 with a zero
+      Arnoldi residual.  A perturbation of the same *norm* in a random
+      direction is not the measure: an offset or a small field grades
+      the weighted Jacobian (norm 725 beside a radius of 0.7), rounding
+      leaves its small entries alone, and a random perturbation moved a
+      radius by 0.2 that the analysis had right to 3e-5.
+    """
+    k = H.shape[1]
+    Hk = H[:k, :k]
+    rho = _spectral_radius(Hk)
+    # Never an SVD of a matrix that is not finite (``_lapack_input``): the
+    # zeros that stand in for one have no singular value above zero, so
+    # the amplification reads ``inf``, as it did where the driver returned
+    # (a NaN singular value is not above zero either).
+    shifted, _ = _lapack_input(jnp.eye(k, dtype=Hk.dtype) - Hk)
+    sigma = jnp.linalg.svd(shifted, compute_uv=False)
+    sigma_min = sigma[-1]
+    invertible = sigma_min > 0
+    amplification = jnp.where(
+        invertible, 1.0 / jnp.where(invertible, sigma_min, 1.0), jnp.inf,
+    )
+    defect = column[:k] - Hk @ coefficients
+    active = (coefficients != 0).astype(Hk.dtype)
+    key_l, key_r = jax.random.split(jax.random.PRNGKey(2))
+    signs = jax.random.rademacher(key_l, (_SENSITIVITY_PROBES, k), Hk.dtype)
+    right = jax.random.normal(key_r, (_SENSITIVITY_PROBES, k), Hk.dtype) * active
+    norms = jnp.linalg.norm(right, axis=1, keepdims=True)
+    right = right / jnp.where(norms > 0, norms, 1.0)
+    # The first probe is the measured disagreement itself.
+    signs = signs.at[0].set(1.0)
+    right = right.at[0].set(coefficients)
+    agreed = Hk[None] + (signs * defect[None, :])[:, :, None] * right[:, None, :]
+    moved = jnp.max(jnp.abs(jax.vmap(_spectral_radius)(agreed) - rho))
+    # What the flag's margin is, and the least that reads as beyond it.
+    margin = SPECTRAL_SETTLED_FRACTION * (1.0 - rho)
+    beyond = _UNSETTLED_OVER_MARGIN * jnp.maximum(margin, jnp.zeros_like(margin))
+    certified = _rounding_keeps_the_radius(Hk, defect, active, rho, margin)
+    moved = jnp.where(certified, moved, jnp.maximum(moved, beyond))
+    grown = jnp.zeros((k + 1, k + 1), Hk.dtype).at[:, :k].set(H).at[:, k].set(column)
+    # A space still growing at the cap is not invariant, and a Ritz value
+    # of a space that is not invariant is within no computed distance of
+    # the radius unless the Jacobian is normal: beyond the margin, always.
+    growing = jnp.maximum(jnp.abs(_spectral_radius(grown) - rho), beyond)
+    unsettled = jnp.where(extended, growing, moved)
+    return rho, unsettled, amplification
+
+
+def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
+                            v_extra=None, noise_eps=None):
+    """``(rho, residual, amplification)`` after ``n_steps`` of Arnoldi on ``dF/dx``.
+
+    ``matvec(v)`` applies the coupling Jacobian ``dF/dx`` (at the point
+    the caller chose, in the coordinates the caller's norm is taken in)
+    to ``v``; ``v0`` is the start vector.  Modified Gram-Schmidt Arnoldi
+    builds an orthonormal basis ``Q`` of the Krylov space and the
+    Hessenberg matrix ``H = Q^T A Q``; ``rho`` is the spectral radius
+    of ``H`` -- the largest Ritz value in modulus, taken by
+    :func:`_spectral_radius_small` so the call lowers on every backend
+    -- ``residual`` is ``h_{k+1,k}``, the norm of the part of ``A q_k``
+    outside the space, and ``amplification`` is
+    ``||(I - H)^{-1}||_2 = 1 / sigma_min(I - H)``, the norm of the
+    compressed map's resolvent at 1.
+
+    **Why the resolvent and not only the radius.**  For a normal ``A``
+    the two agree, ``||(I - A)^{-1}|| = 1 / min|1 - lambda| <=
+    1/(1 - rho)``.  A coupling Jacobian need not be normal, and the
+    Jacobi map of a group in which one side responds strongly to the
+    other and the other weakly back is measured *far* from it: its
+    ``+/-lambda`` eigenvector pair is nearly parallel, an error of the
+    shape "grid consistent with probes, both off" has a residual
+    ``(1 - lambda**2)`` times its probe part while its size is the
+    grid's response to that part, and ``residual / (1 - rho)`` read
+    30-40x below the true distance on the heterogeneous benchmark
+    fixture with ``rho`` exactly right.  When the Krylov space is
+    invariant (``residual == 0``) it satisfies ``A Q = Q H``, so for
+    any vector ``r`` in it ``(I - A)^{-1} r = Q (I - H)^{-1} Q^T r`` and
+    ``||(I - A)^{-1} r|| <= amplification * ||r||`` holds *whatever*
+    the eigenvectors do -- **for a vector in the space**, which an
+    invariant space does not make every vector.
+
+    **Why the residual is put in the space (``v_extra``).**  A Krylov
+    space grown from one start vector is that vector's cyclic subspace,
+    and it can break down -- ``residual == 0``, invariant, settled --
+    while holding only part of the Jacobian's range: where an
+    eigenvalue is repeated the minimal polynomial's degree is below the
+    rank, and ``A = B (x) I_2`` broke down at dimension 2 with a range
+    of dimension 4.  A zero residual was read as certifying that the
+    residual being bounded lay in the space; it did not, and the bound
+    read 0.92x the true distance with ``spectral_usable=True``.  Nor is
+    the residual of a relaxed or accelerated iterate in the range at
+    all (only ``x_k = F(x_{k-1})`` makes ``F(x_k) - x_k`` a Jacobian
+    image).  So the vector the caller will apply the resolvent to is
+    passed as ``v_extra``: whenever the space breaks down, the part of
+    ``v_extra`` it does not yet contain becomes the next basis vector
+    and the iteration continues from it (``H`` keeps a zero on its
+    subdiagonal there, so its spectrum is the union of the blocks').  A
+    space that then breaks down again is invariant *and* contains
+    ``v_extra`` by construction, which is the certificate.  What is
+    still outside the final space -- ``v_extra`` minus its projection,
+    relative to its norm -- is folded into ``residual`` (the larger of
+    the two is returned), so a ``v_extra`` the space never absorbed
+    reads as an unsettled space rather than as a certified one.
+
+    **When the answer is exact, and how it says so.**  A coupling
+    Jacobian has rank at most the number of boundary scalars crossing
+    the group's edges; once the Krylov space contains that range the
+    next Arnoldi vector is rounding (breakdown, see
+    ``_ARNOLDI_NOISE_ULPS``), the remaining columns of ``H`` stay
+    zero, and the non-zero Ritz values are the non-zero eigenvalues of
+    a matrix within rounding of ``A``.  How far those are from ``A``'s
+    is not a property of the rounding alone -- a non-normal ``A`` can
+    turn one ``eps`` of its norm into a large movement of an eigenvalue
+    -- so it is measured: one more product, along a combination of the
+    basis, is compared with what the Arnoldi relation says it is, and
+    ``residual`` is how far that disagreement, under eight sign
+    patterns, moves the radius (:func:`_compressed_spectrum`); zero, to
+    rounding, for a well-conditioned spectrum.  A group with more
+    independent interface scalars than ``n_steps`` gets Ritz values
+    that lie, for a normal ``A``, inside the convex hull of the
+    spectrum -- an estimate of ``rho`` *from below* -- and for a
+    non-normal ``A`` inside its field of values, which can reach past
+    the spectral radius, so the estimate can then read from either side
+    (1.17 for a weighted cyclic shift of nine entries whose every
+    eigenvalue has modulus 0.95) -- and a
+    ``residual`` that is not small, which is what
+    :func:`spectral_rate_settled` reports and
+    :func:`spectral_error_bound` adds a margin for.  There the one more
+    product is the ninth Arnoldi column, and ``residual`` is at least
+    how far it moves the radius: the Arnoldi residual alone bounds a
+    Ritz value's error only for a normal ``A``.  Eight steps
+    resolve any spectrum whatever its clustering where the rank allows
+    it, which is where a power iteration of the same cost does not: on
+    random symmetric contractions of dimension 6 with eigenvalues
+    0.949 and 0.983 the power iteration read 0.949 after eight
+    products, while Arnoldi's space of dimension 6 is the whole range.
+
+    ``n_steps`` is static (a Python int); the call costs ``n_steps + 1``
+    Jacobian-vector products, with or without ``v_extra``.  The SVD
+    behind ``amplification`` and the eigenvalues behind ``rho`` and the
+    probes are of matrices no larger than ``(k + 1) x (k + 1)`` and cost
+    nothing beside them.  ``noise_eps`` is the ``eps`` of the coarsest
+    dtype ``matvec`` evaluates in, where that is coarser than ``v0``'s
+    (a bfloat16 map analysed in float32): the rounding the breakdown
+    test is scaled to.  A zero ``v0``, or a Jacobian
+    that annihilates the start (``A v0 = 0``), gives ``rho = 0.0``,
+    ``residual = 0.0`` and ``amplification = 1.0`` when there is no
+    ``v_extra`` to continue from: nothing is amplified, so nothing is
+    extrapolated.  A zero ``v_extra`` (a stalled iterate's residual)
+    adds nothing.
+
+    Examples
+    --------
+    >>> import jax.numpy as jnp
+    >>> A = jnp.diag(jnp.array([0.999, -0.2, 0.0]))
+    >>> rho, res, amp = arnoldi_spectral_radius(lambda v: A @ v, jnp.ones(3), n_steps=8)
+    >>> bool(abs(rho - 0.999) < 1e-5), bool(res < 1e-5), bool(abs(amp - 1000.0) < 1.0)
+    (True, True, True)
+    >>> B = jnp.kron(jnp.array([[0.0, 2.0], [0.02, 0.0]]), jnp.eye(2))   # every eigenvalue twice
+    >>> r = jnp.array([1.0, 0.0, 0.0, 1.0])
+    >>> _, res, amp = arnoldi_spectral_radius(lambda v: B @ v, jnp.array([1.0, 1.0, 1.0, 1.0]), v_extra=r)
+    >>> exact = float(jnp.linalg.norm(jnp.linalg.solve(jnp.eye(4) - B, r)))
+    >>> bool(res < 1e-5), bool(float(amp) * float(jnp.linalg.norm(r)) >= exact)
+    (True, True)
+    """
+    if n_steps < 1:
+        raise ValueError(
+            f"arnoldi_spectral_radius: n_steps={n_steps} < 1; at least "
+            "one Jacobian-vector product is needed."
+        )
+    v0 = jnp.asarray(v0)
+    k = int(n_steps)
+    n = v0.shape[0]
+    dtype = v0.dtype
+
+    def _unit(v):
+        nrm = jnp.linalg.norm(v)
+        ok = nrm > 0
+        return jnp.where(ok, v / jnp.where(ok, nrm, 1.0), v)
+
+    extra = None if v_extra is None else jnp.asarray(v_extra, dtype)
+
+    def _outside(Q, v):
+        """``v`` minus its projection on the rows of ``Q`` (twice, for float32)."""
+        for _sweep in range(2):
+            for i in range(Q.shape[0]):
+                v = v - jnp.dot(Q[i], v) * Q[i]
+        return v
+
+    eps = _noise_eps(dtype, noise_eps)
+    Q0 = jnp.zeros((k + 1, n), dtype).at[0].set(_unit(v0))
+    H0 = jnp.zeros((k + 1, k), dtype)
+    zero = jnp.zeros((), dtype)
+
+    def body(j, carry):
+        Q, H, anorm, dropped = carry
+        w = matvec(Q[j])
+        anorm = jnp.maximum(anorm, jnp.linalg.norm(w))
+        # Modified Gram-Schmidt against every basis vector, twice; rows
+        # not yet filled (and rows after a breakdown) are zero and
+        # contribute nothing, which keeps the loop static in shape.
+        for _sweep in range(2):
+            h_first = jnp.linalg.norm(w)
+            for i in range(k + 1):
+                h = jnp.dot(Q[i], w)
+                w = w - h * Q[i]
+                H = H.at[i, j].add(h)
+        h_next = jnp.linalg.norm(w)
+        # See ``_ARNOLDI_NOISE_ULPS``: above the products' rounding, and
+        # not lost to the second sweep.
+        grown = jnp.logical_and(h_next > _ARNOLDI_NOISE_ULPS * eps * anorm,
+                                h_next >= _ARNOLDI_REORTH_KEEP * h_first)
+        # A leftover once the basis is the whole space is orthogonal to
+        # nothing: rounding by construction, not a direction that could
+        # have been one.
+        whole = jnp.sum((jnp.sum(Q * Q, axis=1) > 0).astype(dtype)) >= n
+        dropped = jnp.maximum(dropped, jnp.where(jnp.logical_or(grown, whole), 0.0, h_next))
+        H = H.at[j + 1, j].set(jnp.where(grown, h_next, 0.0))
+        q_next = jnp.where(grown, w / jnp.where(grown, h_next, 1.0), 0.0)
+        if extra is not None:
+            # A breakdown with ``v_extra`` not yet in the space: continue
+            # from the part of it the space lacks.  ``H[j + 1, j]`` stays
+            # zero -- the new direction is not ``A q_j``'s.
+            e = _outside(Q, extra)
+            e_norm = jnp.linalg.norm(e)
+            fresh = e_norm > _ARNOLDI_NOISE_ULPS * eps * jnp.linalg.norm(extra)
+            restart = jnp.logical_and(jnp.logical_not(grown), fresh)
+            q_next = jnp.where(restart, e / jnp.where(restart, e_norm, 1.0), q_next)
+        Q = Q.at[j + 1].set(q_next)
+        return Q, H, anorm, dropped
+
+    Q, H, anorm, dropped = jax.lax.fori_loop(0, k, body, (Q0, H0, zero, zero))
+    active = (jnp.sum(Q[:k] * Q[:k], axis=1) > 0).astype(dtype)
+    # One more product: the next Arnoldi column where the space was still
+    # growing, a combination of the basis against what the Arnoldi
+    # relation says it is where it broke down (``_compressed_spectrum``).
+    c = _probe_coefficients(active)
+    extended = H[k, k - 1] > _ARNOLDI_GROWING_ULPS * eps * anorm
+    column = Q @ matvec(jnp.where(extended, Q[k], c @ Q[:k]))
+    rho, sensitivity, amplification = _compressed_spectrum(H, c, column, extended)
+    # A direction a breakdown discarded is a part of ``A q_j`` outside the
+    # space, as ``h_{k+1,k}`` is: both are what the space missed.  (Its
+    # bare norm: what it could do to the radius of a Jacobian far from
+    # normal is up to ``sqrt(h ||A||)``, but held to that a float32 group
+    # with ``1 - rho`` below about 1e-2 never settles -- rounding alone
+    # leaves ``h`` near ``eps ||A||`` -- so the hidden-mode case stays
+    # open below the claimed domain, MADD-ANO-230.)
+    residual = jnp.maximum(jnp.maximum(H[k, k - 1], dropped), sensitivity)
+    if extra is not None:
+        # The certificate, tested rather than assumed: the fraction of
+        # ``v_extra`` outside the final space.  Zero (to rounding) when the
+        # space absorbed it; otherwise it reads as unresolved spectrum.
+        ex_norm = jnp.linalg.norm(extra)
+        missed = jnp.linalg.norm(_outside(Q[:k], extra)) / jnp.where(ex_norm > 0, ex_norm, 1.0)
+        missed = jnp.where(missed > _ARNOLDI_NOISE_ULPS * eps, missed, 0.0)
+        residual = jnp.maximum(residual, missed)
+    return rho, residual, amplification
+
+
+def _arnoldi_through(matvec, measure, u0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
+                     extra=None, noise_eps=None):
+    """:func:`arnoldi_spectral_radius` of the map ``dF/dx`` induces on the coordinates *measure* reads.
+
+    ``measure`` is a linear map from the iterate's coordinates to the
+    coordinates a norm is taken in -- under ``convergence_norm="interface"``
+    the JVP of the interface reading, what that norm reads on each
+    internal edge (the value the edge *delivers*: its source value through
+    the edge's mapping, then its transform; or the source value itself
+    where a static mapping delivers more entries than the source holds)
+    -- and the operator analysed is ``A`` with
+    ``A measure(u) = measure(matvec(u))``.  It is well defined wherever
+    ``matvec`` sends the kernel of ``measure`` to zero, which a coupling
+    pass does when every member reads the iterate only through the edges
+    the norm reads: ``F = G o Phi`` with ``Phi`` the reading, so
+    ``J = G' Phi'`` and ``A = Phi' G'``, which has ``J``'s non-zero
+    spectrum and is the iteration matrix of the reading itself.  Its
+    resolvent is what carries a residual *measured in those coordinates*
+    to the distance measured in them: ``Phi'(x - x*) = (I - A)^{-1}
+    Phi'(x - F(x))`` for an affine map, whatever ``Phi'`` discards.
+
+    ``A`` is never formed.  Each Krylov vector ``q = measure(u)`` is carried
+    with a preimage ``u`` (a Gram-Schmidt combination of preimages is a
+    preimage of the same combination), so the next is ``measure(matvec(u))``
+    -- one product of each per step.  ``u0`` is the start's preimage and
+    ``extra`` is ``(u, q)``, the residual's preimage and the residual in the
+    measured coordinates, which the space continues from at a breakdown as
+    :func:`arnoldi_spectral_radius` continues from ``v_extra``.  Returns
+    ``(rho, residual, amplification)`` with the meanings, conventions,
+    breakdown rule, one more product and ``noise_eps`` of
+    :func:`arnoldi_spectral_radius`, and agrees with it, to rounding, when
+    ``measure`` is the identity.
+    """
+    if n_steps < 1:
+        raise ValueError(
+            f"_arnoldi_through: n_steps={n_steps} < 1; at least one "
+            "Jacobian-vector product is needed."
+        )
+    u0 = jnp.asarray(u0)
+    q0 = jnp.asarray(measure(u0))
+    k = int(n_steps)
+    n = u0.shape[0]
+    m = q0.shape[0]
+    dtype = q0.dtype
+    u0 = u0.astype(dtype)
+
+    def _unit(u, q):
+        nrm = jnp.linalg.norm(q)
+        ok = nrm > 0
+        s = jnp.where(ok, 1.0 / jnp.where(ok, nrm, 1.0), 1.0)
+        return u * s, q * s
+
+    if extra is not None:
+        extra_u = jnp.asarray(extra[0], dtype)
+        extra_q = jnp.asarray(extra[1], dtype)
+
+    def _outside(Q, U, u, q):
+        """``q`` minus its projection on the rows of ``Q`` (twice), ``u`` alike."""
+        for _sweep in range(2):
+            for i in range(Q.shape[0]):
+                h = jnp.dot(Q[i], q)
+                q = q - h * Q[i]
+                u = u - h * U[i]
+        return u, q
+
+    eps = _noise_eps(dtype, noise_eps)
+    first_u, first_q = _unit(u0, q0)
+    Q0 = jnp.zeros((k + 1, m), dtype).at[0].set(first_q)
+    U0 = jnp.zeros((k + 1, n), dtype).at[0].set(first_u)
+    H0 = jnp.zeros((k + 1, k), dtype)
+    zero = jnp.zeros((), dtype)
+
+    def body(j, carry):
+        Q, U, H, anorm, dropped = carry
+        w_u = jnp.asarray(matvec(U[j]), dtype)
+        w_q = jnp.asarray(measure(w_u), dtype)
+        anorm = jnp.maximum(anorm, jnp.linalg.norm(w_q))
+        for _sweep in range(2):
+            h_first = jnp.linalg.norm(w_q)
+            for i in range(k + 1):
+                h = jnp.dot(Q[i], w_q)
+                w_q = w_q - h * Q[i]
+                w_u = w_u - h * U[i]
+                H = H.at[i, j].add(h)
+        h_next = jnp.linalg.norm(w_q)
+        grown = jnp.logical_and(h_next > _ARNOLDI_NOISE_ULPS * eps * anorm,
+                                h_next >= _ARNOLDI_REORTH_KEEP * h_first)
+        # A leftover once the basis is the whole space is orthogonal to
+        # nothing: rounding by construction, not a direction that could
+        # have been one.
+        whole = jnp.sum((jnp.sum(Q * Q, axis=1) > 0).astype(dtype)) >= m
+        dropped = jnp.maximum(dropped, jnp.where(jnp.logical_or(grown, whole), 0.0, h_next))
+        H = H.at[j + 1, j].set(jnp.where(grown, h_next, 0.0))
+        inv = jnp.where(grown, 1.0 / jnp.where(grown, h_next, 1.0), 0.0)
+        q_next = w_q * inv
+        u_next = w_u * inv
+        if extra is not None:
+            e_u, e_q = _outside(Q, U, extra_u, extra_q)
+            e_norm = jnp.linalg.norm(e_q)
+            fresh = e_norm > _ARNOLDI_NOISE_ULPS * eps * jnp.linalg.norm(extra_q)
+            restart = jnp.logical_and(jnp.logical_not(grown), fresh)
+            e_inv = jnp.where(restart, 1.0 / jnp.where(restart, e_norm, 1.0), 0.0)
+            q_next = jnp.where(restart, e_q * e_inv, q_next)
+            u_next = jnp.where(restart, e_u * e_inv, u_next)
+        Q = Q.at[j + 1].set(q_next)
+        U = U.at[j + 1].set(u_next)
+        return Q, U, H, anorm, dropped
+
+    Q, _U, H, anorm, dropped = jax.lax.fori_loop(0, k, body, (Q0, U0, H0, zero, zero))
+    active = (jnp.sum(Q[:k] * Q[:k], axis=1) > 0).astype(dtype)
+    c = _probe_coefficients(active)
+    extended = H[k, k - 1] > _ARNOLDI_GROWING_ULPS * eps * anorm
+    probe_u = jnp.where(extended, _U[k], c @ _U[:k])
+    column = Q @ jnp.asarray(measure(jnp.asarray(matvec(probe_u), dtype)), dtype)
+    rho, sensitivity, amplification = _compressed_spectrum(H, c, column, extended)
+    # A direction a breakdown discarded is a part of ``A q_j`` outside the
+    # space, as ``h_{k+1,k}`` is: both are what the space missed.  (Its
+    # bare norm: what it could do to the radius of a Jacobian far from
+    # normal is up to ``sqrt(h ||A||)``, but held to that a float32 group
+    # with ``1 - rho`` below about 1e-2 never settles -- rounding alone
+    # leaves ``h`` near ``eps ||A||`` -- so the hidden-mode case stays
+    # open below the claimed domain, MADD-ANO-230.)
+    residual = jnp.maximum(jnp.maximum(H[k, k - 1], dropped), sensitivity)
+    if extra is not None:
+        ex_norm = jnp.linalg.norm(extra_q)
+        _e_u, e_q = _outside(Q[:k], _U[:k], extra_u, extra_q)
+        missed = jnp.linalg.norm(e_q) / jnp.where(ex_norm > 0, ex_norm, 1.0)
+        missed = jnp.where(missed > _ARNOLDI_NOISE_ULPS * eps, missed, 0.0)
+        residual = jnp.maximum(residual, missed)
+    return rho, residual, amplification
+
+
+#: Units of ``eps * max|field|`` per entry that a computed residual can
+#: differ from the exact ``F(x) - x`` by -- the constant in
+#: :func:`residual_precision_floor`.
+#:
+#: **Derivation.**  The residual a group reports is ``N(F~(x) - x)``,
+#: with ``F~`` the one-pass map as float arithmetic evaluates it and
+#: ``N`` the group's norm, which divides each field by its own
+#: magnitude.  What a distance bound needs is ``N(F(x) - x)`` for the
+#: *exact* map, and the two differ by at most ``N(F~(x) - F(x))``, the
+#: map's evaluation error (triangle inequality).  Each entry of
+#: ``F~(x)`` is at least rounded once at the output, which is half a
+#: unit in the last place of a number no larger than the field's
+#: magnitude, ``<= eps * max|field| / 2`` -- so a residual of exactly
+#: ``0.0`` does not say ``F(x) == x``; it says the last pass moved no
+#: entry by more than about one ulp, and a slow group can stall there
+#: arbitrarily far from its fixed point (``(1 - rho) * |x - x*|`` below
+#: half an ulp).  Measured, in units of ``eps * max|field|`` per entry
+#: and in the norm the group reports (jaxlib 0.11.0, CPU, float32):
+#:
+#: * the evaluation error of a dense linear update ``A @ u + c``,
+#:   ``n <= 6``, over 3 000 random normal contractions near their fixed
+#:   points: at most **0.72** (median 0.18) -- this *includes* the
+#:   output rounding;
+#: * the disagreement between two compilations of the same pass (the
+#:   ``"ift"`` and ``"fori"`` solvers' reported residuals over the
+#:   480-cell sweep behind ``tests/core/test_coupling_solver_equivalence.py``):
+#:   at most **0.82**.
+#:
+#: Their sum is 1.54; four units is 2.6x that, room for an evaluation
+#: with a few more roundings per entry than one dense product (a flux
+#: computed from two iterates).
+#:
+#: **It is per evaluation, not per pass.**  A composite map is several
+#: evaluations, and its error grows with their number: explicit Euler
+#: ``x <- x + h (T - x)`` in ``N`` sub-steps, measured the same way,
+#: reaches 1.3 units at ``N = 4``, 2.6 at 10, 5.8 at 20, 15.6 at 50 and
+#: 29.4 at 100 (worst of 2 000 draws each, jaxlib 0.11.0) -- every
+#: sub-step whose increment is below half an ulp of its field is rounded
+#: away.  While the floor was a flat four
+#: units, a stalled relay built on such a node read a bound 0.07-0.96x
+#: its true distance at ``N`` = 15-200 with ``spectral_usable=True``,
+#: whether the node looped inside ``update`` or the framework
+#: sub-cycled it.  So the floor is this constant times the number of
+#: evaluations one coupling pass rounds like
+#: (``maddening.core.coupling._group_layout._group_evaluations``, a module-level
+#: function).  A node's own update counts its sub-cycling divider times
+#: :meth:`SimulationNode.update_evaluations`, which is ``4N`` for the
+#: sub-stepping node above -- 16, 40, 80, 200 and 400 units against
+#: those figures, the same 2.6x-or-more headroom the single evaluation
+#: has and 14x at ``N = 100``, the price of one constant.  How the
+#: nodes' counts combine depends on the iteration mode.  Under Jacobi
+#: every node reads the stored previous iterate, so the pass rounds like
+#: its worst node.  Under Gauss-Seidel a node reads each member
+#: scheduled before it from the *same* pass, already rounded, so the
+#: rounding at the end of a chain of same-pass reads is the sum along
+#: it, and the count is the longest such chain: on a Gauss-Seidel ring
+#: of ``N`` scalar relays stalled at float32 the exact residual is about
+#: ``N/27`` per-pass floors (0.6x at ``N = 16``, 2.3x at 64), and while
+#: the floor took the worst node's count the bound read 0.51x
+#: (``N = 32``) and 0.30x (``N = 64``) its true distance with
+#: ``spectral_usable=True``.  A node that loops inside ``update`` without
+#: declaring it is counted as one evaluation, and
+#: ``coupling_diagnostics`` withholds ``spectral_usable`` wherever the
+#: residual is at the floor, where that count carries the bound.
+#:
+#: **Gains.**  "The sum along the chain" assumes a read passes a relative
+#: rounding on at most unchanged.  A squaring relay doubles it with no
+#: cancellation at all, and a node whose terms cancel (``3u - 2v`` at
+#: ``u ~ v``) amplifies its own rounding as well as its inputs': a
+#: Gauss-Seidel ring of twelve squares read the bound at 0.20x its true
+#: distance, and its gradient bound at 0.018x, with the flags set.  So
+#: with ``diagnostics=True`` the step measures every group-internal
+#: read's relative gain ``g`` at the returned state (one JVP of the
+#: reading node's update along the source's own state), scales each
+#: node's own count by ``max(1, sum g)`` over its reads, weights each
+#: same-pass read by its gain along the chain, and never goes below the
+#: structural count; the report reads that count from the step
+#: (``coupling_<key>_pass_evaluations``).  Without diagnostics the
+#: structural count stands (``precision_limited`` only, no bound).  The
+#: weighting adds gain *magnitudes*, which keeps it a bound and makes it
+#: loose where signs alternate: a ten-link chain ``3 c_(j-1) - 2 c_(j-2)
+#: + c`` counts 3.6e5 evaluations and its bound reads 1.1e7x the true
+#: distance, usable.  Sub-cycled members are counted as undamped sub-steps
+#: and read 1.5e3x-9.6e4x over.  Valid, and too loose to read there.
+#:
+#: It is a model of the map's rounding, not a proof of it: the measured
+#: gains are first-order and taken along one direction per read (the
+#: source's own state), and a node whose update cancels *inside* itself
+#: -- a small output computed as the difference of two large
+#: intermediates it computes, not reads -- can exceed any fixed number
+#: of ulps of its output's magnitude where nothing outside the node can
+#: see it.
+#:
+#: **The counted floor's two assumptions, and what breaking them costs.**
+#: The count is only as good as two things nothing outside a node can
+#: verify: that every node declares ``update_evaluations()`` truthfully,
+#: and that no node cancels internally.  Measured on 154 fixture
+#: configurations of the 0.4.0 floor study (float32 and float64, CPU): a
+#: node taking 2000 sub-steps per update but declaring one evaluation read
+#: its bound at 0.26-0.60x the true distance with ``spectral_usable=True``,
+#: and a node forming its output as the difference of two terms about
+#: 1000x its size read 0.02-0.65x, flag set.  In the other direction,
+#: because the count adds gain magnitudes, mixed-sign chains read very
+#: conservatively (up to 1e7x the true distance) and sub-cycled groups
+#: 1e3-1e5x, as above.  A measured, opt-in ``diagnostics="rounding"``
+#: level, estimating the map's rounding rather than counting it, is
+#: planned for 0.5.0.
+PRECISION_FLOOR_ULPS = 4.0
+
+
+def _position_fields(interface_edges) -> frozenset:
+    """``{(node, field)}``: the geometry fields a group's internal edges
+    anchor a geometry-dependent mapping at, which a group's floor counts
+    at their own dtype's ``eps`` (:func:`_group_coarsest_eps`,
+    "Positions are exempt").  *interface_edges* is the group's plan or
+    its bare internal edges; empty where there is none.
+
+    Read by :func:`residual_precision_floor` (``"l2"`` and ``"mixed"``)
+    and by the step's per-entry resolution (``_coupled_block.py``), so
+    the two exempt the same fields.
+    """
+    fields = set()
+    for record in interface_records(interface_edges if interface_edges is not None else ()):
+        if record.anchor is not None:
+            side, field = record.anchor
+            fields.add(((record.source if side == "source" else record.target)[0], field))
+    return frozenset(fields)
+
+
+def _kernel_rounding(interface_edges, state, pre_step=None) -> list:
+    """``[(record, holder, reach, resolution), ...]``: the rounding of the
+    weights a geometry-dependent mapping forms on a group's internal
+    edges, edge by edge (experimental).
+
+    One entry per internal edge whose mapping is geometry-dependent and
+    of a kind that declares a length scale (``geometry_length_scale``;
+    ``multilinear_grid``), its geometry floating and holding entries:
+
+    * ``holder`` is the ``(node, field)`` the positions are stored in;
+    * ``reach`` the magnitude each coordinate the kernel reads is rounded
+      at, in the kind's lengths
+      (``_interface_plan._read_in_kernel_lengths``: the larger of the
+      stored position's distance from the coordinates' zero and of the
+      coordinate the kernel forms from it -- for ``multilinear_grid`` the
+      lattice coordinate ``(x - origin) / spacing`` -- over every lattice
+      of the group that reads the field; zero for a coordinate the kind
+      does not read);
+    * ``resolution`` is :func:`_positions_resolution` of it: ``eps`` of
+      the positions' dtype times the largest ``reach``, the rounding of a
+      kernel weight in lengths.
+
+    **The positions are the ones the step's kernel reads**
+    (``InterfaceEdge.geometry_at``, the one place that time level is
+    written): the geometry field of *state* for a source anchor, the
+    target's **pre-step** field for a target anchor, from *pre_step*
+    (refused where it is not given: the returned state does not hold
+    it).
+
+    **What it is for.**  The kernel forms its weights in the positions'
+    dtype, so a value delivered through it is resolved, relative to the
+    variation of the field across one length, to ``resolution`` and no
+    better, at every pass alike: the group converges to the fixed point
+    of a slightly different transfer.  Under ``"l2"`` and ``"mixed"``
+    :func:`residual_precision_floor` takes every value field of the
+    group to be at least that coarse (the largest ``resolution`` over
+    the edges: what an edge delivers more coarsely than the fields makes
+    every value field as coarse, the argument of
+    :func:`_group_coarsest_eps`), and the step's own analysis takes the
+    same number for the per-entry resolution of its bounds
+    (``_coupled_block.py``).  Under ``"interface"`` the same rounding is
+    counted part by part (:func:`_part_resolution`), from the same
+    function of the same positions.
+
+    **A count, not a bound.**  Like the interface norm's, it takes a
+    field that varies across one length by about the size of the value
+    delivered: a field that varies less is moved by less (the floor is
+    then too large), and a value far smaller than the field's variation
+    across a cell is moved by more (MADD-ANO-247).  A kind that declares
+    no length scale has no entry: nothing is known of its kernel.
+    """
+    records = interface_records(interface_edges if interface_edges is not None else (), state)
+    lattices = _position_lattices(records)
+    out = []
+    for record in records:
+        if not record.kernel_rounds_at_stored_positions:
+            continue
+        side, field = record.anchor
+        holder = ((record.source if side == "source" else record.target)[0], field)
+        geom = record.geometry_at(state, pre_step)
+        if not (_is_float_leaf(geom) and _has_entries(geom)):
+            continue
+        reach = _read_in_kernel_lengths(record.mapping, geom, lattices.get(holder))
+        out.append((record, holder, reach, _positions_resolution(reach)))
+    return out
+
+
+def _kernel_rounding_eps(interface_edges, state, pre_step=None):
+    """The ``eps`` no value field of a group is counted finer than on
+    account of the weights its geometry edges' kernels form: the largest
+    ``resolution`` of :func:`_kernel_rounding` over
+    :data:`PRECISION_FLOOR_ULPS`, or ``None`` for a group with no such
+    edge (whose floor and step are then what they were, to the bit:
+    nothing is built).  A traced scalar where the positions are, with no
+    derivative.
+
+    **One rounding of the kernel's coordinate per evaluation.**  The
+    floor counts ``PRECISION_FLOOR_ULPS`` units of an entry's ``eps``
+    per evaluation; at this ``eps`` that is ``resolution`` once: ``eps``
+    of the positions' dtype times the largest lattice coordinate, which
+    bounds what the two rounded operations of ``(x - origin) / spacing``
+    move a weight by.  So a group's floor is
+    ``evaluations * eps_pos * reach / rtol`` wherever that is the larger
+    (``"mixed"``; times the root of the value entries under ``"l2"``),
+    and exactly what it was for positions within
+    ``PRECISION_FLOOR_ULPS`` lengths of the coordinates' zero and of the
+    grid's first point in a dtype no coarser than the fields.
+
+    Counted ``PRECISION_FLOOR_ULPS`` times instead (the count of a value's
+    own rounding), a float32 pair with four markers 3 to 7 spacings from
+    its grid's first point lost both usable flags on 16 of 16 reports at
+    ``rtol = 1e-5`` (floor 0.43 to 0.47 tolerances against residuals of
+    0.16 to 0.30 under Gauss-Seidel; 0.21 to 0.23 against 0.09 to 0.17
+    under Jacobi) with its bound 2.6 to 3.9 times the distance: the
+    kernel's rounding there is under a tenth of a tolerance.  Counted
+    once, the same reports keep their flags, and 1000 to 4000 spacings in
+    no report has a usable flag beside a bound under the distance
+    (jaxlib 0.11.0, CPU; MADD-ANO-261 has the numbers).
+
+    **The one number** both the report's floor
+    (:func:`residual_precision_floor`, ``"l2"`` and ``"mixed"``) and the
+    step's per-entry resolution take a value field to be no finer than,
+    so the two cannot count the kernel's rounding differently.
+    """
+    worst = None
+    for _record, _holder, _reach, resolution in _kernel_rounding(
+            interface_edges, state, pre_step):
+        worst = resolution if worst is None else jnp.maximum(worst, resolution)
+    if worst is None:
+        return None
+    # units: dimensionless -- a weight's rounding in lengths, taken as a
+    # fraction of the delivered value, over the units the floor counts
+    # per evaluation.
+    return worst / PRECISION_FLOOR_ULPS
+
+
+def _kernel_rounding_floors(interface_edges, state, node_names, convergence_norm,
+                            rtol: float = 1.0, evaluations: float = 1.0) -> list:
+    """``[(record, holder, reach, resolution, floor, own), ...]``: what
+    the rounding of each geometry edge's kernel puts into the float floor
+    of a group under ``"l2"`` or ``"mixed"`` at *state*, edge by edge
+    (experimental), beside what the fields' own rounding puts there.
+
+    The first four are :func:`_kernel_rounding`'s, at the positions a
+    step started from *state* reads (*state* is its own pre-step state).
+    ``floor`` is the floor of a group every value field of which is
+    counted at that edge's rounding and nothing else
+    (:func:`_kernel_rounding_eps`: once per evaluation), in the units
+    the residual is reported in:
+
+    * ``"mixed"``: ``evaluations * resolution / rtol`` (tolerances; the
+      RMS of one number over the value entries is that number);
+    * ``"l2"``: ``evaluations * resolution * sqrt(n)``, ``n`` the
+      floating entries of the members' fields other than the positions
+      (:func:`_position_fields`), to compare with the group's
+      ``tolerance``.
+
+    ``own`` is the same floor with every value field at the group's
+    coarsest ``eps`` (:func:`_group_coarsest_eps`) counted
+    ``PRECISION_FLOOR_ULPS`` times per evaluation: what the group's
+    floor is without the kernel.  The kernel's is the larger exactly
+    where ``resolution`` is above ``PRECISION_FLOOR_ULPS`` of that
+    ``eps`` (positions more than ``PRECISION_FLOOR_ULPS`` lengths from
+    the zero or from the grid's first point, in the fields' dtype).
+
+    :func:`residual_precision_floor` returns at least the larger of the
+    two times the root of the value entries' share of the entries it
+    reads (the position fields are counted at their own ``eps``).  On
+    the host, from a concrete state: Python floats.  Read by
+    ``_group_layout._kernel_rounding_warnings`` (``compile()``'s
+    advisory), so the advisory and the floor cannot locate the rounding
+    differently.
+    """
+    position_fields = _position_fields(interface_edges)
+    n_values = sum(
+        int(np.size(v)) for nn in node_names for name, v in (state.get(nn) or {}).items()
+        if _is_float_leaf(v) and (nn, name) not in position_fields)
+    group_eps = _group_coarsest_eps(state, node_names, interface_edges) or 0.0
+    # units: the residual's -- an eps per value entry, pooled as the norm pools
+    pooled = math.sqrt(n_values) if str(convergence_norm) == "l2" else 1.0 / float(rtol)
+    own = PRECISION_FLOOR_ULPS * float(evaluations) * group_eps * pooled
+    out = []
+    for record, holder, reach, resolution in _kernel_rounding(
+            interface_edges, state, pre_step=state):
+        resolution = float(resolution)
+        out.append((record, holder, reach, resolution,
+                    float(evaluations) * resolution * pooled, own))
+    return out
+
+
+def residual_precision_floor(state, node_names, convergence_norm="l2",
+                             atol: float = 0.0, rtol: float = 1.0,
+                             interface_edges=(), evaluations: float = 1.0,
+                             mappings: Optional[dict] = None, pre_step=None):
+    """The float resolution of a residual the group's norm reports at *state*.
+
+    ``PRECISION_FLOOR_ULPS`` units of ``eps * max|field|`` in every
+    entry the norm reads, measured in that norm: the size a residual can
+    have that is float rounding and not motion (see
+    :data:`PRECISION_FLOOR_ULPS` for the derivation of the constant).
+    Because every 0.4.0 norm divides a field by its own magnitude, one
+    unit of ``eps * max|field|`` per entry is ``eps`` per entry in the
+    norm's coordinates, so:
+
+    * ``"l2"``: ``C * sqrt(sum over the active fields of size * eps**2)``,
+      i.e. ``C * eps * sqrt(n)`` over the ``n`` float entries it reads;
+    * ``"mixed"`` and ``"interface"``: the RMS of ``eps / rtol`` over the
+      active entries, i.e. ``C * eps / rtol``;
+
+    with ``eps`` **that of the coarsest floating dtype among the group's
+    fields** (:func:`_group_coarsest_eps`, which gives the argument and
+    its assumptions: a field computed from a coarser member's output
+    carries that member's rounding), ``C = PRECISION_FLOOR_ULPS`` and "active" exactly the rule the
+    norm applies (:func:`_scaled_change`): a field inside the dead band
+    contributes nothing to the residual and nothing here.  ``0.0`` when
+    the norm reads no active field -- it then measures nothing, and the
+    residual is ``0.0`` too.
+
+    Experimental: where an internal edge carries a geometry-dependent
+    mapping of a kind with a length scale (``multilinear_grid``), what it
+    delivers is no finer than the weights its kernel forms from the
+    stored positions, and under ``"l2"`` and ``"mixed"`` every **value**
+    field of the group is counted no finer than one rounding of the
+    kernel's coordinate per evaluation (:func:`_kernel_rounding_eps`;
+    the positions keep their own dtype's ``eps``).  Under
+    ``"interface"`` the same rounding is counted part by part
+    (:func:`_part_resolution`).  A group with no such edge is counted as
+    it always was, by the same Python floats.
+
+    Parameters
+    ----------
+    state : dict
+        ``{node: {field: array}}`` -- the state the residual describes.
+    node_names : iterable of str
+        The group's nodes: the fields the ``"l2"`` and ``"mixed"`` norms
+        read, and under every norm the fields whose coarsest dtype sets
+        the ``eps`` of every entry.  Under ``"interface"`` with no node
+        named, each reading keeps the ``eps`` of its own dtype and its
+        source field's.
+    convergence_norm : {"l2", "mixed", "interface"}
+        The group's norm.
+    atol, rtol : float
+        The group's dead band and relative tolerance (``rtol`` is not
+        read by the L2 norm, whose threshold is ``tolerance``).
+    interface_edges : iterable of EdgeSpec
+        The group's internal edges (read under ``"interface"``, each on
+        its compact side: :func:`_interface_readings`).
+    mappings : dict, optional
+        The ``"mappings"`` section of the graph parameter pytree the
+        step ran with, for the internal edges that carry an interface
+        mapping (read under ``"interface"`` only); ``None`` applies each
+        mapping with its own weights.  EXPERIMENTAL (new in 0.4.0).
+    pre_step : callable or dict, optional
+        A member's pre-step state, by name (read under ``"interface"``
+        for an edge whose geometry-dependent mapping is anchored at its
+        target, and under ``"l2"`` and ``"mixed"`` for the positions
+        such a mapping's kernel formed its weights from; refused where
+        one is needed and not given).  EXPERIMENTAL (new in 0.4.0).
+    evaluations : float
+        How many evaluations of the map one coupling pass rounds like:
+        the floor is ``PRECISION_FLOOR_ULPS`` units *per evaluation*.
+        ``GraphManager.coupling_diagnostics`` passes the count of
+        ``maddening.core.coupling._group_layout._group_evaluations``: each node
+        counts ``sub-cycling divider * SimulationNode.update_evaluations()``,
+        and the pass the worst node's count under Jacobi or the longest
+        chain of same-pass reads under Gauss-Seidel; ``1.0`` is a pass
+        that evaluates each node once and reads only the previous iterate.
+
+    Returns
+    -------
+    jnp.ndarray
+        Scalar, in the units ``residual`` is reported in, computed in at
+        least float32 whatever the fields' dtypes (every value entry at
+        the group's coarsest eps, or a coarser one of its own; positions
+        at their own dtype's).  Traceable, so
+        it can be taken inside a jitted step as well as on the host.
+
+    Examples
+    --------
+    >>> import jax.numpy as jnp
+    >>> s = {"n": {"x": jnp.ones(4, jnp.float32), "k": jnp.int32(3)}}
+    >>> eps = float(jnp.finfo(jnp.float32).eps)
+    >>> round(float(residual_precision_floor(s, ["n"], "l2")) / eps, 4)   # 4 * sqrt(4)
+    8.0
+    >>> round(float(residual_precision_floor(s, ["n"], "mixed", rtol=1e-3)) / eps)  # 4 / rtol
+    4000
+    >>> float(residual_precision_floor(s, ["n"], "l2", atol=2.0))   # dead-banded: nothing read
+    0.0
+    >>> round(float(residual_precision_floor(s, ["n"], "l2", evaluations=100.0)) / eps)
+    800
+    """
+    norm = str(convergence_norm)
+    use_rtol = 1.0 if norm == "l2" else float(rtol)
+    # ``(value, eps, reading)``: each entry the norm reads and its float
+    # resolution over what it is measured against (``_part_resolution``:
+    # an eps for a value over its own magnitude; for positions read in a
+    # mapping kind's length scale, eps times their size in lengths), and
+    # the part of an interface reading it is.
+    group_eps = _group_coarsest_eps(state, node_names, interface_edges, mappings)
+    values = []
+    if norm == "interface":
+        for reading in _interface_readings(
+                interface_edges, state, mappings=mappings, pre_step=pre_step,
+                band=_declares_a_band(atol)):
+            values.append((jnp.asarray(reading[2]),
+                           _part_resolution(reading, group_eps=group_eps), reading))
+    else:
+        position_fields = _position_fields(interface_edges)
+        # What the group's geometry edges deliver is no finer than their
+        # kernels' weights (``_kernel_rounding_eps``; ``None``, and
+        # nothing built, for a group with no such edge).
+        kernel_eps = _kernel_rounding_eps(interface_edges, state, pre_step)
+        for nn in node_names:
+            for field_name in state[nn]:
+                v = state[nn][field_name]
+                if _is_float_leaf(v):
+                    v = jnp.asarray(v)
+                    # The group's coarsest eps (``_group_coarsest_eps``), which
+                    # is at least the field's own: every field read here is
+                    # one of the fields it is taken over.  A position field
+                    # keeps its own (``_position_fields``).
+                    own = float(jnp.finfo(v.dtype).eps)
+                    eps_entry: Any
+                    if group_eps is None or (nn, field_name) in position_fields:
+                        eps_entry = own
+                    else:
+                        # units: dimensionless -- both eps are relative to
+                        # a field's own magnitude.
+                        eps_entry = max(own, group_eps)
+                        if kernel_eps is not None:
+                            # units: dimensionless -- the rounding of a
+                            # kernel weight in lengths, taken as the
+                            # fraction of its own magnitude a delivered
+                            # value moves by (``_kernel_rounding``).
+                            eps_entry = jnp.maximum(eps_entry, kernel_eps)
+                    values.append((v, eps_entry, None))
+    values = [entry for entry in values if _has_entries(entry[0])]
+    if not values:
+        return jnp.zeros((), jnp.float32)
+    # At least float32, as the norms accumulate (``_widened``): in a 16-bit
+    # dtype ``(eps / rtol)**2`` overflowed for every rtol below about
+    # 3.8e-6 under "mixed" and "interface", and the entry count above
+    # 65 504 under every norm -- the floor read ``inf`` (or NaN) where it is
+    # documented as ``4 eps / rtol``.  Only the arithmetic is widened: the
+    # eps stays a 16-bit one wherever a 16-bit field is in the group, and
+    # a float32 or float64 group's floor is the one it was.
+    dtype = jnp.promote_types(
+        jnp.result_type(*[v.dtype for v, _eps, _reading in values]), jnp.float32)
+    sum_sq = jnp.zeros((), dtype)
+    count = jnp.zeros((), dtype)
+    for v, own_eps, reading in values:
+        if reading is not None:
+            # The residual's own decision (``_part_counted``): positions in
+            # a kind's length scale are always read; for a reading taken at
+            # an edge's source the band asks the field and what the edge
+            # delivers.
+            active = _part_counted(reading, v, atol, use_rtol)
+        else:
+            _scaled, active = _scaled_change(_widened(v), _widened(v), atol, use_rtol)
+        eps = own_eps / use_rtol
+        n = jnp.where(active, float(v.size), 0.0).astype(dtype)
+        sum_sq = sum_sq + n * jnp.asarray(eps * eps, dtype)
+        count = count + n
+    if norm != "l2":
+        sum_sq = sum_sq / jnp.maximum(count, 1.0)
+    return (PRECISION_FLOOR_ULPS * float(evaluations)) * jnp.sqrt(sum_sq)
+
+
+def _positions_floors(interface_edges, state, rtol: float, evaluations: float = 1.0,
+                      atol: float = 0.0) -> list:
+    """``[(reading, holder, positions, resolution, floor), ...]``: what
+    the rounding of stored positions puts into the float floor of an
+    interface reading at *state*, part by part.
+
+    One entry per part whose floor counts that rounding
+    (:func:`_part_resolution`), on the edges that carry a
+    geometry-dependent mapping:
+
+    * a part that **is** positions, in the mapping kind's length scale
+      (``InterfaceEdge.parts``: a mapping read at its source and anchored
+      there);
+    * a value **delivered** through such a mapping (one that does not
+      deliver more entries than it reads), which is computed at stored
+      positions: the iterate's own for a source anchor, the target's
+      pre-step ones for a target anchor (here *state* itself: what a
+      step started from it would hold).
+
+    **The floor's own decisions, and no others.**  A part the floor
+    counts nothing for has no entry: one the dead band holds out at
+    *atol* (:func:`_held_out_by_the_dead_band`, which asks
+    :func:`_part_counted`, the function :func:`residual_precision_floor`
+    asks, of a value that has a magnitude), and a delivered value none
+    of whose positions' coordinates
+    the mapping kind reads -- an axis of one lattice point, points
+    clamped to the hull (``_interface_plan._read_in_kernel_lengths``,
+    which is where the floor takes those positions from).  The
+    ``positions`` of a delivered part are the ones the floor counts:
+    zero in place of a coordinate the kind does not read.
+
+    ``positions`` are the magnitudes those positions are rounded at, in
+    lengths (``PartReading.positions``: for each coordinate the larger
+    of the stored position's and of the kernel's own coordinate's, over
+    every lattice of *interface_edges* that reads the field), ``holder``
+    the ``(node, field)`` they are stored in, and ``resolution`` is
+    :func:`_positions_resolution` of them: the whole resolution
+    :func:`residual_precision_floor` counts for every entry of a
+    positions part, and for a delivered value the term it takes the
+    larger of with the value's own ``eps``.  ``floor`` is
+    ``PRECISION_FLOOR_ULPS * evaluations * resolution / rtol``, in the
+    units the residual is reported in (tolerances): the value
+    :func:`residual_precision_floor` returns for a reading that is a
+    positions part alone, and a lower bound of the one it returns for a
+    delivered part alone (equal wherever the positions' rounding is the
+    coarser, which from one length out it is for a geometry no wider
+    than the value).  Pooled with the other entries the norm reads, the
+    positions put at most the largest of these into a group's floor, and
+    at least each one times the root of its part's share of the entries.
+
+    A geometry-dependent mapping read at its source and anchored at its
+    target has no entry: its reading is the source field alone, and the
+    floor counts no position for it (the gap of MADD-ANO-258, open: the
+    kernel's own rounding of those constant positions is counted
+    nowhere).
+
+    On the host, from a concrete state: Python floats.  Read through
+    :func:`_interface_readings`, the generator the floor itself iterates,
+    so an edge or a part the floor skips (a source that is not floating,
+    a value with no entries) is skipped here.  Read by
+    ``_group_layout._unresolved_position_warnings`` (``compile()``'s
+    advisory).
+    """
+    floors = []
+    records = interface_records(interface_edges, state)
+    # The group's lattices, as the floor's own reading of the whole group
+    # takes them: an edge read by itself must not lose the others'.
+    lattices = _position_lattices(records)
+    for record in records:
+        if record.anchor is None or not record.read_from_state:
+            continue
+        side, field = record.anchor
+        holder = ((record.source if side == "source" else record.target)[0], field)
+        for reading in _interface_readings([record.edge], state, pre_step=state,
+                                           lattices=lattices):
+            positions = reading.positions[0]
+            if positions is None:
+                continue        # a value the floor counts no position for
+            if _held_out_by_the_dead_band(reading, reading[2], atol, rtol):
+                continue        # a part the dead band drops: nothing in the floor
+            resolution = float(_positions_resolution(positions))
+            floors.append((
+                reading, holder, positions, resolution,
+                PRECISION_FLOOR_ULPS * float(evaluations) * resolution / float(rtol)))
+    return floors
+
+
+def spectral_error_bound(residual, rho, arnoldi_residual, amplification=1.0,
+                         margin: float = SPECTRAL_MARGIN, floor: Any = 0.0):
+    """The distance to the fixed point, from the spectrum of ``dF/dx``.
+
+    ``(residual + floor) * max(amplification, 1 / (1 - rho_safe))``,
+    with ``rho_safe = rho + margin * arnoldi_residual`` and ``floor`` the
+    residual's own float resolution (:func:`residual_precision_floor`;
+    ``0.0`` by default, which is the exact-arithmetic statement).
+
+    For a *linear* map ``F(x) = A x + b`` the error of any iterate is
+    exactly ``x - x* = (A - I)^{-1} (F(x) - x)``, whatever iteration
+    produced ``x``: no step sequence, no relaxation factor and no
+    accelerator enters.  Its size is therefore at most
+    ``||(I - A)^{-1}|| * residual``.  Two things stand in for that
+    operator norm, and the larger is used:
+
+    * ``amplification``, the resolvent norm ``||(I - H)^{-1}||_2`` of
+      the Krylov-compressed Jacobian from
+      :func:`arnoldi_spectral_radius`.  When the Krylov space is
+      invariant this *is* the operator norm on that space, whatever the
+      eigenvectors do, and the residual of a coupling iterate lies in
+      it.  It is the term that holds on a non-normal map.
+    * ``1 / (1 - rho_safe)``, the spectral-radius form: exact for a
+      normal ``A`` with a positive dominant eigenvalue, conservative
+      otherwise, and the only one of the two that can be pushed up when
+      the Krylov space is *not* invariant -- the Arnoldi residual is
+      zero when the space captured the Jacobian's range, so a resolved
+      spectrum pays no margin, and where it is not zero the Ritz radius
+      is an estimate (from below for a normal ``A``, from either side
+      for a non-normal one) and is inflated by the size of what the
+      space missed.
+
+    Neither is what :func:`error_amplification` could state: it read
+    ``rho`` off the residual sequence, which reports the mode
+    dominating the *step*; these come from ``dF/dx`` itself, which sees
+    every mode whatever its current amplitude.  The result is ``inf``
+    when ``rho_safe >= 1`` or the compressed ``I - H`` is singular --
+    the raw iteration would not contract, so nothing is bounded -- and
+    NaN when ``rho`` is NaN, which is how a solver that did not compute
+    one reports it.  Never smaller than ``residual + floor`` where it
+    is finite.
+
+    **Why the floor is added and not compared.**  The operator bound is
+    ``||x - x*|| <= amp * N(F(x) - x)`` for the *exact* map, and the
+    residual that was measured is ``N(F~(x) - x)`` for the map float
+    arithmetic evaluated.  The two differ by the evaluation error, so
+    the measured residual bounds the exact one only after the floor is
+    added: ``N(F(x) - x) <= residual + floor``.  Without it a float32
+    iterate that has *stalled* -- ``F~(x) == x`` bitwise, because
+    ``(1 - rho) * |x - x*|`` is below half an ulp -- reported a residual
+    of ``0.0`` and a bound of ``0.0`` while thousands of ulps from its
+    fixed point (38 348 ulps, a true distance of 4.2e-3, on a relay
+    contracting at 0.99999).  With it the bound on that state is the
+    floor times the amplification, which is what float32 can resolve
+    about a group that slow; see :data:`PRECISION_FLOOR_ULPS`.  The
+    floor term is amplified by the same factor as the residual, which
+    is exact for a normal Jacobian whose non-zero spectrum the Krylov
+    space resolved and an estimate otherwise: the rounding error's
+    direction is not measured.
+
+    **When it is a bound and when it is an estimate.**  It is a bound
+    on ``||x - x*||`` in the group's norm under three conditions, each
+    stated because each can fail: ``F`` is linear, or the iterate is
+    close enough that ``dF/dx`` does not change between ``x`` and
+    ``x*`` -- Ostrowski's theorem makes the statement *asymptotic* for
+    a differentiable non-linear ``F``, and an estimate elsewhere; the
+    Krylov space is invariant and the residual lies in it, which is the
+    generic case once Arnoldi has broken down and is what a zero
+    ``arnoldi_residual`` certifies (a group with more independent
+    interface scalars than :data:`SPECTRAL_KRYLOV_STEPS` does not get
+    there, :func:`spectral_rate_settled` says so, and only the
+    spectral-radius form with its margin then stands); and the group's
+    norm is close enough to a norm on the tail -- the weights it
+    divides each field by are taken at the returned iterate and the
+    dead band's excluded fields are outside it, the same conditions
+    ``error_amplification`` documents.
+
+    Examples
+    --------
+    >>> round(float(spectral_error_bound(1e-4, 0.999, 0.0, 1000.0)), 4)
+    0.1
+    >>> round(float(spectral_error_bound(1e-4, 0.5, 0.1)), 6)   # radius form: 0.5 + 2*0.1
+    0.000333
+    >>> round(float(spectral_error_bound(1e-4, 0.5, 0.0, 40.0)), 6)  # resolvent form wins
+    0.004
+    >>> float(spectral_error_bound(1e-4, 1.0, 0.0, 1.0))
+    inf
+    >>> round(float(spectral_error_bound(0.0, 0.999, 0.0, 1000.0, floor=1e-6)), 6)  # stalled
+    0.001
+    """
+    residual = jnp.asarray(residual)
+    rho = jnp.asarray(rho)
+    arnoldi_residual = jnp.asarray(arnoldi_residual)
+    amplification = jnp.asarray(amplification)
+    floor = jnp.asarray(floor)
+    dtype = jnp.result_type(residual, rho, arnoldi_residual, amplification, floor)
+    residual = residual.astype(dtype)
+    rho = rho.astype(dtype)
+    arnoldi_residual = arnoldi_residual.astype(dtype)
+    amplification = amplification.astype(dtype)
+    floor = floor.astype(dtype)
+    rho_safe = rho + margin * arnoldi_residual
+    computed = jnp.logical_and(jnp.isfinite(rho_safe), jnp.isfinite(residual))
+    contracting = jnp.logical_and(rho_safe < 1, jnp.isfinite(amplification))
+    ok = jnp.logical_and(computed, contracting)
+    den = jnp.where(ok, 1.0 - rho_safe, jnp.ones_like(rho_safe))
+    amp = jnp.maximum(jnp.where(ok, amplification, 1.0), 1.0 / den)
+    # The exact map's residual is at most the measured one plus the
+    # evaluation error; see the docstring.
+    measured = residual + floor
+    bound = jnp.maximum(measured * amp, measured)
+    nan = jnp.full_like(bound, jnp.nan)
+    inf = jnp.full_like(bound, jnp.inf)
+    return jnp.where(computed, jnp.where(contracting, bound, inf), nan)
+
+
+def spectral_rate_settled(rho, arnoldi_residual, fraction: float = SPECTRAL_SETTLED_FRACTION):
+    """Whether the Arnoldi residual was small against ``1 - rho``.
+
+    ``arnoldi_residual <= fraction * (1 - rho)``.  The bound divides by
+    ``1 - rho``, so a shift of the dominant eigenvalue by the residual
+    moves the bound by that fraction of itself; this asks that the
+    unresolved part of the spectrum was worth at most ``fraction`` of
+    the bound.  False for a NaN ``rho`` (nothing was computed) and for
+    ``rho >= 1`` (nothing is bounded).
+
+    A zero residual means the Krylov space was invariant and the Ritz
+    values are eigenvalues.  A small non-zero one means the space
+    nearly was; it does not say which eigenvalue was approximated, so
+    read this beside :func:`spectral_error_bound`'s conditions.
+
+    Examples
+    --------
+    >>> bool(spectral_rate_settled(0.999, 0.0)), bool(spectral_rate_settled(0.9, 0.05))
+    (True, False)
+    """
+    rho = jnp.asarray(rho)
+    arnoldi_residual = jnp.asarray(arnoldi_residual, dtype=rho.dtype)
+    gap = 1.0 - rho
+    finite = jnp.logical_and(jnp.isfinite(rho), jnp.isfinite(arnoldi_residual))
+    return jnp.logical_and(
+        jnp.logical_and(finite, gap > 0), arnoldi_residual <= fraction * gap,
+    )
+
+
+# ------------------------------------------------------------------
+# The IFT gradient's error at an early exit (``solver="ift"``,
+# ``diagnostics=True``)
+# ------------------------------------------------------------------
+
+#: Relative Frobenius residual ``||J U - U M|| / ||J U||`` above which
+#: :func:`jacobian_range_basis` reports that the basis did not capture
+#: the Jacobian's range.  Rounding on a captured range is ~1e-6
+#: relative in float32; a range larger than the basis leaves an O(1)
+#: residual.  The gap is wide, and 1e-4 leaves room for a badly scaled
+#: field without admitting a missed direction.
+RANGE_CAPTURED_RTOL = 1e-4
+
+
+def jacobian_range_basis(matvec, n, n_vectors: int = SPECTRAL_KRYLOV_STEPS,
+                         dtype=jnp.float32, key=None, rtol: float = RANGE_CAPTURED_RTOL):
+    """``(U, M, captured)``: an orthonormal basis of ``range(J)`` and ``J`` on it.
+
+    ``matvec(v)`` applies the coupling Jacobian ``J = dF/dx`` (the same
+    product :func:`arnoldi_spectral_radius` takes) to a vector of
+    length ``n``.  ``n_vectors`` fixed-seed normal draws are pushed
+    through it and the images orthonormalised (``U``, ``n`` by
+    ``min(n, n_vectors)``); ``M = U^T J U`` is the compression of ``J``
+    onto that span, and ``captured`` says whether the span is
+    invariant, ``||J U - U M||_F <= rtol ||J U||_F``.
+
+    A coupling Jacobian's rank is at most the number of boundary
+    scalars crossing the group's edges, so for a group with at most
+    ``n_vectors`` of them the images of ``n_vectors`` generic vectors
+    span the whole range, ``J = U U^T J`` exactly, and ``captured`` is
+    ``True``.  Unlike a Krylov space grown from one start vector, which
+    finds only that vector's cyclic subspace (a rank-two ``J`` with a
+    repeated eigenvalue gives it a one-dimensional space), a basis
+    built from several starts spans the range whatever the spectrum's
+    multiplicities -- which is what :func:`resolvent_apply` needs, and
+    what :func:`arnoldi_spectral_radius` does not (a radius is read
+    correctly off any invariant subspace).
+
+    Costs ``n_vectors + min(n, n_vectors)`` Jacobian-vector products
+    and one thin QR of an ``n x n_vectors`` matrix.  A zero Jacobian
+    gives a basis of arbitrary directions, ``M = 0`` and
+    ``captured = True``.
+
+    Examples
+    --------
+    >>> import jax.numpy as jnp
+    >>> A = jnp.zeros((5, 5)).at[0, 1].set(0.5).at[1, 0].set(0.5)   # rank 2
+    >>> U, M, ok = jacobian_range_basis(lambda v: A @ v, 5, n_vectors=3)
+    >>> U.shape, M.shape, bool(ok)
+    ((5, 3), (3, 3), True)
+    >>> sorted(round(abs(float(x)), 4) for x in jnp.linalg.eigvalsh(0.5 * (M + M.T)))
+    [0.0, 0.5, 0.5]
+    """
+    if n_vectors < 1:
+        raise ValueError(
+            f"jacobian_range_basis: n_vectors={n_vectors} < 1; at least one "
+            "Jacobian-vector product is needed."
+        )
+    key = jax.random.PRNGKey(2) if key is None else key
+    v0 = jax.random.normal(key, (int(n_vectors), int(n)), dtype)
+    images = jax.vmap(matvec)(v0)                      # rows: J v
+    U, _ = jnp.linalg.qr(images.T, mode="reduced")     # (n, k)
+    JU = jax.vmap(matvec)(U.T).T                        # (n, k)
+    M = U.T @ JU
+    resid = jnp.linalg.norm(JU - U @ M)
+    scale = jnp.linalg.norm(JU)
+    captured = resid <= rtol * scale
+    captured = jnp.logical_or(captured, scale == 0)
+    return U, M, captured
+
+
+def resolvent_apply(U, M, w, Jw):
+    """``(I - J)^{-1} w`` from the range basis of :func:`jacobian_range_basis`.
+
+    With ``range(J)`` inside ``span(U)`` and ``M = U^T J U``, the
+    solution of ``(I - J) t = w`` is ``t = w + U z`` with
+    ``(I - M) z = U^T J w`` -- the Woodbury identity for a low-rank
+    ``J`` -- so a solve costs one Jacobian-vector product (``Jw``, which
+    the caller supplies) and one ``k x k`` linear solve, whatever the
+    state's dimension.  ``w`` and ``Jw`` are single vectors; ``vmap``
+    over a batch of right-hand sides.  A singular ``I - M``
+    (``rho(J) = 1``) gives non-finite entries, never a plausible
+    vector.
+
+    Examples
+    --------
+    >>> import jax.numpy as jnp
+    >>> A = jnp.diag(jnp.array([0.5, -0.25, 0.0]))
+    >>> U, M, _ = jacobian_range_basis(lambda v: A @ v, 3, n_vectors=3)
+    >>> w = jnp.array([1.0, 1.0, 1.0])
+    >>> [round(float(x), 4) for x in resolvent_apply(U, M, w, A @ w)]   # 1/(1 - lambda)
+    [2.0, 0.8, 1.0]
+    """
+    k = M.shape[0]
+    z = jnp.linalg.solve(jnp.eye(k, dtype=M.dtype) - M, U.T @ Jw)
+    return w + U @ z
+
+
+def ift_gradient_error_bound(amplification, distance, secant, step, tangent):
+    """``amplification * distance * secant / (step * tangent)``: the IFT tangent's relative error.
+
+    The arithmetic of ``coupling_diagnostics()['gradient_relative_error_bound']``,
+    elementwise, with the conventions below.  The IFT tangent rule
+    solves ``(I - J(x)) t = F_c(x) c_dot`` at the iterate the forward
+    *returned*, ``x_k``, where the derivative of the fixed point is the
+    same solve at ``x*``.  Subtracting the two equations gives, exactly,
+
+        ``t_k - t* = (I - J(x*))^{-1} [G(x_k) - G(x*)]``,
+        ``G(x) = J(x) t_k + F_c(x) c_dot``
+
+    -- the resolvent applied to the change, between the two points, of
+    the one-pass map's Jacobian-vector product along the tangent the
+    rule returned.  Each factor here bounds one piece of that:
+
+    * ``amplification`` bounds the resolvent: the factor
+      :func:`spectral_error_bound` applies to a residual (the larger of
+      ``||(I - H)^{-1}||_2`` and ``1 / (1 - rho_safe)``);
+    * ``distance`` bounds ``||x_k - x*||``: :func:`spectral_error_bound`
+      itself -- not the residual and not ``error_estimate``, which
+      understate the distance by up to 122x;
+    * ``secant / step`` is the change in ``G`` per unit distance: the
+      norm of ``G(x_k + delta) - G(x_k)`` over the norm of the step
+      ``delta`` it was measured across;
+    * ``tangent`` is ``||t_k||``, so the result is relative.
+
+    All norms are the group's, and ``distance``, ``secant``, ``step``
+    and ``tangent`` must be taken in the *same* one: the result is not
+    invariant to rescaling one of them alone.
+
+    Conventions, so a number is never reported where none was computed:
+    NaN where ``amplification`` or ``distance`` is NaN (nothing was
+    computed), where ``tangent`` is zero (the fixed point does not
+    respond to the probe, so a relative error is undefined), where the
+    secant is not finite, or where ``step`` is zero with ``distance``
+    not -- a curvature cannot be read off a zero step.  ``0.0`` where
+    ``distance`` is ``0.0`` and finite everything else.  A distance
+    taken from :func:`spectral_error_bound` with its ``floor`` is never
+    ``0.0`` at a finite iterate the group's norm reads anything of --
+    the floor is what float32 can resolve, and a residual of ``0.0``
+    means only that the last pass moved less than it -- so the branch
+    is reached only where the norm reads nothing and so measures
+    nothing.  (Before 0.4.0 shipped it was reached on every stalled
+    float32 iterate, and read ``0.0`` against true gradient errors of
+    3% at ``F'(x*) = 0.999``.)  ``inf`` where
+    ``amplification`` or ``distance`` is ``inf`` (nothing contracts, so
+    nothing is bounded) and the rest is finite and non-zero.
+
+    Examples
+    --------
+    >>> round(float(ift_gradient_error_bound(2.0, 0.01, 3e-3, 0.01, 1.0)), 6)
+    0.006
+    >>> float(ift_gradient_error_bound(2.0, 0.0, 0.0, 0.0, 1.0))   # a norm that reads nothing
+    0.0
+    >>> import math
+    >>> math.isnan(float(ift_gradient_error_bound(2.0, 0.01, 0.0, 0.01, 0.0)))  # no response
+    True
+    >>> math.isinf(float(ift_gradient_error_bound(math.inf, math.inf, 3e-3, 0.01, 1.0)))
+    True
+    """
+    amp = jnp.asarray(amplification)
+    dist = jnp.asarray(distance)
+    sec = jnp.asarray(secant)
+    stp = jnp.asarray(step)
+    tan = jnp.asarray(tangent)
+    dtype = jnp.result_type(amp, dist, sec, stp, tan)
+    amp, dist, sec, stp, tan = (a.astype(dtype) for a in (amp, dist, sec, stp, tan))
+    responds = tan > 0
+    measured = jnp.logical_and(jnp.isfinite(sec), jnp.isfinite(stp))
+    computed = jnp.logical_and(~jnp.isnan(amp), ~jnp.isnan(dist))
+    at_fixed_point = jnp.logical_and(dist == 0, jnp.isfinite(amp))
+    curvable = stp > 0
+    safe_den = jnp.where(jnp.logical_and(curvable, responds), stp * tan, 1.0)
+    rel = sec / safe_den
+    value = jnp.where(at_fixed_point, jnp.zeros_like(rel), amp * dist * rel)
+    ok = computed & responds & measured & (at_fixed_point | curvable)
+    return jnp.where(ok, value, jnp.full_like(value, jnp.nan))
 
 
 # ------------------------------------------------------------------
@@ -229,7 +2986,7 @@ def flatten_coupled_state(
 _IMAGE_SMALL = ("bool", "int8", "uint8", "int16", "uint16")
 
 
-def float_image(v):
+def float_image(v) -> tuple[jnp.ndarray, tuple]:
     """``(image, meta)``: a float32 array carrying ``v`` exactly.
 
     ``meta`` is what :func:`from_float_image` needs to rebuild ``v``:
@@ -242,7 +2999,10 @@ def float_image(v):
     dt = v.dtype
     if jnp.issubdtype(dt, jnp.floating):
         return v, ("float", dt)
-    if jax.dtypes.issubdtype(dt, jax.dtypes.prng_key):
+    # `jax.dtypes.issubdtype` is documented public API but is not in the
+    # submodule's `__all__`, so pyright reads it as a private import.
+    if jax.dtypes.issubdtype(  # pyright: ignore[reportPrivateImportUsage]
+            dt, jax.dtypes.prng_key):
         data = jax.random.key_data(v)               # uint32, shape (*v.shape, 2)
         img, (_, _, n) = float_image(data)
         return img, ("key", jax.random.key_impl(v), n)
@@ -295,7 +3055,7 @@ def state_from_float_image(imgs: dict, metas: dict) -> dict:
 
 
 def unflatten_coupled_state(
-    flat: jnp.ndarray,
+    flat: jnp.ndarray | np.ndarray,
     template: dict[str, dict],
     node_names: list[str],
     fields: Optional[dict[str, tuple[str, ...]]] = None,
@@ -351,6 +3111,27 @@ def unflatten_coupled_state(
 # Acceleration methods
 # ------------------------------------------------------------------
 
+def _relaxed_step(x_old, x_raw, omega):
+    """``x_old + omega * (x_raw - x_old)``, formed entry by entry in a power-of-two frame.
+
+    Each entry is computed on the pair rescaled by its own power of two
+    (``max(|x_old_i|, |x_raw_i|)`` brought into ``[0.5, 1)``) and scaled
+    back: the same rounding, so a step between ordinary numbers is the
+    one the bare formula gives, bit for bit -- but the difference is
+    taken between two normal numbers.  Bare, an entry whose one-pass
+    change is below ``finfo.tiny`` (any change of less than an ulp of a
+    field below about 1e-31 in float32) had its difference flushed to
+    zero, the relaxed entry stopped moving while the convergence norm --
+    which rescales the same pair (``_scaled_change``) -- still measured
+    its residual, and the stalled ratio fell back to the raw residual
+    test.  Entries are framed separately so a small field beside a large
+    one in the same vector moves too.
+    """
+    k = pow2_frame(x_old, x_raw, mode="entrywise")
+    old_k, raw_k = x_old * k, x_raw * k
+    return (old_k + omega * (raw_k - old_k)) / k
+
+
 def aitken_relaxation(
     x_old_flat: jnp.ndarray,
     x_raw_flat: jnp.ndarray,
@@ -372,7 +3153,11 @@ def aitken_relaxation(
     x_raw_flat : jnp.ndarray
         Raw fixed-point result (flattened).
     prev_residual_flat : jnp.ndarray
-        Residual from the previous iteration.
+        Residual from the previous iteration.  An all-zero vector is
+        the caller's "no previous residual yet" sentinel (the coupling
+        loops seed it that way on the first pass of every timestep);
+        the formula needs two successive residuals, so that pass keeps
+        ``omega`` unchanged instead of deriving one from the sentinel.
     omega : jnp.ndarray
         Current relaxation factor.
 
@@ -387,18 +3172,45 @@ def aitken_relaxation(
     """
     residual = x_raw_flat - x_old_flat
     delta_r = residual - prev_residual_flat
-    denom = jnp.sum(delta_r ** 2)
-    # Guard against zero/non-finite denominator.  When denom overflows to
-    # inf in float32 (delta_r entries > ~1.84e19), the division produces
-    # nan.  The isfinite check catches this and falls back to input omega.
-    denom_ok = (denom > 1e-30) & jnp.isfinite(denom)
-    safe_denom = jnp.where(denom_ok, denom, jnp.array(1.0))
-    new_omega = -omega * jnp.sum(prev_residual_flat * delta_r) / safe_denom
+    # The two dot products, taken on the vectors rescaled by one power of
+    # two (``pow2_frame``), so their ratio does not depend on the one
+    # unit the group's state is written in (a common factor: both sums
+    # run over every accelerated field, and fields written in different
+    # units are not brought to one scale; MADD-ANO-285).  The ratio itself is
+    # scale-free; what was not was the guard on its denominator, an
+    # absolute ``denom > 1e-30`` on ``sum(delta_r**2)``, which is
+    # ``O(scale**2)``: the same group written at 1e-12 of its units froze
+    # omega part-way through the solve and hit its cap unconverged where
+    # the group at scale 1 converged in 88 passes, and at 1e-16 Aitken was
+    # plain fixed-point iteration from the first pass -- while every
+    # convergence norm divides each field by its own magnitude so that
+    # the measurement does not depend on units.  Squares of a float32 residual
+    # change near 1e-20 also flush to zero (subnormal), which no constant
+    # in the guard can fix.  Multiplying by a power of two is exact, so
+    # wherever nothing underflowed before, the ratio -- and omega -- is
+    # bit-identical to the unscaled formula's.
+    pow2 = pow2_frame(prev_residual_flat, delta_r)
+    p_hat = prev_residual_flat * pow2
+    d_hat = delta_r * pow2
+    denom = jnp.sum(d_hat ** 2)
+    # Guard against a zero or non-finite denominator: a residual that did
+    # not change (``delta_r == 0``), or one too large for its dtype.
+    denom_ok = (denom > 0) & jnp.isfinite(denom)
+    # First pass of a timestep: ``prev_residual_flat`` is the zero
+    # sentinel, so the numerator is identically 0 and the clip floor
+    # (0.01) would silently override the caller's seeded omega -- the
+    # loops seed omega=1.0 and then threw away 99% of the first
+    # correction.  Treat the sentinel like the degenerate denominator.
+    have_prev = jnp.any(prev_residual_flat != 0)
+    usable = denom_ok & have_prev
+    safe_denom = jnp.where(usable, denom, jnp.ones_like(denom))
+    new_omega = -omega * jnp.sum(p_hat * d_hat) / safe_denom
     new_omega = jnp.clip(new_omega, 0.01, 2.0)
-    # Fall back to current omega when denominator is degenerate or overflowed
-    new_omega = jnp.where(denom_ok, new_omega, omega)
+    # Fall back to current omega when the denominator is degenerate or
+    # overflowed, or when there is no previous residual to extrapolate from.
+    new_omega = jnp.where(usable, new_omega, omega)
 
-    x_relaxed = x_old_flat + new_omega * residual
+    x_relaxed = _relaxed_step(x_old_flat, x_raw_flat, new_omega)
     return x_relaxed, new_omega, residual
 
 
@@ -518,7 +3330,24 @@ def iqn_ils_update(
     # unrolled (fori) gradient came out NaN.  pinv's custom_jvp is
     # well-defined for rank-deficient input; the forward value is the
     # same minimum-norm solution with the same relative cutoff.
-    c = jnp.linalg.pinv(V_masked, rtol=1e-6) @ (-residual)
+    # ``c`` is scale-free (``V`` and ``r`` are both residual-sized), so the
+    # solve is posed on both rescaled by one power of two: LAPACK rescales
+    # a matrix whose norm leaves ``[sqrt(tiny)/eps, eps/sqrt(tiny)]`` by a
+    # factor that is not one, and a group written at 1e-16 of its units
+    # then rounded its secant step differently from the same group at
+    # scale 1.  An exact power of two leaves every product of a matrix in
+    # range as it was.
+    #
+    # The factorisation is never handed a matrix that is not finite
+    # (``_lapack_input``: LAPACK's SVD does not return on some that hold
+    # an ``inf``, so a group whose iterate left float range before its cap
+    # never returned from its step).  It is replaced by zeros before the
+    # call and the quasi-Newton step is then not taken (``is_valid``
+    # below), which is what a non-finite ``c`` already meant.  A finite
+    # matrix passes through unchanged.
+    ls_pow2 = pow2_frame(V_masked, residual)
+    ls_matrix, ls_finite = _lapack_input(V_masked * ls_pow2)
+    c = jnp.linalg.pinv(ls_matrix, rtol=1e-6) @ (-(residual * ls_pow2))
 
     # QN correction
     correction = W_masked @ c + residual
@@ -535,11 +3364,23 @@ def iqn_ils_update(
     # ``rho``, i.e. 50x the residual at rho = 0.98.  A tight cap (this
     # used to be 10x) silently vetoes IQN on exactly the stiff problems
     # it exists for and degrades it to Aitken.
-    correction_norm = jnp.sqrt(jnp.sum(correction ** 2))
-    residual_norm = jnp.sqrt(jnp.sum(residual ** 2))
+    #
+    # Both norms are taken on the vectors rescaled by one power of two,
+    # and the comparison is relative: the floor ``max(residual_norm,
+    # 1e-12)`` this replaces was absolute, so a group written in small
+    # units (every residual below 1e-12) was held to an absolute cap of
+    # 1e-6 instead of 1e6 residuals, and squares of its entries flushed
+    # to zero.  Exact powers of two keep the comparison bit-identical
+    # wherever nothing underflowed; an exactly zero residual still
+    # accepts only a zero correction (and its Aitken fallback is the
+    # same unmoved iterate).
+    pow2 = pow2_frame(correction, residual)
+    correction_norm = jnp.sqrt(jnp.sum((correction * pow2) ** 2))
+    residual_norm = jnp.sqrt(jnp.sum((residual * pow2) ** 2))
     is_valid = (
-        jnp.all(jnp.isfinite(x_qn))
-        & (correction_norm < 1e6 * jnp.maximum(residual_norm, 1e-12))
+        ls_finite
+        & jnp.all(jnp.isfinite(x_qn))
+        & (correction_norm < 1e6 * residual_norm)
         & (new_n_cols > 0)
     )
     x_new = jnp.where(is_valid, x_qn, x_aitken)
@@ -574,4 +3415,4 @@ def fixed_relaxation(
     jnp.ndarray
         Relaxed state vector.
     """
-    return x_old_flat + omega * (x_raw_flat - x_old_flat)
+    return _relaxed_step(x_old_flat, x_raw_flat, omega)

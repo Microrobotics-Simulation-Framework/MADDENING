@@ -1,19 +1,22 @@
 """MADDENING-specific warning categories and edge-validation exceptions."""
 
-import sys
-
-# ExceptionGroup is a builtin on 3.11+; the ``exceptiongroup`` backport
-# package supplies it on 3.10.  GraphManager.compile() raises
-# ExceptionGroup so callers can ``except*`` over Shape/Dtype mismatches
-# independently while still seeing every problem in a single pass.
-if sys.version_info >= (3, 11):
-    BaseExceptionGroup = BaseExceptionGroup  # noqa: F821 — 3.11+ builtin
-    ExceptionGroup = ExceptionGroup  # noqa: F821 — 3.11+ builtin
-else:  # pragma: no cover — 3.10 fallback
-    from exceptiongroup import (  # type: ignore[import-not-found]
-        BaseExceptionGroup,
-        ExceptionGroup,
-    )
+# ``BaseExceptionGroup`` / ``ExceptionGroup`` are builtins on every
+# interpreter MADDENING supports (``requires-python = ">=3.12"``).  They
+# are re-exported from this module anyway because
+# ``GraphManager.compile()`` raises an ``ExceptionGroup`` -- so callers
+# can ``except*`` over Shape/Dtype mismatches independently while still
+# seeing every problem in one pass -- and importing the name from the
+# module that documents the raise is what the migration guide tells
+# people to do.
+#
+# This used to be a ``sys.version_info >= (3, 11)`` branch with an
+# ``exceptiongroup`` backport import under it.  That fallback was
+# already unreachable at the 3.11 floor, and ``exceptiongroup`` was not
+# a declared dependency, so the branch could only ever have raised
+# ImportError.  A branch that cannot be taken is not a compatibility
+# guarantee.
+BaseExceptionGroup = BaseExceptionGroup  # noqa: F821 — builtin, re-exported
+ExceptionGroup = ExceptionGroup  # noqa: F821 — builtin, re-exported
 
 
 class PerformanceWarning(UserWarning):
@@ -37,7 +40,11 @@ class EdgeValidationError(Exception):
     every detected problem and raises a single
     :class:`ExceptionGroup` whose ``.exceptions`` contains one
     :class:`ShapeMismatchError` or :class:`DtypeMismatchError` per
-    problem.  Catch :class:`EdgeValidationError` (or the more specific
+    problem.  The shape rule is asked again, and raised the same way,
+    wherever a step is traced for a state written after ``compile()``
+    (``set_node_state`` with another shape); the dtype rule is asked by
+    ``compile()`` and ``validate()`` only.  Catch
+    :class:`EdgeValidationError` (or the more specific
     subclasses) inside an ``except*`` to handle them uniformly::
 
         try:
@@ -52,7 +59,9 @@ class EdgeValidationError(Exception):
 
 class ShapeMismatchError(EdgeValidationError):
     """Edge brings a field whose runtime shape disagrees with the
-    target node's :attr:`BoundaryInputSpec.shape`."""
+    target node's :attr:`BoundaryInputSpec.shape`: at ``compile()``, or
+    where a step is traced for a state written with another shape after
+    it."""
 
 
 class DtypeMismatchError(EdgeValidationError):
@@ -68,6 +77,69 @@ class DtypeMismatchError(EdgeValidationError):
 # ShapeMismatchWarning, and DtypeMismatchWarning were removed in v0.3.0
 # per the v0.2.x release notes.  Use EdgeValidationError /
 # ShapeMismatchError / DtypeMismatchError above.
+
+
+class PrecisionLimitWarning(UserWarning):
+    """A result was decided by a difference smaller than its dtype can
+    resolve, so re-running it at a different precision may answer
+    differently.
+
+    Not an error and not a sign of a bug: it says the *verdict* rests on
+    rounding, not that the computation went wrong.  Raised by
+    :func:`maddening.sysid.fim` when the eigenvalue ratio deciding
+    ``rank`` lands within a measured factor of the epsilon-scaled
+    cutoff, and by the fitters (:func:`maddening.sysid.fit`,
+    :func:`~maddening.sysid.fit_lm`,
+    :func:`~maddening.sysid.fit_multiple_shooting`) for a parameter whose
+    ``log`` / ``logit`` transform cannot resolve its value to ``sqrt(eps)``
+    of itself -- bounds far wider than the value.  The remedy is named in
+    the message and is mechanical -- re-run under ``jax_enable_x64``, or
+    for a fitted parameter tighten its bounds or use ``transform=None`` --
+    so the warning is filterable by category once a user has decided the
+    answer does not matter to them::
+
+        warnings.simplefilter("ignore", PrecisionLimitWarning)
+
+    Advisory forever.  MADDENING does not silently promote a
+    computation to float64: ``jax_enable_x64`` is process-global and set
+    before the first JAX import, so it changes every library in the
+    process, and fp64 measures 91x slower than fp32 on the reference
+    RTX A2000 (155 vs 14,135 GFLOP/s).  Making the precision-limited
+    cases self-identifying costs nothing; making everything float64
+    costs that.
+    """
+
+
+class UnderflowRangeWarning(PrecisionLimitWarning):
+    """A coupled group holds a field whose magnitude is in its dtype's
+    subnormal range: below ``finfo(dtype).tiny / finfo(dtype).eps``.
+
+    There a change of one ulp of the field is smaller than the smallest
+    normal number, which XLA's CPU backend flushes to zero (and any backend
+    represents with fewer significant bits), so a node's own arithmetic on
+    the field -- a difference, an increment -- loses resolution, and a field
+    whose magnitude is itself below ``tiny`` reads as exactly zero in the
+    group's convergence norm.  MADDENING's coupling arithmetic (the norm,
+    the accelerators, the report) works in power-of-two frames and keeps
+    its own resolution down to ``tiny``; a node's ``update`` does not.
+
+    ``GraphManager`` checks each coupled group on the first step after
+    every ``compile()`` and after every write of node states that is not a
+    step's (``set_node_state``, ``load_state``, ``reset_state``), on the
+    state that step starts from and the one it returns, and warns at most
+    once per group, naming the field, its magnitude and the threshold.  An
+    exactly zero field never warns; a state that decays into the range
+    through the nodes' own updates is not checked again.  A graph that is
+    written to before every step is not asked at every step (the check
+    costs several times a small graph's step): the first eight checks
+    that writes make due after a ``compile()`` are made at the next step,
+    and from then on a due check is made once 1024 stepper calls have
+    stored a state since the previous one.
+    The remedy is to write the field in units where it is of order one.
+    Float32 thresholds: ``tiny / eps`` is about ``9.9e-32``; bfloat16
+    ``1.5e-36``; float16 ``0.0625`` (its normal range starts at ``6.1e-5``);
+    float64 about ``1e-292``.
+    """
 
 
 class UnitMismatchWarning(UserWarning):

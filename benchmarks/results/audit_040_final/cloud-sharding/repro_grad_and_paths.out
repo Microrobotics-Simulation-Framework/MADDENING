@@ -1,0 +1,17 @@
+jax devices: 4
+
+== ShardedPointwiseNode: sharded vs unsharded ==
+  dev=1 n=12 divides=True: RAISED ValueError: Resource axis: devices of P('devices',) is not found in mesh: ('x',).
+  dev=1 n=17 divides=True: RAISED ValueError: Resource axis: devices of P('devices',) is not found in mesh: ('x',).
+  dev=2 n=12 divides=True: RAISED ValueError: Resource axis: devices of P('devices',) is not found in mesh: ('x',).
+  dev=2 n=17 divides=False: RAISED ValueError: Resource axis: devices of P('devices',) is not found in mesh: ('x',).
+  dev=3 n=12 divides=True: RAISED ValueError: Resource axis: devices of P('devices',) is not found in mesh: ('x',).
+  dev=3 n=17 divides=False: RAISED ValueError: Resource axis: devices of P('devices',) is not found in mesh: ('x',).
+  dev=4 n=12 divides=True: RAISED ValueError: Resource axis: devices of P('devices',) is not found in mesh: ('x',).
+  dev=4 n=17 divides=False: RAISED ValueError: Resource axis: devices of P('devices',) is not found in mesh: ('x',).
+
+== Gradient: d(sum(f_new)^2)/d(rate) and d/d(f0), sharded vs unsharded ==
+  unsharded: d/d rate = -0.08000850  |d/d f0| = 5.56365681
+  dev=1: d/d rate = -0.08000850  err_rate=0.00e+00 err_f0=2.38e-07  OK
+  dev=2: d/d rate = -0.08000851  err_rate=7.45e-09 err_f0=2.38e-07  OK
+  dev=4: d/d rate = -0.08000850  err_rate=0.00e+00 err_f0=2.38e-07  OK

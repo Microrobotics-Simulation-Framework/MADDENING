@@ -1,0 +1,6 @@
+devices: ['cuda:0', 'cuda:1', 'cuda:2', 'cuda:3']  jax 0.11.2  platform gpu
+[forward] cells=30008484 all_to_all wrapper  749.538 ms/step  device    3.726 ms/step  compile   0.75 s  max|dx|=5.96e-07
+[forward] cells=30008484 ppermute   wrapper  708.499 ms/step  device    4.293 ms/step  compile   0.26 s  max|dx|=5.96e-07
+wrote results/stress/cells-30000000/forward.json (256.2 s)  checks 6/6 passed, 1 not run
+CHECK NOT RUN [forward] 30008484 cells ones: total == cells, sharded and unsharded, and per-shard (offset, cells), exactly -- a float32 sum of ones is exact only under 2**24 = 16777216 cells
+INCOMPLETE (checks not run; the checklist items stay open): forward

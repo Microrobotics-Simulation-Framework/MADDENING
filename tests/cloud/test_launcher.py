@@ -333,3 +333,62 @@ class TestCloudJob:
         }):
             result = launcher.list_gpu_types("runpod")
         assert result == []
+
+
+class TestTheApiPortIsNotOpenedByDefault:
+    """``JobConfig.ports`` is the line that opens the provider's firewall.
+
+    ``sky.Resources(ports=...)`` is an ingress rule, so anything in this
+    list is reachable from the internet on the launched VM.  Port 8000 is
+    the simulation API.  It used to be the default, which is how a plain
+    ``launcher.launch(JobConfig(...))`` published that API.
+    """
+
+    def _launch(self, creds_file, config):
+        """Launch *config* against a mock SkyPilot and return the mock."""
+        import sys
+
+        mock_sky = MagicMock()
+        mock_handle = MagicMock()
+        mock_handle.head_ip = "10.0.0.42"
+        mock_sky.launch.return_value = "req-123"
+        mock_sky.get.return_value = (1, mock_handle)
+        mock_sky.stream_and_get.return_value = (1, mock_handle)
+        mock_sky.clouds = MagicMock()
+        mock_sky.RunPod = MagicMock
+
+        launcher = CloudLauncher(credentials_path=creds_file)
+        with patch.object(
+            launcher, "_resolve_resources",
+            return_value=("1x_A4000_SECURE", 0.20),
+        ), patch.object(
+            launcher, "_get_budget_used", return_value=0.0,
+        ), patch.object(
+            launcher, "_resolve_provider",
+            return_value=(RunPodProvider(), {"api_key": "rp_test"}),
+        ), patch.dict(sys.modules, {"sky": mock_sky}):
+            launcher.launch(config)
+        return mock_sky
+
+    def test_the_default_config_lists_no_ports(self):
+        assert JobConfig(provider="runpod", gpu_type="A4000").ports == []
+
+    def test_a_default_launch_opens_no_ingress(self, creds_file):
+        """The whole point: no ingress rule unless the job config asks.
+
+        ``_do_launch`` used to read ``job_config.ports or [8000]``, which
+        silently restored the port an empty default was meant to remove,
+        so an empty ``ports`` has to be checked here and not only on the
+        dataclass.
+        """
+        mock_sky = self._launch(
+            creds_file, JobConfig(provider="runpod", gpu_type="A4000"),
+        )
+        assert not mock_sky.Resources.call_args.kwargs["ports"]
+
+    def test_a_config_that_asks_for_the_port_still_gets_it(self, creds_file):
+        mock_sky = self._launch(
+            creds_file,
+            JobConfig(provider="runpod", gpu_type="A4000", ports=[8000]),
+        )
+        assert mock_sky.Resources.call_args.kwargs["ports"] == [8000]

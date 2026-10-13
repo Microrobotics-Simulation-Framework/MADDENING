@@ -5,10 +5,10 @@ orphan: false
 # `halo_width` migration guide (v0.2 → v0.3.0)
 
 ```{versionchanged} v0.2
-Per-axis halo widths via
+Per-axis {term}`halo <Halo>` widths via
 {meth}`SimulationNode.halo_width() <maddening.core.node.SimulationNode.halo_width>`,
-returning a ``dict[int, int]`` (``{axis: width}``).  Pointwise nodes
-return ``{}``; stencil nodes return a non-empty dict.  The legacy
+returning a ``dict[int, int]`` (``{axis: width}``).  Pointwise {term}`nodes <Node>`
+return ``{}``; {term}`stencil <Stencil>` nodes return a non-empty dict.  The legacy
 boolean ``requires_halo`` property was retained as a derived
 fallback (``bool(self.halo_width())``) and any subclass overriding
 ``requires_halo`` directly emitted a
@@ -24,14 +24,27 @@ instead of ``halo_width`` now raise
 
 ## Why this changed
 
-Pencil decomposition (the multi-GPU sharding path —
-{class}`~maddening.cloud.multigpu.sharded_node.ShardedStencilNode`
-in v0.2.1, plus
-{class}`~maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode`
-added in v0.3.0) needs to know each axis's halo width, not just
-"do you need a halo at all".  The boolean was load-bearing
+Pencil decomposition (the Cartesian multi-GPU {term}`sharding <Sharding>` path,
+{class}`~maddening.cloud.multigpu.sharded_node.ShardedStencilNode`,
+added in v0.2.1) needs to know each axis's halo width, not just
+"do you need a halo at all": it pads every {term}`sharded <Sharded>` axis by that
+axis's width on each side, `[halo | interior | halo]`, before
+`update_padded` runs.  The boolean was load-bearing
 once — when stencils were 1-D and one axis per node — but it
-silently lost information the moment we shipped 3-D LBM.
+silently lost information the moment we shipped 3-D {term}`LBM`.
+
+{class}`~maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode`
+(added in v0.3.0) takes no halo width from the node.  A node's
+neighbours there are the partition layout's ghost cells, handed to
+`update_padded` as `[the shard's own cells | ghost cells]`, so a node
+written for it declares `halo_width() == {}`.  Since v0.4.0 that
+wrapper refuses a node that declares a non-empty `halo_width()`: that
+is the Cartesian contract, and such a node would read the partition
+layout as the wrong cells.  {term}`Shard` a stencil node with
+`ShardedStencilNode`.  (Until v0.4.0 this guide said the unstructured
+wrapper needed each axis's halo width too.)  The
+[sharding topology guide](sharding_topology.md) sets the two layouts
+side by side.
 
 The v0.2 release kept the boolean as a derived fallback for
 back-compat and emitted a {class}`FutureWarning`.  v0.3.0 closes
@@ -48,6 +61,7 @@ doesn't affect you.
 
 Replace the property override with a {meth}`halo_width` method:
 
+<!-- snippet: no-run, reason: legacy: the form removed in v0.3.0; defining it raises MigrationError -->
 ```{code-block} python
 :caption: Before (v0.2.x; FutureWarning in v0.2, MigrationError in v0.3.0)
 class MyStencilNode(SimulationNode):
@@ -59,6 +73,7 @@ class MyStencilNode(SimulationNode):
         ...
 ```
 
+<!-- snippet: no-run, reason: fragment: a node class excerpt with its method bodies elided -->
 ```{code-block} python
 :caption: After (v0.3.0+)
 class MyStencilNode(SimulationNode):
@@ -75,6 +90,7 @@ class MyStencilNode(SimulationNode):
 
 Pointwise nodes (no spatial neighbour access) return the empty dict:
 
+<!-- snippet: no-run, reason: fragment: a node class excerpt -->
 ```{code-block} python
 class MyPointwiseNode(SimulationNode):
     def halo_width(self) -> dict[int, int]:
@@ -84,6 +100,10 @@ class MyPointwiseNode(SimulationNode):
 If your node never overrode `halo_width` *or* `requires_halo`, the
 base class already returns `{}` and you don't need to do anything.
 
+A node written for `ShardedUnstructuredNode` returns `{}` too, even
+though its `update_padded` reads neighbours: they arrive as the
+partition layout's ghost cells, not as a per-axis halo (see above).
+
 ### Auto-migration tooling
 
 The {class}`~maddening.warnings.MigrationError` raised at class-
@@ -92,6 +112,7 @@ message — `err.api_name`, `err.affected_class`, `err.replacement`,
 `err.migration_guide`.  Tools can introspect these without grepping
 the message:
 
+<!-- snippet: no-run, reason: external: my_pkg.legacy_node stands for the reader's module -->
 ```{code-block} python
 import importlib, traceback
 from maddening.warnings import MigrationError
@@ -113,7 +134,7 @@ the parent class already returns the right value:
 $ grep -rn "def requires_halo\|requires_halo =\|@property" --include="*.py" | grep -A1 "requires_halo"
 ```
 
-MIME's CI runs a grep gate on this — see the v0.3.0 plan's §B6.
+MIME's CI runs a grep gate on this.
 
 ## Related
 

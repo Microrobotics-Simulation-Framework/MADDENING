@@ -1,0 +1,10 @@
+objective reads the BAKED array (the documented AdaptiveNode pattern):
+   jax.grad =  0.000000000000e+00    central FD(h=1e-6) =  0.000000000000e+00
+objective recomputes from the traced parameter:
+   jax.grad =  6.927405773986e-02    central FD(h=1e-6) =  6.927405774015e-02
+
+compile() verdict on the baked node:
+   compile() ACCEPTED the graph (no static_data_deps violation seen)
+
+same array, but published through static_data and declared:
+   compile() REFUSED: ValueError node 'baked' declares static_data['phi_sensor'] as derived from parameter 'sensor_x', which is trainable.  static_data is baked into the compiled HLO as a constant, and you cannot differentiate through a constant: the gradient with respect to 'sensor_x' would silently omit the term through 'phi_sens

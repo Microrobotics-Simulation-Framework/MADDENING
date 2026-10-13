@@ -26,6 +26,7 @@ Tests:
 
 from __future__ import annotations
 
+import functools
 import os
 
 # Force CPU for these small graphs — much faster than warming up CUDA.
@@ -81,13 +82,24 @@ def _make_gm(solver: str, acceleration: str,
 # ----------------------------------------------------------------------
 
 
+@functools.lru_cache(maxsize=None)
+def _after_one_step(solver: str, acceleration: str):
+    """``(graph, state it returned)`` after one step of ``_make_gm(...)``.
+
+    Once per configuration for the module: the forward-parity tests read
+    the state, and the backward-parity test differentiates the compiled
+    step at it, so the three configurations the two kinds share are
+    built and compiled once instead of in each.  Nothing steps the graph
+    again, so ``gm._state`` stays the state after that one step.
+    """
+    gm = _make_gm(solver, acceleration)
+    return gm, gm.step()
+
+
 def test_forward_parity_ift_aitken_vs_fori_aitken():
     """Converged ``x*`` agrees between ift+aitken and fori+aitken."""
-    gm_fori = _make_gm("fori", "aitken")
-    gm_ift = _make_gm("ift", "aitken")
-
-    s_fori = gm_fori.step()
-    s_ift = gm_ift.step()
+    _, s_fori = _after_one_step("fori", "aitken")
+    _, s_ift = _after_one_step("ift", "aitken")
 
     for nn in ("spring_a", "spring_b"):
         for fld, v_fori in s_fori[nn].items():
@@ -104,11 +116,8 @@ def test_forward_parity_ift_aitken_vs_ift_none():
     Acceleration is a forward-pass technique; ``x*`` is intrinsic to
     the contraction map.  Both should converge to the same answer.
     """
-    gm_none = _make_gm("ift", "none")
-    gm_ait = _make_gm("ift", "aitken")
-
-    s_none = gm_none.step()
-    s_ait = gm_ait.step()
+    _, s_none = _after_one_step("ift", "none")
+    _, s_ait = _after_one_step("ift", "aitken")
 
     for nn in ("spring_a", "spring_b"):
         for fld, v_none in s_none[nn].items():
@@ -130,9 +139,11 @@ def _loss_from_state(state, nodes=("spring_a", "spring_b")):
 
 
 def _grad_through_compiled_step(gm: GraphManager, pert_node="spring_a"):
-    """Return ``d(loss)/d(initial_position_<pert_node>)`` via jitted step."""
-    # Initialise compiled step.
-    _ = gm.step()
+    """Return ``d(loss)/d(initial_position_<pert_node>)`` via jitted step.
+
+    *gm* has taken its one warm-up step (see :func:`_after_one_step`);
+    the gradient is taken at the state that step left.
+    """
     compiled = gm._compiled_step
     assert compiled is not None, "gm._compiled_step must be set after step()"
 
@@ -161,10 +172,10 @@ def test_backward_parity_ift_aitken_through_jit():
     acceleration-agnostic — wrapping ``F`` in Aitken inside the forward
     while_loop does not perturb the cotangent that flows out.
     """
-    g_fori_none = _grad_through_compiled_step(_make_gm("fori", "none"))
-    g_fori_ait = _grad_through_compiled_step(_make_gm("fori", "aitken"))
-    g_ift_none = _grad_through_compiled_step(_make_gm("ift", "none"))
-    g_ift_ait = _grad_through_compiled_step(_make_gm("ift", "aitken"))
+    g_fori_none = _grad_through_compiled_step(_after_one_step("fori", "none")[0])
+    g_fori_ait = _grad_through_compiled_step(_after_one_step("fori", "aitken")[0])
+    g_ift_none = _grad_through_compiled_step(_after_one_step("ift", "none")[0])
+    g_ift_ait = _grad_through_compiled_step(_after_one_step("ift", "aitken")[0])
 
     # Pairwise parity, single-precision tolerances.  fori unrolls a
     # fixed iteration count regardless of convergence, so tiny noise

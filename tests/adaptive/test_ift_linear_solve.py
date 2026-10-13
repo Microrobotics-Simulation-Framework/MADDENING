@@ -1,7 +1,6 @@
-"""M1 tests for ``maddening.core.solver_utils.ift_linear_solve``.
+"""Tests for ``maddening.core.solver_utils.ift_linear_solve``.
 
-Test list (numbering matches
-``plans/MADDENING_ADAPTIVE_NODE_IMPLEMENTATION_PLAN.md`` §4 M1):
+Test list:
 
 1. test_dense_baseline_agreement
 2. test_gmres_matches_dense_on_indefinite

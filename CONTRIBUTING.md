@@ -20,7 +20,7 @@ When you discover a bug or anomaly:
 
 1. Create a GitHub Issue using the **anomaly** template (`.github/ISSUE_TEMPLATE/anomaly.md`)
 2. Fill in all mandatory fields: severity, safety relevance, rationale, affected components, affected versions, workaround
-3. Apply the appropriate labels: `anomaly:critical`, `anomaly:major`, or `anomaly:minor`
+3. Apply the appropriate labels: `anomaly:critical`, `anomaly:major`, or `anomaly:minor`, as defined by `AnomalySeverity` in `src/maddening/core/compliance/anomaly.py`.  A silent wrong result is never `anomaly:minor`
 4. If the anomaly could affect numerical correctness in a safety-relevant context, also apply the `safety-relevant` label
 
 ### Phase 2: Formalization (YAML Entry)
@@ -32,19 +32,37 @@ Once the anomaly is confirmed and understood:
 3. Run `python -m maddening.compliance check-anomalies docs/validation/known_anomalies.yaml` to validate
 4. Cross-reference the GitHub Issue number in the YAML entry
 
+### Which defects get an entry
+
+- **Every defect a released version carried**, whatever its severity.
+- **Every `critical` or `major` defect found during a development cycle, even
+  if no release carried it**: `affected_versions: "none"`, resolved in the
+  release the cycle builds towards (MADD-ANO-018, 019 and 054 are examples).
+- A `minor` defect introduced and fixed within one cycle needs no entry; the
+  CHANGELOG and the fixing commit are its record.
+
+A `### Security` bullet in the CHANGELOG that meets either condition cites its
+entry.  The release gate below says when an entry falls due.
+
 ### Phase 3: Verification
 
 When the anomaly is resolved:
 
 1. Update the YAML entry with resolution status and version
 2. Add or update verification tests that demonstrate the fix
-3. Never delete anomaly entries — mark them as resolved
+3. Never delete anomaly entries — mark them as resolved.  A number that must be
+   retired goes in `_RETIRED_ANOMALY_IDS` (`tests/compliance/test_soup_evidence.py`)
+   with its reason, and only a closed entry (`resolved` or `duplicate`), or a
+   number no commit ever recorded, can be retired; `scripts/check_anomalies.py`
+   refuses anything else
 
 ### Release Gate (Three-Tier Model)
 
 - **Tier 1** (`safety-relevant`): YAML entry required before release — no exceptions
 - **Tier 2** (`anomaly:critical` or `anomaly:major`): YAML entry required before release — no grace period
 - **Tier 3** (`anomaly:minor`): Two-cycle grace period; CI warns after one release cycle, blocks after two
+
+Because a silent wrong result is at least `major`, it is always Tier 2 or Tier 1: it never takes the grace period.  The Tier 3 cycle counting is not automated yet (DOCUMENTATION_ARCHITECTURE.md section 9.7), so nothing in CI enforces the grace period either way.
 
 ## Code Style
 
@@ -74,6 +92,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests/ -v --tb=short
 
 When writing code that uses an optional dependency, wrap the import with a try/except that tells the user which extra to install:
 
+<!-- snippet: no-run, reason: fragment: two import-guard patterns, excerpted from a module and from __getattr__ -->
 ```python
 # Module-level guard (for modules dedicated to one dep)
 try:

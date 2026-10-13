@@ -28,7 +28,6 @@ Usage::
 
 from __future__ import annotations
 
-import warnings
 from typing import Optional
 
 import jax.numpy as jnp
@@ -205,12 +204,10 @@ def build_vessel_flow_graph(
     # responds on a cardiac-cycle timescale (~1s) while the LBM advances
     # at lattice dt (~1 unit).  One-step-lagged staggered feedback (via
     # back-edges) is physically appropriate and avoids the 10x overhead
-    # of iterative coupling.  The cycle warning from compile() is
-    # expected and safe to ignore.
+    # of iterative coupling.  compile() records the cycle it staggers as
+    # an INFO log record (it was a warning before 0.2.1).
 
     # 5. Compile
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        gm.compile()
+    gm.compile()
 
     return gm, vessel_mask

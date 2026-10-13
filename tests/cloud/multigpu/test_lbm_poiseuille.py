@@ -33,6 +33,7 @@ import pytest
 
 from maddening.cloud.multigpu.device_mesh import create_device_mesh
 from maddening.cloud.multigpu.sharded_node import ShardedStencilNode
+from maddening.compliance import BenchmarkType, verification_benchmark
 from maddening.nodes.lbm import LBMNode
 
 _HAS_8 = len(jax.devices()) >= 8
@@ -67,16 +68,45 @@ def _run_poiseuille(node, sharded, n_steps: int, F: float):
 
 
 @pytest.mark.skipif(not _HAS_8, reason="needs >=8 virtual devices")
+@verification_benchmark(
+    benchmark_id="MADD-VER-003",
+    description=(
+        "Sharded LBMNode vs the steady-state Hagen-Poiseuille profile in a "
+        "circular pipe driven by a uniform body force, on a 2x4 pencil mesh "
+        "over (spatial_y, spatial_z)"
+    ),
+    node_type="LBMNode",
+    benchmark_type=BenchmarkType.ANALYTICAL,
+    acceptance_criteria=(
+        "After 500 steps: profile positive and peaked at the centre; a "
+        "least-squares fit u = c0 + c1 r^2 concave with effective R^2 within "
+        "[0.7, 1.5] of nominal; cross-section symmetric to rtol 1e-3; "
+        "centreline velocity in [0.75, 1.30] x u_max = F R^2 / (4 mu).  "
+        "The band is deliberately asymmetric: LBMNode's wall cells collide "
+        "as well as reflect, so the hydrodynamic wall sits near the wall "
+        "nodes rather than on the half-way plane (about 0.1 lattice units "
+        "from the wall node in MADD-VER-016's straight channel).  Here the "
+        "fitted effective radius is 4.29 against the nominal 4.0 "
+        "(R_eff^2 = 18.4 against 16), within 0.01 of the innermost wall-cell "
+        "centre at r = 4.30, so the ratio is biased above 1 (measured "
+        "1.130).  A symmetric +/-25% would leave 0.12 of headroom above the "
+        "measured value on the side the discretisation pushes it"
+    ),
+    references=(
+        "Hagen-Poiseuille steady laminar flow in a circular pipe",
+    ),
+)
 def test_poiseuille_sharded_profile_is_parabolic():
     """Sharded LBM (2x4 pencil) develops a parabolic Poiseuille-like profile.
 
-    We check the *shape* of the profile (parabolic, symmetric) rather
-    than its absolute amplitude.  The Guo body-force scheme in our LBM
-    has a known coefficient mismatch with the textbook Hagen-Poiseuille
-    formula (the macroscopic body force seen by the fluid is scaled by
-    ``(1 - 1/(2*tau))`` instead of unity at finite tau).  This is an
-    LBM implementation property, not a sharding bug -- the unsharded
-    path reproduces the same profile (verified separately below).
+    We check the *shape* of the profile (parabolic, symmetric) and the
+    centreline amplitude only to a band.  The Guo body-force scheme
+    carries its ``F/2`` half-step correction, so the amplitude is the
+    textbook one up to the wall offset recorded in ``acceptance_criteria``
+    (before that correction it was scaled by ``1 - 1/(2*tau)``, a ratio of
+    ~0.42).  The offset is an LBM wall property, not a sharding bug --
+    the unsharded path reproduces the same profile (verified separately
+    below).
 
     Steady-state reached after ``~5 * R^2 / nu`` time steps.
     """
@@ -149,9 +179,19 @@ def test_poiseuille_sharded_profile_is_parabolic():
 
     # Amplitude: with the Guo body-force half-correction the centerline
     # velocity matches the textbook u_max = F R^2 / (4 mu) to within the
-    # discretization offset (effective R > nominal R from mid-link
-    # bounce-back placement).  Pre-fix the ratio was ~0.42; post-fix it
-    # lands at ~1.13.  Tolerance: within +/-25% of nominal u_max.
+    # discretization offset (effective R > nominal R: the wall sits near
+    # the wall nodes, not on the half-way plane).  Pre-fix the ratio was
+    # ~0.42; post-fix it lands at 1.130.
+    #
+    # The band below is [0.75, 1.30], NOT a symmetric +/-25%, and the
+    # asymmetry is the physics rather than slack: the fitted effective
+    # radius is 4.29 against the nominal 4.0 -- the innermost wall-cell
+    # centre is at r = 4.30 -- so the ratio is biased *up*.  1.25 would leave
+    # 0.12 above the measured 1.130 on exactly the side the
+    # discretisation pushes it.  ``acceptance_criteria`` above says the
+    # same thing, because that string -- not this comment -- is what
+    # docs/validation/framework_verification.md renders for a reader who
+    # never opens this file.  Keep the two in step.
     mu = 0.1  # nu * rho with rho = 1
     u_max_analytic = F * R * R / (4.0 * mu)
     u_center = u_x_cross[cy, cz]

@@ -11,24 +11,32 @@ at coarse dt, then add it to the coarse physics output to match
 fine-dt accuracy.
 
 The HybridNode delegates ``initial_state``, ``boundary_input_spec``,
-``compute_boundary_fluxes``, ``interface_dof_indices``, and
-``compute_interface_correction`` to the wrapped physics node,
-so it is a drop-in replacement in the graph.
+``compute_boundary_fluxes``, ``interface_dof_indices``,
+``compute_interface_correction`` and ``update_evaluations`` to the
+wrapped physics node, so it is a drop-in replacement in the graph.
 """
 
 from __future__ import annotations
 
 from typing import Any, Callable, Optional
 
-from maddening.core.node import SimulationNode
+from maddening.core.node import (
+    SimulationNode,
+    _method_accepts_params,
+    _refuse_params_no_keyword_reaches,
+    _signature_takes_params,
+)
 
 
 def _accepts_params(fn) -> bool:
-    import inspect  # noqa: PLC0415
-    try:
-        return "params" in inspect.signature(fn).parameters
-    except (TypeError, ValueError):
-        return False
+    """Would ``fn(..., params=x)`` deliver ``x``?  The callable half of the
+    shared rule (:func:`~maddening.core.node._signature_takes_params`), so
+    a wrapped node whose hook forwards ``**kwargs`` gets its params through
+    the hybrid exactly as it would unwrapped.  :class:`HybridNode` itself
+    asks the node half, :func:`~maddening.core.node._method_accepts_params`,
+    so a physics node that is itself a wrapper answering for what it wraps
+    is asked, not read past."""
+    return _signature_takes_params(fn)
 
 
 class HybridNode(SimulationNode):
@@ -46,6 +54,10 @@ class HybridNode(SimulationNode):
         Optional override name.  Defaults to the physics node's name.
     """
 
+    # The wrapped node's ``params`` are this node's: one mapping, read and
+    # assigned through the attribute named here (``SimulationNode.params``).
+    _params_owner_attr = "physics_node"
+
     def __init__(
         self,
         physics_node: SimulationNode,
@@ -57,7 +69,23 @@ class HybridNode(SimulationNode):
             timestep=physics_node.delta_t,
             **physics_node.params,
         )
+        # The hybrid hands ``params`` on to the physics node's hooks under
+        # the one params rule, so a hook there that names ``params`` where
+        # no keyword reaches it is refused here, as the graph refuses it
+        # for the node unwrapped.
+        _refuse_params_no_keyword_reaches(physics_node, caller="HybridNode")
         self.physics_node = physics_node
+        # One node, one params dict, as the sharded wrappers do: the
+        # hybrid's ``params`` IS the physics node's (``_params_owner_attr``),
+        # and this statement drops the copy the base constructor stored
+        # above.  The hybrid's ``params_pytree()`` reads the physics node's,
+        # so a copy kept here stranded every write to ``hybrid.params`` --
+        # the graph took ``params_pytree()``'s unchanged value back over it
+        # at its next read of ``gm.params``, and a ``PUT /graph/params``
+        # answered 200, echoed the new value and lost it -- and a mapping
+        # only shared from here on stranded an assignment
+        # (``hybrid.params = {...}``) the same way.
+        self.params = physics_node.params
         self.correction_fn = correction_fn
 
     def halo_width(self) -> dict[int, int]:
@@ -68,8 +96,10 @@ class HybridNode(SimulationNode):
         return self.physics_node.initial_state()
 
     # -- graph params contract: delegate to the wrapped physics node ----
-    def accepts_params(self) -> bool:
-        return _accepts_params(self.physics_node.update)
+    def accepts_params(self, *, method: str = "update") -> bool:
+        if method != "update":
+            return super().accepts_params(method=method)
+        return _method_accepts_params(self.physics_node, "update")
 
     def params_pytree(self) -> dict:
         return self.physics_node.params_pytree()
@@ -80,8 +110,12 @@ class HybridNode(SimulationNode):
     def update(self, state: dict, boundary_inputs: dict, dt: float, *, params=None) -> dict:
         """Physics update + additive correction (``params`` reaches the
         physics node when it takes them, so a hybrid stays calibratable)."""
-        if params is not None and _accepts_params(self.physics_node.update):
-            physics_result = self.physics_node.update(state, boundary_inputs, dt, params=params)
+        if params is not None and _method_accepts_params(self.physics_node, "update"):
+            # `_method_accepts_params` above proved this node takes the keyword;
+            # the `SimulationNode.update` contract does not declare it.
+            physics_result = self.physics_node.update(
+                state, boundary_inputs, dt,
+                params=params)  # pyright: ignore[reportCallIssue]
         else:
             physics_result = self.physics_node.update(state, boundary_inputs, dt)
         correction = self.correction_fn(state, boundary_inputs, dt)
@@ -99,8 +133,21 @@ class HybridNode(SimulationNode):
     def boundary_input_spec(self):
         return self.physics_node.boundary_input_spec()
 
+    def update_evaluations(self) -> Optional[float]:
+        """The physics node's declaration.
+
+        The correction adds one rounding per output entry, which the
+        per-evaluation allowance already covers, so the count is the
+        physics node's.  Without this a sub-stepping node lost its
+        declaration when wrapped, and a coupling group containing it read
+        its float floor as one evaluation (``spectral_usable=False`` at
+        the floor, where the unwrapped node's group was usable).
+        """
+        return self.physics_node.update_evaluations()
+
     def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
-        if params is not None and _accepts_params(self.physics_node.compute_boundary_fluxes):
+        if params is not None and _method_accepts_params(
+                self.physics_node, "compute_boundary_fluxes"):
             return self.physics_node.compute_boundary_fluxes(
                 state, boundary_inputs, dt, params=params,
             )
@@ -112,7 +159,8 @@ class HybridNode(SimulationNode):
         return self.physics_node.interface_dof_indices()
 
     def compute_interface_correction(self, pre_state, boundary_inputs, dt, *, params=None):
-        if params is not None and _accepts_params(self.physics_node.compute_interface_correction):
+        if params is not None and _method_accepts_params(
+                self.physics_node, "compute_interface_correction"):
             return self.physics_node.compute_interface_correction(
                 pre_state, boundary_inputs, dt, params=params,
             )

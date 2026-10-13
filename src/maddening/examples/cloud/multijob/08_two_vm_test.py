@@ -5,35 +5,39 @@ Provisions 2 VMs:
   - VM 0 (rank-0): runs coordinator + "flow" subgraph
   - VM 1 (worker): runs "structure" subgraph
 
-Tests the full rendezvous flow:
+Tests the rendezvous flow:
   1. Launch rank-0, start coordinator via SSH
   2. Launch worker, register with coordinator via SSH
-  3. Verify topology received on both sides
-  4. Verify ZMQ PUB/SUB data exchange between VMs
-  5. Tear down both
+  3. Verify both workers registered and each received its topology
+  4. Tear down both
 
-Uses the cheapest available GPUs with spot_fallback for cost efficiency.
+It checks registration and topology only; it does not exchange data
+over the PUB/SUB sockets the topology describes.  Exits non-zero if a
+check fails.
+
+``--local`` runs the same rendezvous on this machine instead: the
+coordinator and both workers in one process, on loopback, with no cloud
+account.  It never imports the cloud launcher.
 
 Usage:
-    python 08_two_vm_test.py
-    python 08_two_vm_test.py --gpu RTX4090
-    python 08_two_vm_test.py --keep
+    # No cloud account needed:
+    python -m maddening.examples.cloud.multijob.08_two_vm_test --local
+
+    # Provisions two billable RunPod VMs (needs ~/.maddening/cloud_credentials.yaml):
+    python -m maddening.examples.cloud.multijob.08_two_vm_test
+    python -m maddening.examples.cloud.multijob.08_two_vm_test --gpu RTX4090
+    python -m maddening.examples.cloud.multijob.08_two_vm_test --keep
 """
 
 import argparse
 import json
 import os
+import secrets
 import shlex
+import socket
 import sys
+import threading
 import time
-
-from maddening.cloud.launcher import (
-    CloudJob,
-    CloudLauncher,
-    CostPolicy,
-    JobConfig,
-    LaunchError,
-)
 
 
 # Install script — same deps for both VMs
@@ -72,11 +76,17 @@ except Exception as e:
     print(f"ZMQ IMPORT FAILED: {{e}}", flush=True)
     sys.exit(1)
 
+# bind_host="0.0.0.0" is required here: the structure worker reaches this
+# coordinator across the internet. That turns on ZMQ CURVE, which needs
+# MADDENING_API_TOKEN set to the same value in both jobs' envs -- the
+# coordinator refuses to start without it rather than listening in the
+# clear. See maddening.transport_auth.
 coord = Coordinator(
     expected_workers=expected,
     edges=edges,
     port=port,
     heartbeat_timeout=60.0,
+    bind_host="0.0.0.0",
 )
 coord.start()
 print("Coordinator thread started, waiting for workers...", flush=True)
@@ -118,11 +128,17 @@ my_ip = socket.gethostbyname(socket.gethostname())
 print(f"Worker {{subgraph_id}} connecting to coordinator at {{coordinator_addr}}", flush=True)
 print(f"My IP: {{my_ip}}", flush=True)
 
+# secure=True is explicit because rank 0's own worker reaches the
+# coordinator over 127.0.0.1, and a loopback address would otherwise turn
+# CURVE off while the coordinator (bound 0.0.0.0) has it on. The
+# coordinator's posture is set by its bind address, which this side
+# cannot see.
 client = WorkerClient(
     coordinator_addr=coordinator_addr,
     subgraph_id=subgraph_id,
     address=f"{{my_ip}}:5555",
     zmq_ports={{"state": 5555}},
+    secure=True,
 )
 
 try:
@@ -152,11 +168,131 @@ except Exception as e:
 """
 
 
+# The inter-job edges, shared by the cloud and the --local runs.
+EDGES = [{
+    "source": "flow", "target": "structure",
+    "source_field": "pressure", "target_field": "load",
+}, {
+    "source": "structure", "target": "flow",
+    "source_field": "displacement", "target_field": "wall_bc",
+}]
+WORKERS = ["flow", "structure"]
+
+
+def _free_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def run_local(timeout: float = 60.0) -> int:
+    """The rendezvous on loopback: coordinator and two workers, one process.
+
+    The same Coordinator and WorkerClient the VMs run, bound to
+    127.0.0.1, where neither needs a token (CURVE turns on only for a
+    non-loopback address).
+    """
+    from maddening.cloud.multigpu.coordinator import Coordinator
+    from maddening.cloud.multigpu.worker_client import WorkerClient
+
+    port = _free_loopback_port()
+    print(f"Local run: coordinator on tcp://127.0.0.1:{port}, "
+          f"workers {WORKERS}")
+    coord = Coordinator(
+        expected_workers=WORKERS, edges=EDGES, port=port,
+        heartbeat_timeout=60.0, bind_host="127.0.0.1",
+    )
+    coord.start()
+
+    clients: dict[str, WorkerClient] = {}
+    topologies: dict[str, list] = {}
+    errors: dict[str, str] = {}
+
+    def _worker(subgraph_id: str) -> None:
+        data_port = _free_loopback_port()
+        client = WorkerClient(
+            coordinator_addr=f"127.0.0.1:{port}",
+            subgraph_id=subgraph_id,
+            address=f"127.0.0.1:{data_port}",
+            zmq_ports={"state": data_port},
+        )
+        clients[subgraph_id] = client
+        try:
+            topologies[subgraph_id] = client.register_and_wait(timeout=timeout)
+        except Exception as exc:  # reported below, not swallowed
+            errors[subgraph_id] = f"{type(exc).__name__}: {exc}"
+
+    threads = [threading.Thread(target=_worker, args=(w,), daemon=True)
+               for w in WORKERS]
+    all_ok = True
+    try:
+        for t in threads:
+            t.start()
+        registered = coord.wait_for_all(timeout=timeout)
+        for t in threads:
+            t.join(timeout=timeout)
+
+        print()
+        print("Verification")
+        print("-" * 40)
+        workers = set(coord.registered_workers)
+        if registered and workers == set(WORKERS):
+            print(f"  PASS: both workers registered with the coordinator")
+        else:
+            print(f"  FAIL: expected {set(WORKERS)}, registered {workers}")
+            all_ok = False
+        for w in WORKERS:
+            if w in topologies:
+                peers = topologies[w]
+                print(f"  PASS: worker {w} received topology ({len(peers)} peers)")
+                for peer in peers:
+                    print(f"        {peer.peer_id}: {peer.role} "
+                          f"{peer.socket_type} @ {peer.address}")
+                # One edge out and one edge in per worker.
+                if len(peers) != 2:
+                    print(f"  FAIL: worker {w} expected 2 peers")
+                    all_ok = False
+            else:
+                print(f"  FAIL: worker {w}: {errors.get(w, 'no topology')}")
+                all_ok = False
+    finally:
+        for client in clients.values():
+            client.stop()
+        coord.shutdown()
+
+    print()
+    print("  ALL MULTI-JOB TESTS PASSED!" if all_ok
+          else "  SOME TESTS FAILED -- see above")
+    return 0 if all_ok else 1
+
+
 def main():
     parser = argparse.ArgumentParser(description="2-VM multi-job test")
     parser.add_argument("--gpu", default="RTX4090", help="GPU type")
     parser.add_argument("--keep", action="store_true", help="Don't teardown")
+    parser.add_argument(
+        "--local", action="store_true",
+        help="Run the rendezvous on this machine (loopback, no cloud)",
+    )
     args = parser.parse_args()
+
+    if args.local:
+        sys.exit(run_local())
+
+    # Imported here so that --local never loads the cloud launcher.
+    from maddening.cloud.launcher import (
+        CloudJob,
+        CloudLauncher,
+        CostPolicy,
+        JobConfig,
+        LaunchError,
+    )
+
+    # One shared secret for both VMs. The coordinator's ROUTER and both
+    # workers derive their ZMQ CURVE keypairs from it, so there are no key
+    # files to ship; it is the same variable the HTTP API uses. Generated
+    # per run here -- in production, set it yourself and keep it.
+    api_token = os.environ.get("MADDENING_API_TOKEN") or secrets.token_urlsafe(32)
 
     project_root = os.path.dirname(os.path.abspath(__file__))
     while project_root != "/" and not os.path.exists(
@@ -179,10 +315,12 @@ def main():
         run="echo 'VM ready'; sleep 7200",
         workdir=project_root,
         ports=[8000, 5580, 5555, 5556],  # API, coordinator, ZMQ data
+        envs={"MADDENING_API_TOKEN": api_token},
     )
 
     launcher = CloudLauncher()
     jobs: dict[str, CloudJob] = {}
+    all_ok = False
 
     try:
         # --- Phase 1: Launch rank-0 ---
@@ -223,17 +361,9 @@ def main():
         print("=" * 60)
 
         # Generate coordinator script with embedded values (no env vars needed)
-        edges_list = [{
-            "source": "flow", "target": "structure",
-            "source_field": "pressure", "target_field": "load",
-        }, {
-            "source": "structure", "target": "flow",
-            "source_field": "displacement", "target_field": "wall_bc",
-        }]
-
         coord_script = COORDINATOR_SCRIPT_TEMPLATE.format(
-            expected_json=json.dumps(["flow", "structure"]),
-            edges_json=json.dumps(edges_list),
+            expected_json=json.dumps(WORKERS),
+            edges_json=json.dumps(EDGES),
             port=5580,
         )
         jobs["flow"].ssh_run(
@@ -434,6 +564,9 @@ def main():
                 except Exception as e:
                     print(f"  {name}: teardown failed ({e})")
             print("Done.")
+
+    if not all_ok:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

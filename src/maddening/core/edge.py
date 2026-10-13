@@ -8,11 +8,44 @@ optionally applying *transform* first."
 ``transform``, if provided, must be a JAX-traceable pure function.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Any, Callable, Optional
+
+import jax
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
+
+
+# Every :class:`EdgeSpec` field, mapped to the
+# ``GraphManager.add_edge`` keyword that restores it.  Anything putting a
+# saved edge back into a graph builds its call from this table, through
+# :meth:`EdgeSpec.add_edge_kwargs`, instead of passing arguments
+# positionally: a positional re-add that stopped at ``transform`` left
+# ``add_edge``'s four remaining parameters on their defaults, so every
+# ``replace_node`` reset ``additive`` to ``False``, both units to ``None``
+# and ``mapping`` to ``None``.  Nothing errored; an additive boundary
+# input simply measured 3.0 before a swap and 1.0 after it.
+_ADD_EDGE_KWARGS = {
+    "source_node": "source",
+    "target_node": "target",
+    "source_field": "source_field",
+    "target_field": "target_field",
+    "transform": "transform",
+    "additive": "additive",
+    "source_units": "source_units",
+    "target_units": "target_units",
+    "mapping": "mapping",
+    "geometry": "geometry",
+}
+
+# ``ordinal`` is the one field ``add_edge`` does not take: it numbers the
+# mapped edges sharing a field pair and is assigned by counting the ones
+# already in the graph.  A caller re-adding a *set* of edges in their
+# original order gets the original ordinals back; one re-adding a single
+# edge into a graph that still holds its siblings does not, and should
+# check ``key`` afterwards rather than assume.
+_DERIVED_BY_ADD_EDGE = frozenset({"ordinal"})
 
 
 @stability(StabilityLevel.STABLE)
@@ -34,6 +67,11 @@ class EdgeSpec:
     # mapped edges a.v->b.inp are legal); makes ``key`` -- and with it the
     # ``params["mappings"]`` slot -- unique.  Assigned by ``add_edge``.
     ordinal: int = 0
+    # EXPERIMENTAL.  The moving geometry a geometry-dependent ``mapping``
+    # reads: ``(anchor, field)``, a state field of this edge's own source
+    # node (``anchor == "source"``) or target node (``"target"``).  ``None``
+    # for every other edge.  Not part of ``key``.
+    geometry: Optional[tuple[str, str]] = None
 
     @property
     def key(self) -> str:
@@ -43,24 +81,76 @@ class EdgeSpec:
                 f"{self.target_node}.{self.target_field}")
         return base if not self.ordinal else f"{base}#{self.ordinal}"
 
+    def add_edge_kwargs(self) -> dict:
+        """Arguments that re-add this edge with every attribute intact.
+
+        The supported way to put a saved edge back into a graph::
+
+            gm.add_edge(**edge.add_edge_kwargs())
+
+        Returns
+        -------
+        dict
+            Every field of this edge under the
+            :meth:`~maddening.core.graph_manager.GraphManager.add_edge`
+            keyword that restores it.  :attr:`ordinal` is absent:
+            ``add_edge`` assigns it from the mapped edges already on the
+            same field pair.
+
+        Raises
+        ------
+        RuntimeError
+            If this class has grown a field that the table does not
+            name.  Loud is the point: the alternative is the caller
+            silently re-adding the edge with that field on its default.
+
+        Notes
+        -----
+        Derived from this dataclass's own fields rather than written out
+        at each call site, so a tenth field cannot quietly stop being
+        carried across a ``replace_node`` or a surrogate revert the way
+        ``additive``, the units and ``mapping`` did.
+        """
+        unknown = sorted(
+            f.name for f in fields(self)
+            if f.name not in _ADD_EDGE_KWARGS and f.name not in _DERIVED_BY_ADD_EDGE
+        )
+        if unknown:
+            raise RuntimeError(
+                f"EdgeSpec field(s) {unknown} are in neither "
+                f"maddening.core.edge._ADD_EDGE_KWARGS nor "
+                f"_DERIVED_BY_ADD_EDGE, so re-adding this edge would reset "
+                f"them to their defaults.  Add them to one table (and to "
+                f"GraphManager.add_edge if it does not take them)."
+            )
+        return {kwarg: getattr(self, name) for name, kwarg in _ADD_EDGE_KWARGS.items()}
+
     # ------------------------------------------------------------------
     # Serialization helpers
     # ------------------------------------------------------------------
 
     def to_dict(self) -> dict:
-        d = {
+        d: dict[str, Any] = {
             "source_node": self.source_node,
             "target_node": self.target_node,
             "source_field": self.source_field,
             "target_field": self.target_field,
         }
         if self.mapping is not None:
-            describe = getattr(self.mapping, "describe", None)
-            d["mapping"] = describe() if callable(describe) else {
-                "kind": getattr(self.mapping, "kind", type(self.mapping).__name__),
-            }
+            # A factory-built mapping describes itself as its MappingSpec
+            # (kind, hyper-parameters, point references, shape -- never
+            # the weights), which from_dict rebuilds; a mapping class
+            # without a ``describe`` is written as the spec it carries;
+            # anything else can only be named.  GraphManager.to_dict
+            # checks completeness.
+            from maddening.core.coupling.mapping_spec import (  # noqa: PLC0415
+                _mapping_config_dict,
+            )
+            d["mapping"] = _mapping_config_dict(self.mapping)
         if self.ordinal:
             d["ordinal"] = self.ordinal
+        if self.geometry is not None:
+            d["geometry"] = {"anchor": self.geometry[0], "field": self.geometry[1]}
         if self.transform is not None:
             # The registered name reloads through add_edge(transform=str);
             # an unregistered callable can only be named, not rebuilt.
@@ -78,8 +168,60 @@ class EdgeSpec:
         arrow = f"{self.source_node}.{self.source_field} -> {self.target_node}.{self.target_field}"
         if self.mapping is not None:
             arrow += f"  (mapping {self.mapping!r})"
+        if self.geometry is not None:
+            arrow += f"  (geometry {self.geometry[0]}.{self.geometry[1]})"
         if self.transform is not None:
             arrow += f"  (via {self.transform.__qualname__})"
         if self.source_units or self.target_units:
             arrow += f"  [{self.source_units or '?'} -> {self.target_units or '?'}]"
         return f"EdgeSpec({arrow})"
+
+
+def _delivered(edge: EdgeSpec, value, mappings=None, geom=None):
+    """The value *edge* hands its target for *value* read at its source.
+
+    The step's edge rule, in the one place it is written: the interface
+    mapping first (:attr:`EdgeSpec.mapping`, applied with this edge's
+    weights), then the scalar :attr:`EdgeSpec.transform`.  Everything
+    that reads what an edge carries goes through it -- the step's
+    boundary resolution, and the coupling group's interface norm, its
+    float floor and the spectral analysis taken on that norm's reading
+    -- so none of them can measure a value the consuming node never
+    sees.  While the norm applied the transform itself and left the
+    mapping out, a group with a mapped internal edge was judged on the
+    source field's scale: a 9% change of the delivered value read 0.0071
+    of the tolerance.
+
+    Parameters
+    ----------
+    edge : EdgeSpec
+    value
+        What was read at ``edge.source_node``'s ``edge.source_field``.
+    mappings : dict, optional
+        The ``"mappings"`` section of a graph parameter pytree,
+        ``{edge.key: weights}``: the weights the step runs with, which a
+        caller may override per step.  ``None``, or no entry for this
+        edge, uses the mapping's own (``Mapping.apply(value, None)``).
+    geom : array, optional
+        The geometry a geometry-dependent mapping reads
+        (:attr:`EdgeSpec.geometry`), at the time level the caller resolved
+        it.  Passed to the mapping only for an edge that has a geometry;
+        every other edge makes the two-argument call it always made.
+
+    Returns
+    -------
+    The delivered value: what ``boundary_inputs[edge.target_field]``
+    receives (or is summed into, for an additive edge).
+    """
+    if edge.mapping is not None:
+        weights = None
+        if mappings is not None:
+            weights = mappings.get(edge.key)
+        with jax.named_scope("edge:mapping"):
+            # One application of the rule: an edge without a geometry
+            # makes the two-argument call it always made.
+            read = () if edge.geometry is None else (geom,)
+            value = edge.mapping.apply(value, weights, *read)
+    if edge.transform is not None:
+        value = edge.transform(value)
+    return value

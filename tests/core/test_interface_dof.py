@@ -345,11 +345,20 @@ class TestInterfaceOverrideNonCoupled:
         gm.run_scan(500, external_inputs=ext)
         state_b = gm.get_node_state("rod_b")
 
-        # With standard Dirichlet enforcement (no coupling group),
-        # rod_b's left end should be pinned to rod_a's T[-1] = 100
+        # With standard Dirichlet enforcement (no coupling group), the
+        # datum from rod_a drives rod_b's left END.  rod_b's first CELL
+        # sits half a cell inside it, and on a 10-cell rod relaxing
+        # between 100 and 0 the steady profile puts it near 95% of the
+        # way to the boundary value -- warm, but not pinned to it.
+        # Before 0.4.0 the cell was overwritten with the datum and read
+        # exactly 100 (MADD-ANO-007).
         T_b_left = float(state_b["temperature"][0])
-        assert T_b_left > 90.0, (
-            f"rod_b left end is {T_b_left}, expected ~100 from Dirichlet"
+        assert 50.0 < T_b_left < 100.0, (
+            f"rod_b left end is {T_b_left}, expected it to be driven "
+            f"towards rod_a's 100 without being pinned to it"
+        )
+        assert T_b_left > float(state_b["temperature"][1]), (
+            "the cell nearest the driven boundary should be the warmest"
         )
 
 

@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Benchmark multi-GPU vs single-GPU Jacobi coupling on real hardware.
 
-Provisions a 2xA100-80GB instance on RunPod, runs coupled simulations
+Provisions a 2x RTX 4090 instance on RunPod, runs coupled simulations
 with varying node state sizes, measures the crossover point where
 multi-GPU device placement starts to pay off.
 
 JIT warmup is accounted for: 10 warmup steps before timing.
 
 Usage:
-    python 09_real_gpu_benchmark.py
-    python 09_real_gpu_benchmark.py --keep
+    python -m maddening.examples.cloud.multigpu.09_real_gpu_benchmark
+    python -m maddening.examples.cloud.multigpu.09_real_gpu_benchmark --keep
 """
 
 import argparse
@@ -29,14 +29,14 @@ from maddening.cloud.launcher import (
 
 INSTALL_CMD = (
     "pip install -q --root-user-action=ignore"
-    ' "jax[cuda12]>=0.4,<0.6" "numpy>=1.24" "pyyaml>=6.0"'
+    ' "jax[cuda12]>=0.10,<0.13" "numpy>=1.24" "pyyaml>=6.0"'
     " && [ -d ~/sky_workdir/src ]"
     " && pip install -q --root-user-action=ignore -e ~/sky_workdir"
     " ; echo INSTALL_DONE"
 )
 
 BENCHMARK_SCRIPT = r"""
-import json, time, warnings, sys
+import json, time, sys
 import jax
 import jax.numpy as jnp
 
@@ -85,9 +85,7 @@ for n_cells in [10, 50, 100, 500, 1000, 5000]:
             max_iterations=5, tolerance=1e-6,
             iteration_mode="jacobi",
         )
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            gm.compile()
+        gm.compile()
         return gm
 
     n_steps = 200

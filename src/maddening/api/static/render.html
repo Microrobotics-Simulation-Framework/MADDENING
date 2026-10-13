@@ -130,6 +130,9 @@ body.fullscreen:hover #hud { opacity: 1; }
   <button class="ctrl-btn" id="btn-fullscreen" onclick="toggleFullscreen()">Fullscreen</button>
 </div>
 
+<!-- Bearer token for a non-loopback server: wraps fetch() and builds
+     the WebSocket subprotocols. No-op on a loopback bind. -->
+<script src="/viz/auth.js"></script>
 <script>
 const BASE = window.location.origin;
 let ws = null;
@@ -149,7 +152,7 @@ let configSendTimer = null;
 
 function connect() {
   const wsUrl = BASE.replace(/^http/, 'ws') + '/ws/render';
-  ws = new WebSocket(wsUrl);
+  ws = mdWebSocket(wsUrl);
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {

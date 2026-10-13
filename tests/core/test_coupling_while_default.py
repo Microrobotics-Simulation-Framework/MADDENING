@@ -25,6 +25,25 @@ from maddening.nodes.heat import HeatNode
 from maddening.nodes.spring import SpringDamperNode
 
 
+def _group_kw(**group_kw) -> dict:
+    """The fixtures' group settings, minus any the chosen norm ignores.
+
+    ``tolerance=1e-8`` is the fixture default because these graphs are
+    held against the legacy ``fori`` path under the L2 norm, which reads
+    it.  ``"mixed"`` and ``"interface"`` test a residual already scaled
+    by ``atol`` / ``rtol`` against a fixed threshold of 1.0 and never
+    read ``tolerance``, so carrying the default into those cells put a
+    dead number in the group -- which ``CouplingGroup`` now warns about.
+    A ``tolerance`` a test names itself is passed through regardless;
+    dropping that one would hide the setting rather than the warning.
+    """
+    kw = dict(max_iterations=30, tolerance=1e-8)
+    kw.update(group_kw)
+    if kw.get("convergence_norm", "l2") != "l2" and "tolerance" not in group_kw:
+        kw.pop("tolerance")
+    return kw
+
+
 def _springs(**group_kw) -> GraphManager:
     gm = GraphManager()
     gm.add_node(SpringDamperNode(
@@ -37,8 +56,31 @@ def _springs(**group_kw) -> GraphManager:
     ))
     gm.add_edge("spring_a", "spring_b", "position", "anchor_position")
     gm.add_edge("spring_b", "spring_a", "position", "anchor_position")
-    kw = dict(max_iterations=30, tolerance=1e-8)
-    kw.update(group_kw)
+    kw = _group_kw(**group_kw)
+    gm.add_coupling_group(["spring_a", "spring_b"], **kw)
+    return gm
+
+
+def _slow_springs(**group_kw) -> GraphManager:
+    """The same 2-cycle, coupled strongly enough to still be iterating.
+
+    ``_springs`` is so weakly coupled (``k * dt**2 / m = 5e-5``) that
+    its second pass lands on the fixed point to the last bit of
+    float32: its residual is *exactly* zero from pass two on.  That is
+    fine for "does it converge", but it cannot express "this group ran
+    out of iterations" -- a group whose returned state has a zero
+    residual has converged, whatever the cap said.  This one needs six
+    passes at 1e-12, so a cap of two genuinely leaves it short.
+    """
+    gm = GraphManager()
+    for name, pos in (("spring_a", 0.0), ("spring_b", 2.0)):
+        gm.add_node(SpringDamperNode(
+            name=name, timestep=0.05, stiffness=100.0, damping=1.0,
+            mass=1.0, rest_length=1.0, initial_position=pos,
+        ))
+    gm.add_edge("spring_a", "spring_b", "position", "anchor_position")
+    gm.add_edge("spring_b", "spring_a", "position", "anchor_position")
+    kw = _group_kw(**group_kw)
     gm.add_coupling_group(["spring_a", "spring_b"], **kw)
     return gm
 
@@ -54,8 +96,7 @@ def _rods(**group_kw) -> GraphManager:
                 transform=lambda T: T[-1])
     gm.add_edge("rod_b", "rod_a", "temperature", "right_temperature",
                 transform=lambda T: T[0])
-    kw = dict(max_iterations=30, tolerance=1e-8)
-    kw.update(group_kw)
+    kw = _group_kw(**group_kw)
     gm.add_coupling_group(["rod_a", "rod_b"], **kw)
     return gm
 
@@ -137,16 +178,29 @@ def test_exits_early_and_reports_convergence():
     assert d["residual"] <= 1e-6
 
 
+# ``_slow_springs`` is past MADD-ANO-098's limit (c < k*dt at dt = 0.05),
+# so its compile warns.  The test is about a group that runs out of passes.
+@pytest.mark.filterwarnings("ignore:.*MADD-ANO-098:UserWarning")
 def test_unconverged_is_reported_not_raised_by_default():
-    gm = _springs(max_iterations=2, tolerance=1e-12, diagnostics=True)
+    gm = _slow_springs(max_iterations=2, tolerance=1e-12, diagnostics=True)
     gm.step()
     d = gm.coupling_diagnostics()["spring_a+spring_b"]
     assert d["converged"] is False
-    assert d["iterations"] == 1
+    assert d["residual"] > 1e-12
+    # A group that exhausted its budget reports the budget: two passes
+    # ran and two are reported, so ``iterations >= max_iterations``
+    # detects the cap.  This used to read ``1`` -- the while loop's body
+    # count, one short of the passes -- which is the defect, not the
+    # contract; ``fori`` always reported ``2`` here.
+    assert d["iterations"] == 2
 
 
+# ``_slow_springs`` is past MADD-ANO-098's limit (c < k*dt at dt = 0.05),
+# so its compile warns.  The test is about a group that runs out of passes.
+@pytest.mark.filterwarnings("ignore:.*MADD-ANO-098:UserWarning")
 def test_strict_convergence_raises_at_cap():
-    gm = _springs(max_iterations=2, tolerance=1e-12, strict_convergence=True)
+    gm = _slow_springs(max_iterations=2, tolerance=1e-12,
+                       strict_convergence=True)
     with pytest.raises(Exception, match="without converging"):
         gm.step()
 
@@ -157,9 +211,17 @@ def test_strict_convergence_silent_when_converged():
     assert bool(jnp.isfinite(s["spring_a"]["position"]))
 
 
+# Per push: tests/core/test_coupling_while_default.py::test_forward_and_reverse_ad_through_previously_excluded_configs (its other four
+# configurations) and tests/property/test_coupling_adjoint_solve.py::test_grad_through_the_default_coupling_solver_never_raises,
+# which differentiates a diagnostics group.
 @pytest.mark.parametrize("cfg", [
     dict(acceleration="none", iteration_mode="jacobi"),
-    dict(acceleration="none", diagnostics=True),
+    # Slow-marked: the diagnostics machinery compiled three times (step,
+    # gradient, JVP), 5-7 s on the CI runner.  Reverse mode through a
+    # diagnostics=True group is checked on every push by
+    # tests/property/test_coupling_adjoint_solve.py.
+    pytest.param(dict(acceleration="none", diagnostics=True),
+                 marks=pytest.mark.slow),
     dict(acceleration="fixed", relaxation=0.7),
     dict(acceleration="iqn-ils"),
     dict(acceleration="iqn-imvj", jacobian_reuse=3),
@@ -184,9 +246,52 @@ def test_forward_and_reverse_ad_through_previously_excluded_configs(cfg):
     assert float(g) != 0.0
 
 
-def test_step_cost_does_not_scale_with_max_iterations():
+# Slow-marked (still run by slow-tests.yml): three rigid-body groups compiled
+# for three static caps, 8-10 s on the CI runner.  Early exit itself is
+# checked on every push by ``test_exits_early_and_reports_convergence``.
+# Per push: tests/core/test_coupling_while_default.py::test_exits_early_and_reports_convergence
+@pytest.mark.slow
+def test_the_passes_run_do_not_scale_with_max_iterations():
     """Early exit: raising the cap on an easily converging group must not
-    raise the per-step cost proportionally (the fori path was linear)."""
+    raise the work done (the fori path ran the cap out every step).
+
+    Asserted on the pass count rather than the clock.  The claim is that
+    the solver stops when it has converged, and the reported iteration
+    count *is* that claim -- the fori path this replaced reports the cap,
+    so a regression to it fails here.  A wall-clock ratio measured the
+    same thing indirectly and could be defeated by a busy runner: on a
+    shared CI machine it once read 3.27x against a 3.0x bound while the
+    idle-box ratio is 0.97-1.31.
+    """
+    counts = {}
+    for max_iterations in (3, 60, 200):
+        gm = _rods(max_iterations=max_iterations, tolerance=1e-6,
+                   diagnostics=True)
+        for _ in range(3):
+            gm.step()
+        diag = gm.coupling_diagnostics()
+        assert diag, "the group reports no diagnostics"
+        for key, value in diag.items():
+            assert value["converged"], (max_iterations, key, value)
+            counts.setdefault(key, {})[max_iterations] = int(value["iterations"])
+
+    for key, by_cap in counts.items():
+        assert len(set(by_cap.values())) == 1, (key, by_cap)
+        # Guard the assertion itself: a group that exits on its first pass
+        # would satisfy cap-invariance without exercising early exit.
+        assert 1 < next(iter(by_cap.values())) < 3, (key, by_cap)
+
+
+# Per push: tests/core/test_coupling_while_default.py::test_exits_early_and_reports_convergence (early exit, which is what keeps the cost flat).
+@pytest.mark.slow
+def test_step_cost_does_not_scale_with_max_iterations():
+    """The same claim on the clock, kept as a coarse smoke check.
+
+    Marked slow and given a wide bound because it measures ~1e-4 s per
+    step, where one scheduler hiccup dominates the number.  It is here to
+    catch a catastrophic regression, not to measure anything; the precise
+    claim is tested above.
+    """
     import time
 
     def timed(max_iterations):
@@ -200,4 +305,4 @@ def test_step_cost_does_not_scale_with_max_iterations():
         return (time.perf_counter() - t0) / 20
 
     t_small, t_large = timed(3), timed(60)
-    assert t_large < 3.0 * t_small, (t_small, t_large)
+    assert t_large < 8.0 * t_small, (t_small, t_large)

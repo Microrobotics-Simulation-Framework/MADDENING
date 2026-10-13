@@ -1,0 +1,22 @@
+== eager vs jit ==
+ max |c_eager - c_jit| = 0.0
+ masks equal: True
+
+== same jit, different active set (theta far apart) ==
+ n_active: 8 8  masks differ: False
+ jit matches eager: 0.0 0.0
+
+== vmap over theta with different active sets per batch element ==
+  theta=0.10 n_active vmap=8 loop=8 max|dc|=6.505e-19 masks_equal=True
+  theta=0.42 n_active vmap=8 loop=8 max|dc|=2.168e-19 masks_equal=True
+  theta=0.90 n_active vmap=8 loop=8 max|dc|=1.084e-19 masks_equal=True
+
+== scan ==
+ scan vs python loop max|dy| = 1.734723475976807e-18
+
+== grad through scan ==
+ grad = -0.013530711461013646
+
+== eager host-sync cost of the off-mask finite check ==
+ eager update with diagnostics ON  995.42 ms
+ eager update with diagnostics OFF 969.03 ms  (wall-clock, shared machine)

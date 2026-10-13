@@ -1,0 +1,23 @@
+Under jax_enable_x64, does a parameter change below one float32 ulp move the state?
+
+  RigidBodyNode.inertia  (update)                            delta= 1.0e-08 rel= 1.0e-08  bit-identical=True
+  RigidBodyNode.inertia  (update)                            delta= 1.0e-06 rel= 1.0e-06  bit-identical=False
+  RigidBodyNode.gravity  (update)                            delta= 1.0e-07 rel=-1.0e-08  bit-identical=False
+  RigidBodyNode.gravity  (update)                            delta= 1.0e-05 rel=-1.0e-06  bit-identical=False
+  RigidBody2DNode.gravity (update)  [TODO FOLLOW-UP C]       delta= 1.0e-07 rel=-1.0e-08  bit-identical=False
+  BallNode.gravity (update -- NOT cast, control)             delta= 1.0e-07 rel=-1.0e-08  bit-identical=False
+  BallNode.gravity (derivatives -- cast at ball.py:152)      delta= 1.0e-07 rel=-1.0e-08  bit-identical=False
+  HeartPumpNode.backpressure (MADD-ANO-013, registered)      delta= 1.0e-06 rel= 1.0e-08  bit-identical=True
+
+HeatNode dtype pinning under x64 (heat.py:565, :434, :438):
+  initial_state()['temperature'].dtype = float32   (x64 enabled: True)
+  static_data['grid_x'].value.dtype     = float32
+  non-uniform grid_x dtype              = float32
+
+  HeatNode non-uniform grid_points (grid_x float32)          delta= 1.0e-08 rel= 1.0e-08  bit-identical=True
+
+RigidBodyNode: float64 ladder on the ANGULAR dof, exact solution omega(t) = torque/I * t, so the discretisation error is ZERO and
+everything left is the float32 inertia cast:
+   N=   100  omega=2.999999910593  exact=3.000000000000  rel err=2.980e-08
+   N=  1000  omega=2.999999910593  exact=3.000000000000  rel err=2.980e-08
+   N= 10000  omega=2.999999910593  exact=3.000000000000  rel err=2.980e-08

@@ -91,6 +91,9 @@ def test_switching_input_shapes_recompiles_correctly():
         np.testing.assert_allclose(np.asarray(a["f"]), np.asarray(b["f"]), rtol=1e-5, atol=1e-6)
 
 
+# Per push: one check of the battery on the same wrapper,
+# tests/cloud/multigpu/test_verify_node_check_on_a_sharded_wrapper.py::test_a_verify_node_check_passes_on_the_sharded_wrapper
+@pytest.mark.slow  # a verify_node battery through shard_map: 8-11 s on CI
 def test_verify_node_battery_passes_on_the_sharded_wrapper():
     """``verify_node`` samples every declared boundary input at its
     declared (grid) shape; the wrapper must accept that like the inner."""
@@ -99,8 +102,12 @@ def test_verify_node_battery_passes_on_the_sharded_wrapper():
     mesh = create_device_mesh(shape=(4,))
     sh = ShardedStencilNode(_lbm(), mesh, axis_map={"devices": 1}, boundary="periodic")
     p = (0.3, 0.4)
+    # ``verify_node`` carries its own Hypothesis settings, so the profile in
+    # tests/conftest.py does not reach it; the battery size is spelled out at
+    # the house floor of 20 rather than left at the 200 default, because one
+    # example runs the whole battery through a 4-device ``shard_map``.
     res = verify_node(
-        sh, bounds={"f": (0.02, 0.2), "wall_mask": (0.0, 1.0)}, max_examples=6,
+        sh, bounds={"f": (0.02, 0.2), "wall_mask": (0.0, 1.0)}, max_examples=20,
         dt_range=(1.0, 1.0), derandomize=True,
         boundary_bounds={"inlet_pressure": p, "outlet_pressure": p,
                          "body_force": (-1e-3, 1e-3), "wall_mask_update": (0.0, 1.0)},
@@ -193,8 +200,10 @@ def _slab_index(layout, device, g):
     return layout.n_local_max + int(pos[0])
 
 
-def _ring_setup(n=16, n_devices=4):
-    pa = (np.arange(n) * n_devices // n).astype(np.int32)      # contiguous blocks
+def _ring_setup(n=16, n_devices=4, pa=None):
+    if pa is None:
+        pa = (np.arange(n) * n_devices // n).astype(np.int32)  # contiguous blocks
+    pa = np.asarray(pa, dtype=np.int32)
     edges = np.array([[i, (i + 1) % n] for i in range(n)], dtype=np.int32)
     layout = build_unstructured_partition(partition_assignment=pa, edges=edges,
                                           n_devices=n_devices)
@@ -228,3 +237,166 @@ def test_unstructured_global_order_input_is_refused():
         sharded.update(sharded.initial_state(), {"source": jnp.ones(14, jnp.float32)}, 1.0)
     # a scalar is still fine (replicated)
     sharded.update(sharded.initial_state(), {"gain": jnp.float32(2.0)}, 1.0)
+
+    # Balanced: every shard full, so the global count *is* the layout's row
+    # count and the length check above cannot fire.  An interleaved
+    # partition read the global-order source [1..8] as partition layout --
+    # [1, 5, 2, 6, 3, 7, 4, 8] -- silently.  Refused: the shape cannot say
+    # which order an array is in, so a partition-layout array of the same
+    # shape is refused too.
+    pa = (np.arange(8) % 2).astype(np.int32)
+    node, sharded, layout = _ring_setup(n=8, n_devices=2, pa=pa)
+    assert layout.n_devices * layout.n_local_max == 8
+    source = np.arange(1, 9, dtype=np.float32)
+    in_layout = partition_value(value=source, layout=layout).reshape(-1)
+    for given in (source, in_layout):
+        with pytest.raises(ValueError, match="cannot tell a global-order array"):
+            sharded.update(sharded.initial_state(), {"source": jnp.asarray(given)}, 1.0)
+    sharded.update(sharded.initial_state(), {"gain": jnp.float32(2.0)}, 1.0)
+
+
+def _stepped_with_source(node, sharded, source_global, source_given, steps=3):
+    ref, st = node.initial_state(), sharded.initial_state()
+    for _ in range(steps):
+        ref = node.update(ref, {"source": jnp.asarray(source_global)}, 1.0)
+        st = sharded.update(st, {"source": jnp.asarray(source_given)}, 1.0)
+    return np.asarray(sharded.gather_global(st)["x"]), np.asarray(ref["x"])
+
+
+def test_a_balanced_partition_in_global_order_takes_the_per_cell_input():
+    """Contiguous ascending blocks, every shard full: global order and
+    partition layout are the same array, so there is nothing to refuse."""
+    node, sharded, layout = _ring_setup(n=16, n_devices=4)
+    source = np.random.default_rng(5).standard_normal(16).astype(np.float32)
+    assert np.array_equal(partition_value(value=source, layout=layout).reshape(-1), source)
+    got, want = _stepped_with_source(node, sharded, source, source)
+    np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-6)
+
+
+def test_renumbering_the_cells_as_the_refusal_says_makes_the_input_readable():
+    """The remedy the refusal names: relabel the cells in the order
+    ``np.argsort(partition_assignment, kind='stable')``.  That gives the
+    interleaved assignment above contiguous ascending blocks, and a ring
+    numbered that way reads its per-cell input correctly (both spellings
+    of it are now one array)."""
+    pa = (np.arange(8) % 2).astype(np.int32)
+    order = np.argsort(pa, kind="stable")             # new id -> old id
+    renumbered = pa[order]
+    assert np.array_equal(renumbered, np.repeat(np.arange(2), 4))
+    node, sharded, layout = _ring_setup(n=8, n_devices=2, pa=renumbered)
+    source_old_ids = np.arange(1, 9, dtype=np.float32)
+    source = source_old_ids[order]                    # the same values, new ids
+    got, want = _stepped_with_source(node, sharded, source, source)
+    np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-6)
+
+
+def test_unstructured_state_not_in_partition_layout_is_refused():
+    """``update`` steps a state in partition layout (``initial_state``'s).
+    A global-order state on a padded partition has another row count and
+    used to reach the shard_map, which split it as if it were padded."""
+    node, sharded, layout = _ring_setup(n=14)
+    with pytest.raises(ValueError, match=r"state field 'x' has shape \(14,\).*partition layout"):
+        sharded.update(node.initial_state(), {}, 1.0)
+    sharded.update(sharded.initial_state(), {}, 1.0)
+
+
+# ---------------------------------------------------------------------------
+# MADD-ANO-035 (open): a global-order *state* on a balanced partition
+# ---------------------------------------------------------------------------
+# The boundary-input refusal above has no counterpart for the state.  On a
+# balanced partition (every shard full, n_devices * n_local_max == n_global)
+# whose cells are not in global order, a global-order state has exactly the
+# partition-layout shape, so ``set_node_state`` stores it and the wrapper
+# reads it as partition layout: each cell steps from another cell's value,
+# with no error.  Refusing it the way the boundary input is refused would
+# refuse the documented partition-layout spelling too (same shape), so the
+# fix needs an explicit layout on the write and is deferred to 0.5.0.
+
+_BALANCED_PA = (np.arange(8) % 2).astype(np.int32)      # interleaved, 2 x 4
+_GLOBAL_ORDER_X = np.arange(1, 9, dtype=np.float32)     # x = [1..8], global order
+
+
+def _balanced_interleaved_graph(pa=_BALANCED_PA):
+    from maddening.core.graph_manager import GraphManager
+
+    node, sharded, layout = _ring_setup(n=8, n_devices=2, pa=pa)
+    assert layout.n_devices * layout.n_local_max == 8          # balanced
+    gm = GraphManager()
+    gm.add_node(sharded)
+    gm.compile()
+    return node, sharded, layout, gm
+
+
+def _stepped_global(sharded, gm):
+    gm.step()
+    return np.asarray(sharded.gather_global(gm.get_node_state("ring"))["x"])
+
+
+def test_a_global_order_state_on_a_balanced_interleaved_partition_is_read_as_partition_layout():
+    """MADD-ANO-035, pinned.  Written in global order, ``x = [1..8]`` is
+    stored without a word and read back -- by ``gather_global``, and by the
+    step -- as ``[1, 5, 2, 6, 3, 7, 4, 8]``: row ``r`` of the array is taken
+    to be cell ``local_global_ids`` flattened at ``r`` (cells 0, 2, 4, 6 on
+    device 0, then 1, 3, 5, 7).  The step then advances *that* state, so
+    the result is the unsharded node's step from the permuted cells, not
+    from the state that was written."""
+    node, sharded, layout, gm = _balanced_interleaved_graph()
+    gm.set_node_state("ring", {"x": jnp.asarray(_GLOBAL_ORDER_X)})    # no error
+
+    read_as = np.asarray(sharded.gather_global(gm.get_node_state("ring"))["x"])
+    np.testing.assert_array_equal(read_as, [1, 5, 2, 6, 3, 7, 4, 8])
+
+    got = _stepped_global(sharded, gm)
+    from_permuted = np.asarray(node.update({"x": jnp.asarray(read_as)}, {}, 1.0)["x"])
+    intended = np.asarray(node.update({"x": jnp.asarray(_GLOBAL_ORDER_X)}, {}, 1.0)["x"])
+    np.testing.assert_allclose(got, from_permuted, rtol=1e-6, atol=1e-6)
+    # The fixture can express the defect: the two readings step apart.
+    assert np.max(np.abs(from_permuted - intended)) > 1.0
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason=(
+        "MADD-ANO-035 (open): on a balanced partition whose cells are not in "
+        "global order, a global-order state has the partition-layout shape and "
+        "is read as partition layout.  Deferred to 0.5.0 (an explicit layout "
+        "on the state write).  A fix that reads it correctly turns this into "
+        "an XPASS, a refusal into an error; either way, update MADD-ANO-035 "
+        "and the pin above."
+    ),
+)
+def test_a_global_order_state_on_a_balanced_partition_steps_the_cells_it_names():
+    node, sharded, layout, gm = _balanced_interleaved_graph()
+    gm.set_node_state("ring", {"x": jnp.asarray(_GLOBAL_ORDER_X)})
+    got = _stepped_global(sharded, gm)
+    intended = np.asarray(node.update({"x": jnp.asarray(_GLOBAL_ORDER_X)}, {}, 1.0)["x"])
+    np.testing.assert_allclose(got, intended, rtol=1e-6, atol=1e-6)
+
+
+def test_the_workaround_a_state_converted_with_partition_value_steps_the_cells_it_names():
+    """The first workaround: convert a global-order state to partition
+    layout with ``partition_value`` (and flatten the device axis) before
+    writing it."""
+    node, sharded, layout, gm = _balanced_interleaved_graph()
+    in_layout = partition_value(value=_GLOBAL_ORDER_X, layout=layout).reshape(-1)
+    assert not np.array_equal(in_layout, _GLOBAL_ORDER_X)        # a real permutation
+    gm.set_node_state("ring", {"x": jnp.asarray(in_layout)})
+    got = _stepped_global(sharded, gm)
+    intended = np.asarray(node.update({"x": jnp.asarray(_GLOBAL_ORDER_X)}, {}, 1.0)["x"])
+    np.testing.assert_allclose(got, intended, rtol=1e-6, atol=1e-6)
+
+
+def test_the_workaround_renumbered_cells_read_a_global_order_state_correctly():
+    """The second workaround: renumber the cells so that each device owns a
+    contiguous ascending block (``np.argsort(partition_assignment,
+    kind="stable")``).  Global order and partition layout are then the same
+    array, and a global-order state steps the cells it names."""
+    order = np.argsort(_BALANCED_PA, kind="stable")              # new id -> old id
+    node, sharded, layout, gm = _balanced_interleaved_graph(pa=_BALANCED_PA[order])
+    state = _GLOBAL_ORDER_X[order]                               # same values, new ids
+    assert np.array_equal(partition_value(value=state, layout=layout).reshape(-1), state)
+    gm.set_node_state("ring", {"x": jnp.asarray(state)})
+    got = _stepped_global(sharded, gm)
+    intended = np.asarray(node.update({"x": jnp.asarray(state)}, {}, 1.0)["x"])
+    np.testing.assert_allclose(got, intended, rtol=1e-6, atol=1e-6)

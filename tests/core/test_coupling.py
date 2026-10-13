@@ -169,6 +169,26 @@ class TestAutoCouple:
         assert len(groups) == 1
         assert groups[0].max_iterations == 7  # new, not the old 3
 
+    def test_auto_couple_dirties_the_graph_even_when_it_finds_nothing(self):
+        """Clearing the groups is itself a change to the compiled step.
+
+        The flag used to be a side effect of ``add_coupling_group``, so
+        an ``auto_couple`` that created no groups left the graph
+        describing itself as uncoupled while the compiled step was still
+        the coupled one -- ``coupling_diagnostics()`` reporting nothing
+        for a step that was still writing diagnostics, and a ``to_dict``
+        taken there disagreeing with the running program.
+        """
+        gm = _make_bidirectional_springs()
+        gm.add_coupling_group(["spring_a", "spring_b"])
+        gm.compile()
+        assert not gm._dirty
+
+        gm.remove_edge("spring_b", "spring_a", "position", "anchor_position")
+        gm.compile()
+        assert gm.auto_couple() == []          # acyclic now
+        assert gm._dirty
+
 
 # ==================================================================
 # TestCouplingValidation
@@ -202,6 +222,18 @@ class TestCouplingValidation:
             i.startswith("WARNING") and "staggering" in i
             for i in cycle_issues
         )
+
+    @pytest.mark.parametrize("mode, name", [("gauss-seidel", "Gauss-Seidel"),
+                                            ("jacobi", "Jacobi")])
+    def test_cycle_covered_by_group_names_the_groups_iteration_mode(self, mode, name):
+        """The line for a loop a group iterates names the schedule of that group.
+
+        It said "(Gauss-Seidel)" of every group, a Jacobi one included.
+        """
+        gm = _make_bidirectional_springs()
+        gm.add_coupling_group(["spring_a", "spring_b"], iteration_mode=mode)
+        assert gm.validate() == [
+            f"INFO: cycle spring_a -> spring_b handled by iterative coupling ({name})."]
 
     def test_uncovered_cycle_advisory(self):
         """v0.2.1: an uncovered cycle is reported as INFO (not WARNING),
@@ -303,6 +335,9 @@ class TestGaussSeidel:
             "Coupled and staggered solutions should differ"
         )
 
+    # Undamped and stiff: past MADD-ANO-098's limit (c < k*dt), so
+    # compile() warns.  The test is about the capped iteration completing.
+    @pytest.mark.filterwarnings("ignore:.*MADD-ANO-098:UserWarning")
     def test_max_iterations_reached(self):
         """With very few iterations the solver still completes."""
         gm = _make_bidirectional_springs(dt=0.01, k=1000.0, c=0.0,
@@ -329,6 +364,9 @@ class TestGaussSeidel:
         assert jnp.isfinite(state["spring_a"]["position"])
         assert jnp.isfinite(state["spring_b"]["position"])
 
+    # The ten-pass pair is past MADD-ANO-098's limit (c < k*dt: it grows by
+    # 1.005 a step), so its compile warns.  The test is about the pass cap.
+    @pytest.mark.filterwarnings("ignore:.*MADD-ANO-098:UserWarning")
     def test_single_iteration_differs_from_multi(self):
         """max_iterations=1 and max_iterations=10 should give different
         results when convergence needs more than 1 pass.
@@ -356,17 +394,26 @@ class TestGaussSeidel:
         )
 
     def test_convergence_with_tolerance(self):
-        """Tighter tolerance should give more accurate results."""
+        """Tighter tolerance should give more accurate results.
+
+        The reference is the *same* timestep solved to a much tighter
+        coupling criterion, not a finer timestep.  A finer-dt reference
+        measures time-discretisation error, which on this fixture is
+        ~8 against positions of ~24 -- three hundred times the coupling
+        error the tolerance controls -- so which tolerance lands nearer
+        it is luck, and the assertion below held only because both
+        tolerances happened to sit on the same plateau of it.
+        """
         dt = 0.01
         n_steps = 100
         kwargs = dict(dt=dt, k=50.0, c=0.5, pos_a=0.0, pos_b=3.0)
 
-        # Reference: very fine dt
-        ref_kwargs = dict(kwargs)
-        ref_kwargs["dt"] = dt / 50
-        gm_ref = _make_bidirectional_springs(**ref_kwargs)
+        # Reference: the same dt, solved to a far tighter criterion.
+        gm_ref = _make_bidirectional_springs(**kwargs)
+        gm_ref.add_coupling_group(["spring_a", "spring_b"],
+                                  max_iterations=200, tolerance=1e-9)
         gm_ref.compile()
-        ref_state = gm_ref.run_scan(n_steps * 50)
+        ref_state = gm_ref.run_scan(n_steps)
 
         # Loose tolerance
         gm_loose = _make_bidirectional_springs(**kwargs)
@@ -378,7 +425,7 @@ class TestGaussSeidel:
         # Tight tolerance
         gm_tight = _make_bidirectional_springs(**kwargs)
         gm_tight.add_coupling_group(["spring_a", "spring_b"],
-                                     max_iterations=50, tolerance=1e-10)
+                                     max_iterations=50, tolerance=1e-7)
         gm_tight.compile()
         tight_state = gm_tight.run_scan(n_steps)
 
@@ -493,7 +540,10 @@ class TestCouplingWithJAX:
         gm.add_coupling_group(["spring_a", "spring_b"],
                                max_iterations=5, tolerance=1e-6)
         gm.compile()
-        step_fn = gm._build_step_fn()
+        # Jitted: stepped in a Python loop under jax.grad, the bare
+        # step was retraced and compiled primitive by primitive on
+        # every pass (over a hundred compiles for one gradient).
+        step_fn = jax.jit(gm._build_step_fn())
         ext = gm._default_external_inputs()
 
         def loss_fn(init_pos_a):
@@ -573,6 +623,10 @@ class TestCouplingWithJAX:
 class TestCouplingPhysics:
     """Physically meaningful coupled systems."""
 
+    # Undamped, so the iterated pair is past MADD-ANO-098's limit (c < k*dt;
+    # it grows by only 1.000005 a step here) and its compile warns.  The test
+    # is about staying finite.
+    @pytest.mark.filterwarnings("ignore:.*MADD-ANO-098:UserWarning")
     def test_coupled_springs_energy_conservation(self):
         """Two coupled springs with damping should remain stable and finite.
 

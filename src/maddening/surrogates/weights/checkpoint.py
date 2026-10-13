@@ -9,14 +9,19 @@ The format stores each weight array as a separate NPZ entry (``w0``,
 numpy arrays and JSON, ensuring safe cross-platform portability.
 """
 
+from __future__ import annotations
+
 import json
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 from maddening.surrogates.architecture import SurrogateArchitecture
+
+if TYPE_CHECKING:
+    from maddening.surrogates.training.trainer import TrainResult
 
 
 def save_weights(
@@ -84,7 +89,7 @@ def save_weights(
 def load_weights(
     path: str,
     architecture: SurrogateArchitecture,
-    rng_key=None,
+    rng_key: Optional[jax.Array] = None,
 ) -> tuple[Any, dict]:
     """Load surrogate weights from an NPZ file.
 
@@ -133,8 +138,8 @@ def load_weights(
 def load_train_result(
     path: str,
     architecture: SurrogateArchitecture,
-    rng_key=None,
-):
+    rng_key: Optional[jax.Array] = None,
+) -> TrainResult:
     """Load weights and return a ``TrainResult``.
 
     Convenience wrapper around :func:`load_weights` that returns a

@@ -18,8 +18,13 @@ from typing import Any
 
 import jax.numpy as jnp
 
-from maddening.core.node import BoundaryInputSpec, SimulationNode
-from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
+from maddening.core.node import BoundaryInputSpec, SimulationNode, _method_with_params
+from maddening.core.compliance.metadata import (
+    DiscretizationOrder,
+    NodeMeta,
+    StabilityLevel,
+    ValidatedRegime,
+)
 from maddening.core.compliance.stability import stability
 from maddening.core.params import ParamSpec
 
@@ -127,6 +132,19 @@ class RigidBodyNode(SimulationNode):
             "dq/dt = 0.5 * ω_quat ⊗ q; semi-implicit Euler integration"
         ),
         discretization="Semi-implicit Euler (1st-order)",
+        discretization_order=DiscretizationOrder(
+            spatial=None,
+            temporal=1.0,
+            notes=(
+                "Semi-implicit (symplectic) Euler: 1st order globally in "
+                "velocity and angular velocity, measured by MADD-VER-008.  "
+                "No spatial order -- the node integrates an ODE.  Position "
+                "converges at 2nd order for a state-independent force "
+                "because the position update uses the already-updated "
+                "velocity; the declared order is the one that holds for the "
+                "state as a whole."
+            ),
+        ),
         assumptions=(
             "Rigid body (no deformation)",
             "Constant mass and diagonal inertia tensor",
@@ -271,15 +289,20 @@ class RigidBodyNode(SimulationNode):
     # ------------------------------------------------------------------
 
     def derivatives(
-        self, state: dict, boundary_inputs: dict
+        self, state: dict, boundary_inputs: dict, *, params=None,
     ) -> dict[str, Any]:
         """Compute time derivatives of all state fields.
 
-        Returns {field: d_field/dt}.
+        Returns {field: d_field/dt}.  ``mass``, ``inertia`` and
+        ``gravity`` come from the injected ``params`` when the caller
+        supplies them (same ``{**self.params, **params}`` rule as
+        ``update``); ``constraints`` is structural and always read from
+        ``self.params``.
         """
-        mass = self.params["mass"]
-        inertia = jnp.array(self.params["inertia"], dtype=jnp.float32)
-        gravity = jnp.array(self.params["gravity"], dtype=jnp.float32)
+        p = self.params if params is None else {**self.params, **params}
+        mass = p["mass"]
+        inertia = jnp.array(p["inertia"], dtype=jnp.float32)
+        gravity = jnp.array(p["gravity"], dtype=jnp.float32)
         constraints = self.params["constraints"]
 
         vel = state["velocity"]
@@ -332,9 +355,19 @@ class RigidBodyNode(SimulationNode):
         state_old: dict,
         boundary_inputs: dict,
         dt: float,
+        *,
+        params=None,
     ) -> dict[str, Any]:
         """Backward Euler residual: x_new - x_old - dt * f(x_new)."""
-        derivs = self.derivatives(state_new, boundary_inputs)
+        # Through the shared binder: empty ``params`` calls the two-argument
+        # form (a ``derivatives`` override that predates the keyword keeps
+        # working for every caller that passes none), and a non-empty one
+        # for such an override is the documented ValueError naming the
+        # class and the method -- not Python's TypeError from one call
+        # deeper (MADD-ANO-018's refusal contract, one method in).
+        derivs = _method_with_params(self, "derivatives", params)(
+            state_new, boundary_inputs,
+        )
         return {
             k: state_new[k] - state_old[k] - dt * derivs[k]
             for k in derivs

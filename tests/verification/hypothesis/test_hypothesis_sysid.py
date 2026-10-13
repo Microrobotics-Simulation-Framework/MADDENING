@@ -12,6 +12,8 @@ import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -21,7 +23,14 @@ from hypothesis import strategies as st
 
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.spring import SpringDamperNode
-from maddening.sysid import fim, observations_from_history, windowed_loss
+from maddening.sysid import (
+    _PRECISION_WARN_FACTOR,
+    fim,
+    observations_from_history,
+    windowed_loss,
+)
+from maddening.warnings import PrecisionLimitWarning
+from tests.conftest import EXAMPLES_COSTLY
 
 DT = 0.01
 REST = 1.0
@@ -79,6 +88,27 @@ truth_params_st = st.fixed_dictionaries({
 })
 initial_state_st = st.fixed_dictionaries({
     "position": _finite(-5.0, 5.0),
+    "velocity": _finite(-2.0, 2.0),
+})
+# The spring's equilibrium is ``anchor_position + rest_length``, and with no
+# anchor edge that is ``REST``.  A state started *at* equilibrium and at rest
+# never moves, so a rollout from it carries no information about ``(k, c)``
+# and the FIM properties below cannot say anything -- which is what
+# ``assume(_position_variance(obs) > 1e-2)`` was throwing away.  Hypothesis
+# samples exactly 0.0 far more often than a uniform draw would, so that gate
+# fired on 13-31% of draws depending on the test, measured, against ~7% for
+# uniform sampling of the same ranges.
+#
+# Displacing the start by at least half a unit removes the at-rest draws
+# without narrowing the dynamics: the envelope on ``(k, c, m)`` is untouched,
+# so the lightly-damped stiff spring at ``k=49, c=0.125, m=3`` that
+# ``test_crb_is_finite_exactly_where_the_pair_is_identifiable`` documents as
+# its counter-example is still drawn. It does not reach zero rejection --
+# a soft, heavily damped spring still barely moves inside a 20-step window,
+# and constraining *that* away would delete the counter-example. Each test
+# records what it still rejects.
+displaced_state_st = st.fixed_dictionaries({
+    "position": st.one_of(_finite(-5.0, REST - 0.5), _finite(REST + 0.5, 5.0)),
     "velocity": _finite(-2.0, 2.0),
 })
 # Multiplicative perturbation of the fitted constants (stiffness, damping).
@@ -156,18 +186,37 @@ def _sum_sq(tree):
 
 class TestWindowedLoss:
 
+    # Per push: tests/verification/hypothesis/test_hypothesis_sysid.py::TestWindowedLoss::test_zero_at_truth_nonneg_and_finite_elsewhere_at_fixed_draws
+    @pytest.mark.slow  # rollouts or fits compiled per example: over 5 s on CI; still in verify-hypothesis
     @given(truth=truth_params_st, init=initial_state_st, tiling=tiling_st,
            factor=perturb_st)
-    @settings(max_examples=50, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_zero_at_truth_nonneg_and_finite_elsewhere(
         self, single, truth, init, tiling, factor,
     ):
         """At the truth the loss vanishes; away from it it is finite and
         >= 0; its gradient is finite; a >= 20% stiffness error on a
         moving trajectory gives a strictly positive loss."""
-        gm = single
-        n_steps, sample_every, window = tiling
         note(f"truth={truth} init={init} tiling={tiling} factor={factor}")
+        self._check_zero_at_truth(single, truth, init, tiling, factor)
+
+    # The property above at two fixed draws, on every push and both JAX
+    # lanes: one window per sample, and three windows of a subsampled
+    # rollout (``sample_every=2``).  Each tiling is one compile.
+    @pytest.mark.parametrize("truth, init, tiling, factor", [
+        ({"stiffness": 30.0, "damping": 2.0, "mass": 1.0}, {"position": 0.0, "velocity": 1.0},
+         (20, 1, 1), {"stiffness": 1.3, "damping": 0.7}),
+        ({"stiffness": 150.0, "damping": 0.5, "mass": 3.0}, {"position": 4.0, "velocity": -2.0},
+         (24, 2, 4), {"stiffness": 0.6, "damping": 1.8}),
+    ], ids=["a-window-per-sample", "subsampled-three-windows"])
+    def test_zero_at_truth_nonneg_and_finite_elsewhere_at_fixed_draws(
+        self, single, truth, init, tiling, factor,
+    ):
+        self._check_zero_at_truth(single, truth, init, tiling, factor)
+
+    @staticmethod
+    def _check_zero_at_truth(gm, truth, init, tiling, factor):
+        n_steps, sample_every, window = tiling
 
         p_truth = _with_params(gm, "s", truth)
         _set_state(gm, "s", init["position"], init["velocity"])
@@ -204,7 +253,7 @@ class TestWindowedLoss:
     @given(truth=truth_params_st, init=initial_state_st,
            tiling=st.sampled_from([t for t in TILINGS if t[2] == t[0] // t[1]]),
            factor=perturb_st)
-    @settings(max_examples=30, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_single_window_equals_direct_trajectory_loss(
         self, single, truth, init, tiling, factor,
     ):
@@ -241,19 +290,39 @@ class TestWindowedLoss:
                                 - obs["s"]["position"][1:]) ** 2))
         assert np.isclose(windowed, direct, rtol=1e-5, atol=1e-7), (windowed, direct)
 
+    # Per push: tests/verification/hypothesis/test_hypothesis_sysid.py::TestWindowedLoss::test_mask_unconverged_through_coupled_group_at_one_draw
+    @pytest.mark.slow  # rollouts or fits compiled per example: over 5 s on CI; still in verify-hypothesis
     @given(truth=truth_params_st, init=initial_state_st,
            tiling=st.sampled_from([t for t in TILINGS if t[1] == 1 and t[0] <= 60]),
            factor=perturb_st)
-    @settings(max_examples=12, deadline=None)
+    # Absolute, not ``EXAMPLES_COSTLY``: an example builds an IFT-coupled
+    # group, runs a rollout and differentiates a windowed loss through
+    # it -- one JAX compile per (tiling, shape) draw, measured at 3.6 s
+    # an example, the most expensive property in the tree.  At the
+    # costly tier the ``ci`` profile would spend five minutes here
+    # alone, so the depth stays pinned and ``ci`` buys its extra search
+    # from the cheaper properties around it.
+    @settings(max_examples=30, deadline=None)
     def test_mask_unconverged_through_coupled_group(
         self, coupled, truth, init, tiling, factor,
     ):
         """Through an IFT-coupled group: the masked loss is finite,
         non-negative, never exceeds the unmasked one, and its gradient
         w.r.t. both nodes' params is finite."""
-        gm = coupled
-        n_steps, sample_every, window = tiling
         note(f"truth={truth} init={init} tiling={tiling} factor={factor}")
+        self._check_mask_unconverged(coupled, truth, init, tiling, factor)
+
+    # The property above at one fixed draw (the shortest rollout, four
+    # windows), on every push and both JAX lanes.
+    def test_mask_unconverged_through_coupled_group_at_one_draw(self, coupled):
+        self._check_mask_unconverged(
+            coupled, {"stiffness": 80.0, "damping": 1.0, "mass": 2.0},
+            {"position": -1.0, "velocity": 1.5}, (20, 1, 5),
+            {"stiffness": 1.4, "damping": 0.6})
+
+    @staticmethod
+    def _check_mask_unconverged(gm, truth, init, tiling, factor):
+        n_steps, sample_every, window = tiling
 
         p_truth = _with_params(gm, "s", truth)
         p_truth = {**p_truth, "nodes": {**p_truth["nodes"],
@@ -336,10 +405,45 @@ def _residual_fn(gm, obs, base_params, names, node="s", n_steps=None,
     return residual
 
 
+@pytest.mark.filterwarnings(
+    "ignore::maddening.warnings.PrecisionLimitWarning")
 class TestFIM:
+    """``fim`` over generated spring-damper parameters.
+
+    The whole class filters ``PrecisionLimitWarning``, and not as a
+    workaround: position-only data cannot separate a common scaling of
+    ``(k, c, m)``, so for a good share of the generated parameter draws
+    the weakest eigenvalue genuinely sits at the float32 noise floor and
+    ``fim`` correctly says so -- which is also the honest headline about
+    doing identifiability analysis in float32: for this project's
+    canonical problem the rank verdict routinely sits within a small
+    multiple of the floor.
+
+    The multiples first recorded here -- 1.14x, 1.18x, 1.4x, 1.67x and
+    1.97x the cutoff -- were measured against the ``n * eps`` cutoff,
+    which no longer exists; ``rank_rtol`` now carries a ``sqrt(m)`` term
+    and every one of them is quoted against a cutoff that has moved.
+    Re-checked with the filter lifted under the ``ci`` profile, the
+    warning still fires here, at 1.97x on a ``k=9, c=0.125, m=2`` draw
+    over 40 samples (cutoff ``sqrt(40) * eps``), so the filter is still
+    load-bearing and not a leftover.  Fewer draws cross the band than
+    before -- one of the seven tests fired in that run rather than five
+    -- but *which* draw crosses is exactly what is not stable between
+    runs, which is why this stays on the class.
+
+    What these tests assert -- symmetry, PSD-ness, eigenvector
+    directions, the congruence identity, where ``crb`` is finite -- are
+    statements about the *matrix*, and the warning is about the rank
+    verdict read off it.  Marking the class rather than the methods
+    because the generators are shared and which draw crosses the band is
+    not stable between runs; a per-method mark left one test to fail on
+    a later seed.  Every assertion *about* the warning lives in
+    :class:`TestPrecisionLimitedRank`, which does not filter it.
+    """
+
 
     @given(truth=truth_params_st, init=initial_state_st, n=fim_n_st)
-    @settings(max_examples=30, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_symmetric_psd_sorted_orthonormal_cond(self, single, truth, init, n):
         """Structural properties of the report for the (k, c) pair."""
         gm = single
@@ -371,11 +475,47 @@ class TestFIM:
         assert name in rep.param_names
         assert 0.0 < weight <= 1.0 + 1e-6
 
-    @given(truth=fim_truth_st, init=initial_state_st, n=fim_n_st)
-    @settings(max_examples=30, deadline=None)
-    def test_identifiable_pair_finite_cond_and_crb(self, single, truth, init, n):
-        """Position data on a moving spring identifies (k, c): finite
-        condition number, finite CRB."""
+    @given(truth=fim_truth_st, init=displaced_state_st, n=fim_n_st)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+    def test_crb_is_finite_exactly_where_the_pair_is_identifiable(
+        self, single, truth, init, n,
+    ):
+        """``crb`` is finite where the data resolves a direction and ``+inf``
+        where it does not, and ``rank`` says which.
+
+        This used to assert that position data on a moving spring *always*
+        identifies ``(k, c)``.  It does not, and the old assertion passed only
+        because ``pinv`` returned a finite number for a direction the data
+        cannot see -- precisely the misreporting ``rank`` was added to end.
+
+        Counter-example found by this property: ``k=49, c=0.125, m=3`` over
+        ``n=20`` samples.  A lightly damped stiff spring over a short window
+        puts the damping direction at the float32 noise floor -- Fisher
+        eigenvalues ``[9.47e-08, 4.55e-01]``, a ratio of 2.1e-07 against the
+        ``n*eps`` cutoff of 2.4e-07.  ``numpy.linalg.matrix_rank`` calls that
+        matrix rank 1 as well, on the same convention.
+
+        Asserting the equivalence rather than the premise makes this strictly
+        stronger than what it replaced: it holds for every draw, identifiable
+        or not, and it would catch a ``rank`` that disagreed with its own
+        ``crb`` in either direction.
+        Rejected draws
+        --------------
+        ``assume(_position_variance(obs) > 1e-2)`` still rejects 12-26% of
+        draws under the ``ci`` profile.  The spread is three ci runs of the
+        same test: two from a worktree and one from a checkout path without
+        a ``test`` component, which is the only difference that decides
+        whether Hypothesis injects this tree's own literals into the draws
+        (see ``scripts/audit_property_rejection.py``).  It is what an
+        80-example estimate is worth here, so ``EXAMPLES_COSTLY`` buys that much less search here than the
+        number says.  It is not removable by generation: what is left is a soft, heavily damped
+        spring that barely moves inside a 20-sample window, and an envelope
+        that excluded those would also exclude the lightly-damped stiff
+        spring at ``k=49, c=0.125, m=3`` that
+        ``test_crb_is_finite_exactly_where_the_pair_is_identifiable``
+        documents as this suite's counter-example.  See
+        ``displaced_state_st`` and ``scripts/audit_property_rejection.py``.
+        """
         gm = single
         note(f"truth={truth} init={init} n={n}")
         p_truth = _with_params(gm, "s", truth)
@@ -385,18 +525,57 @@ class TestFIM:
         names = ("stiffness", "damping")
         sub = {k: p_truth["nodes"]["s"][k] for k in names}
         rep = fim(_residual_fn(gm, obs, p_truth, names), sub)
-        assert np.isfinite(rep.cond), rep.cond
-        assert bool(jnp.all(jnp.isfinite(rep.crb))), rep.crb
-        assert bool(jnp.all(rep.crb > 0.0)), rep.crb
+        note(f"eigvals={np.asarray(rep.eigvals)} rank={rep.rank} crb={rep.crb}")
 
-    @given(truth=fim_truth_st, init=initial_state_st, n=fim_n_st)
-    @settings(max_examples=30, deadline=None)
+        assert rep.rank in (0, 1, 2), rep.rank
+        finite = np.asarray(jnp.isfinite(rep.crb))
+        crb = np.asarray(rep.crb)
+
+        if rep.rank == len(names):
+            # Full rank: every bound is a real, strictly positive number, and
+            # the matrix is invertible so cond is finite too.
+            assert finite.all(), rep.crb
+            assert bool((crb > 0.0).all()), rep.crb
+            assert np.isfinite(rep.cond), rep.cond
+        else:
+            # Rank deficient: at least one parameter is unresolvable and must
+            # say so with +inf rather than a small, confident-looking number.
+            assert not finite.all(), rep.crb
+            assert bool((crb[finite] > 0.0).all()), rep.crb
+            assert bool(np.isinf(crb[~finite]).all()), rep.crb
+
+    @given(truth=fim_truth_st, init=displaced_state_st, n=fim_n_st)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_common_scale_of_k_c_m_is_the_null_direction(
         self, single, truth, init, n,
     ):
         """Position-only data sees k/m and c/m: scaling (k, c, m) together
         is invisible, so in relative coordinates (1, 1, 1)/sqrt(3) is the
-        weakest eigenvector with a ~0 eigenvalue."""
+        weakest eigenvector with a ~0 eigenvalue.
+
+        The ``PrecisionLimitWarning`` filter is not a workaround: a
+        weakest eigenvalue at ~0 is exactly what this test is *for*, so
+        for some draws ``fim`` correctly reports that the rank verdict
+        sits at the float32 noise floor.  What is asserted here is the
+        eigen*vector*, which the warning says nothing about.
+
+        Rejected draws
+        --------------
+        ``assume(_position_variance(obs) > 1e-2)`` still rejects 15-24% of
+        draws under the ``ci`` profile.  The spread is three ci runs of the
+        same test: two from a worktree and one from a checkout path without
+        a ``test`` component, which is the only difference that decides
+        whether Hypothesis injects this tree's own literals into the draws
+        (see ``scripts/audit_property_rejection.py``).  It is what an
+        80-example estimate is worth here, so ``EXAMPLES_COSTLY`` buys that much less search here than the
+        number says.  It is not removable by generation: what is left is a
+        soft, heavily damped spring that barely moves inside a 20-sample
+        window, and an envelope that excluded those would also exclude the
+        lightly-damped stiff spring at ``k=49, c=0.125, m=3`` that
+        ``test_crb_is_finite_exactly_where_the_pair_is_identifiable``
+        documents as this suite's counter-example.  See
+        ``displaced_state_st`` and ``scripts/audit_property_rejection.py``.
+        """
         gm = single
         note(f"truth={truth} init={init} n={n}")
         p_truth = _with_params(gm, "s", truth)
@@ -420,14 +599,32 @@ class TestFIM:
         proj = np.linalg.norm(null.T @ d)
         assert proj > 0.98, (proj, ev / ev[-1], V[:, 0])
 
-    @given(truth=fim_truth_st, init=initial_state_st, n=fim_n_st)
-    @settings(max_examples=20, deadline=None)
+    @given(truth=fim_truth_st, init=displaced_state_st, n=fim_n_st)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_zero_valued_parameter_is_exact_null_direction_under_relative_scaling(
         self, single, truth, init, n,
     ):
         """At ``damping == 0`` the relative FIM has a zero damping row and
         column, so the weakest direction is exactly the damping axis with
-        eigenvalue 0 (a relative change of zero is no change)."""
+        eigenvalue 0 (a relative change of zero is no change).
+
+        Rejected draws
+        --------------
+        ``assume(_position_variance(obs) > 1e-2)`` still rejects 8-16% of
+        draws under the ``ci`` profile.  The spread is three ci runs of the
+        same test: two from a worktree and one from a checkout path without
+        a ``test`` component, which is the only difference that decides
+        whether Hypothesis injects this tree's own literals into the draws
+        (see ``scripts/audit_property_rejection.py``).  It is what an
+        80-example estimate is worth here, so ``EXAMPLES_COSTLY`` buys that much less search here than the
+        number says.  It is not removable by generation: what is left is a soft, heavily damped
+        spring that barely moves inside a 20-sample window, and an envelope
+        that excluded those would also exclude the lightly-damped stiff
+        spring at ``k=49, c=0.125, m=3`` that
+        ``test_crb_is_finite_exactly_where_the_pair_is_identifiable``
+        documents as this suite's counter-example.  See
+        ``displaced_state_st`` and ``scripts/audit_property_rejection.py``.
+        """
         gm = single
         truth = {**truth, "damping": 0.0}
         note(f"truth={truth} init={init} n={n}")
@@ -444,16 +641,34 @@ class TestFIM:
         assert abs(v[0]) > 0.999, v  # param_names[0] == "['damping']"
         assert rep.least_identifiable()[0] == "['damping']"
 
-    @given(truth=fim_truth_st, init=initial_state_st, n=fim_n_st,
+    @given(truth=fim_truth_st, init=displaced_state_st, n=fim_n_st,
            split=_finite(0.1, 0.9))
-    @settings(max_examples=30, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_duplicated_parameter_null_direction_is_difference(
         self, single, truth, init, n, split,
     ):
         """Inject an exact null direction: stiffness = a + b.  With raw
         sensitivities the two columns of J are identical, so the FIM's
         weakest eigenvector is (1, -1)/sqrt(2) with eigenvalue 0 and the
-        strongest is (1, 1)/sqrt(2)."""
+        strongest is (1, 1)/sqrt(2).
+
+        Rejected draws
+        --------------
+        ``assume(_position_variance(obs) > 1e-2)`` still rejects 12-27% of
+        draws under the ``ci`` profile.  The spread is three ci runs of the
+        same test: two from a worktree and one from a checkout path without
+        a ``test`` component, which is the only difference that decides
+        whether Hypothesis injects this tree's own literals into the draws
+        (see ``scripts/audit_property_rejection.py``).  It is what an
+        80-example estimate is worth here, so ``EXAMPLES_COSTLY`` buys that much less search here than the
+        number says.  It is not removable by generation: what is left is a soft, heavily damped
+        spring that barely moves inside a 20-sample window, and an envelope
+        that excluded those would also exclude the lightly-damped stiff
+        spring at ``k=49, c=0.125, m=3`` that
+        ``test_crb_is_finite_exactly_where_the_pair_is_identifiable``
+        documents as this suite's counter-example.  See
+        ``displaced_state_st`` and ``scripts/audit_property_rejection.py``.
+        """
         gm = single
         note(f"truth={truth} init={init} n={n} split={split}")
         p_truth = _with_params(gm, "s", truth)
@@ -477,9 +692,15 @@ class TestFIM:
         assert rep.cond == float("inf") or rep.cond > 1e5
 
     @given(truth=truth_params_st, init=initial_state_st, n=fim_n_st)
-    @settings(max_examples=20, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_relative_scaling_is_congruence_by_params(self, single, truth, init, n):
-        """``F_rel = D F_raw D`` with ``D = diag(params)``."""
+        """``F_rel = D F_raw D`` with ``D = diag(params)``.
+
+        Filtered for ``PrecisionLimitWarning`` for the reason above: the
+        congruence identity is about the matrix and holds whatever the
+        conditioning, while some generated spring parameters put the
+        rank verdict at the noise floor and ``fim`` now says so.
+        """
         gm = single
         note(f"truth={truth} init={init} n={n}")
         p_truth = _with_params(gm, "s", truth)
@@ -510,17 +731,30 @@ class TestFIM:
 
 class TestMultipleShooting:
 
+    # Per push: tests/verification/hypothesis/test_hypothesis_sysid.py::TestMultipleShooting::test_seeded_window_states_reproduce_teacher_forcing_at_one_draw
+    @pytest.mark.slow  # rollouts or fits compiled per example: over 5 s on CI; still in verify-hypothesis
     @given(truth=truth_params_st, init=initial_state_st, tiling=tiling_st)
-    @settings(max_examples=25, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_seeded_window_states_reproduce_teacher_forcing(self, single, truth, init, tiling):
         """With ``init_window_states`` (the measured window starts) and any
         continuity weight, multiple shooting equals the teacher-forced loss
         at the truth (both ~0) and its window-state gradient is finite —
         for every tiling incl. ``sample_every=2``."""
-        from maddening.sysid import init_window_states
-        gm = single
-        n_steps, sample_every, window = tiling
         note(f"truth={truth} init={init} tiling={tiling}")
+        self._check_seeded_windows(single, truth, init, tiling)
+
+    # The property above at one fixed draw, on every push and both JAX
+    # lanes: a subsampled rollout (``sample_every=2``) in three windows,
+    # so the off-data window start is exercised too.
+    def test_seeded_window_states_reproduce_teacher_forcing_at_one_draw(self, single):
+        self._check_seeded_windows(
+            single, {"stiffness": 60.0, "damping": 3.0, "mass": 1.5},
+            {"position": 2.5, "velocity": -1.0}, (24, 2, 4))
+
+    @staticmethod
+    def _check_seeded_windows(gm, truth, init, tiling):
+        from maddening.sysid import init_window_states
+        n_steps, sample_every, window = tiling
         p_truth = _with_params(gm, "s", truth)
         _set_state(gm, "s", init["position"], init["velocity"])
         obs = _observe(gm, n_steps, p_truth, sample_every)
@@ -542,3 +776,308 @@ class TestMultipleShooting:
             bad = jax.tree.map(lambda x: x, ws)
             bad["s"]["position"] = bad["s"]["position"].at[1].add(0.3)
             assert float(ms(p_truth, bad)) > 0.0
+
+
+# ---------------------------------------------------------------------------
+# The precision-limit warning on ``fim``'s rank verdict
+# ---------------------------------------------------------------------------
+
+
+_EPS32 = float(np.finfo(np.float32).eps)
+
+
+def _fisher_with_known_ratio(n, m, ratio_x_cutoff, seed):
+    """A linear residual whose Fisher matrix has a *known* float64
+    smallest-to-largest eigenvalue ratio, placed at ``ratio_x_cutoff``
+    times the cutoff ``fim`` will decide rank against.
+
+    Built in float64 and handed to ``fim`` as float32, so the float64
+    reference below is the same matrix at the other precision rather
+    than a different matrix.
+
+    The cutoff is ``max(n, sqrt(m)) * eps``, which is ``fim``'s own
+    default and not merely a number of the same shape.  It has to be:
+    every property here is stated in units of the cutoff, and a
+    reference applying a *different* cutoff from the one under test
+    disagrees for structural reasons that have nothing to do with
+    precision.  Before ``rank_rtol`` gained its ``sqrt(m)`` term this
+    read ``n * _EPS32``, and it was the same expression then.
+    """
+    rng = np.random.default_rng(seed)
+    cutoff = max(n, np.sqrt(m)) * _EPS32
+    mid = np.geomspace(1e-3, 1.0, max(n - 1, 1))
+    mid[-1] = 1.0                       # geomspace(a, b, 1) is [a], not [b]
+    lam = np.sort(np.concatenate([[ratio_x_cutoff * cutoff], mid]))[:n]
+    q, r = np.linalg.qr(rng.standard_normal((n, n)))
+    V = q * np.sign(np.diag(r))
+    U = np.linalg.qr(rng.standard_normal((m, n)))[0]
+    return (U * np.sqrt(lam)) @ V.T, cutoff
+
+
+def _rank_at(eigvals, cutoff):
+    ev = np.asarray(eigvals, dtype=np.float64)
+    return int((ev > max(float(ev[-1]), 0.0) * cutoff).sum())
+
+
+def _fim_of(J64):
+    n = J64.shape[1]
+    A = jnp.asarray(J64, dtype=jnp.float32)
+    params = {f"p{i}": jnp.float32(1.0) for i in range(n)}
+    keys = tuple(params)
+
+    def residual_fn(p):
+        return A @ jnp.stack([p[k] for k in keys])
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        report = fim(residual_fn, params, scale=None)
+    warned = any(isinstance(w.message, PrecisionLimitWarning) for w in caught)
+    return report, warned
+
+
+class TestPrecisionLimitedRank:
+    """``fim``'s ``rank`` is a comparison of two numbers, and in float32
+    it can be a comparison of two numbers that differ by less than the
+    decomposition resolves.  The contract is that such a verdict
+    announces itself and an ordinary one stays quiet.
+
+    The generators here sweep ``m`` up to 1024, and that is the point.
+    They used to cap it at 32, because the error in forming
+    ``F = J.T @ J`` in float32 grows with the number of residual rows
+    while the then-current ``n * eps`` cutoff could not see ``m`` at
+    all: at long residuals a precision-limited verdict landed
+    arbitrarily far from the cutoff and no symmetric factor reached it.
+    The measured miss rate over the full sweep was ~8%, essentially all
+    of it there, so asserting these properties over long residuals
+    would have been asserting something measured to be false.
+
+    ``rank_rtol`` now carries a ``sqrt(m)`` term, the cutoff tracks the
+    floor, and the misses are gone: over 228,000 synthetic matrices
+    (n = 2..25, m = 20..2000) recall is 1.000 at the current factor, by
+    every ``m`` bucket separately -- ``m`` in [20, 50], [50, 200],
+    [200, 800] and [800, 2000] all measure 1.000, against 0.912-0.916
+    overall under the old cutoff.  The cap coming off is the property getting
+    its teeth back, and a regression in the cutoff shows up here as a
+    failure rather than as a region nobody asserts anything about.
+
+    Those figures are of the route the verdict took then, the
+    eigenvalues of a float32 ``F``.  It is read from the singular values
+    of ``J`` in float64 now: the two precisions' verdicts differ only
+    within the one rounding ``J`` took when it was stored, a part in a
+    thousand of the cutoff, and the properties below hold with that
+    much less to forgive.  (A *constant* sensitivity, which none of
+    these random Jacobians has, is
+    ``tests/core/test_sysid_fim_reads_the_jacobian.py``'s.)
+    """
+
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+    @given(
+        n=st.integers(min_value=2, max_value=6),
+        m=st.integers(min_value=2, max_value=1024),
+        # log-uniform across the cutoff: both verdicts occur, and
+        # disagreements are common enough for the property to bite
+        log_ratio=st.floats(min_value=np.log(0.05), max_value=np.log(20.0)),
+        seed=st.integers(min_value=0, max_value=2**31 - 1),
+    )
+    def test_a_verdict_the_two_precisions_disagree_about_warns(
+            self, n, m, log_ratio, seed):
+        """The property the whole feature is: where float32 and float64
+        arithmetic reach *different* ranks from the same matrix under
+        the same rank rule, the float32 answer was decided by rounding,
+        and saying so is the only thing that lets a user act.
+
+        Both verdicts apply the float32 cutoff.  Comparing each
+        precision's own default cutoff instead would be a different
+        question with a useless answer: those disagree for every ratio
+        between ``n * 2.2e-16`` and ``n * 1.2e-07``, nine decades of
+        merely ill-conditioned problems, and a warning over all of them
+        is the routine firing that gets warnings suppressed.
+        """
+        J64, cutoff = _fisher_with_known_ratio(n, max(m, n),
+                                               float(np.exp(log_ratio)), seed)
+        report, warned = _fim_of(J64)
+        rank64 = _rank_at(np.linalg.eigh(J64.T @ J64)[0], cutoff)
+        note(f"n={n} m={m} ratio/cutoff={np.exp(log_ratio):.4g} "
+             f"rank32={report.rank} rank64={rank64} warned={warned}")
+        if report.rank != rank64:
+            assert warned, (
+                f"rank={report.rank} in float32 but {rank64} in float64 "
+                f"under the same cutoff {cutoff:.4g}, and nothing said so; "
+                f"eigvals={np.asarray(report.eigvals)}"
+            )
+
+    # Twice the profile's count, because the assertion below is guarded by
+    # ``if warned`` rather than reached through ``assume(warned)`` and only
+    # about half of this generator's draws warn (measured: 51.5% of draws
+    # were discarded when this was an ``assume``).  Doubling restores the
+    # number of *warned* cases the property is checked on -- ~80, as before
+    # -- at the same number of draws the ``assume`` form already cost, with
+    # none of them thrown away.  See
+    # docs/developer_guide/testing_standards.md on rejection budgets.
+    # Re-measured at 57.5% (92 warned of 160 draws) after the cutoff gained
+    # its ``sqrt(m)`` term and this generator's ``m`` cap came off, which
+    # changed both inputs to that 51.5%: still about half, so the doubling
+    # still buys the ~80 warned cases it was sized for.
+    @settings(max_examples=2 * EXAMPLES_COSTLY, deadline=None)
+    @given(
+        n=st.integers(min_value=2, max_value=6),
+        m=st.integers(min_value=2, max_value=1024),
+        log_ratio=st.floats(min_value=np.log(0.05), max_value=np.log(20.0)),
+        seed=st.integers(min_value=0, max_value=2**31 - 1),
+    )
+    def test_a_warning_is_always_backed_by_a_ratio_inside_the_band(
+            self, n, m, log_ratio, seed):
+        """The other half: a warning that fires anywhere else would be
+        noise.  Whenever it fires, some eigenvalue ratio really is
+        within the measured factor of the cutoff -- and the number the
+        message quotes is that ratio, not ``eigvals[0]``, which can be
+        decades away from the comparison being made.
+
+        The implication is tested as an implication, the way
+        :meth:`test_a_verdict_the_two_precisions_disagree_about_warns`
+        does one line above.  It used to be ``assume(warned)``, which
+        threw away every draw that did not warn -- half of them, the
+        highest rejection rate in either property suite -- and narrowing
+        ``log_ratio`` towards the band to raise that rate would have
+        deleted exactly the draws a spuriously-fired warning would show
+        up in, which is the bug this property hunts.
+        """
+        J64, cutoff = _fisher_with_known_ratio(n, max(m, n),
+                                               float(np.exp(log_ratio)), seed)
+        report, warned = _fim_of(J64)
+        if not warned:
+            return
+        ev = np.asarray(report.eigvals, dtype=np.float64)
+        assert float(ev[-1]) > 0.0
+        ratios = ev / float(ev[-1])
+        inside = [r for r in ratios
+                  if r > 0 and cutoff / _PRECISION_WARN_FACTOR
+                  <= r <= cutoff * _PRECISION_WARN_FACTOR]
+        assert inside, (
+            f"warned with no ratio inside "
+            f"[{cutoff / _PRECISION_WARN_FACTOR:.4g}, "
+            f"{cutoff * _PRECISION_WARN_FACTOR:.4g}]: {ratios}"
+        )
+
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+    @given(
+        n=st.integers(min_value=2, max_value=8),
+        m=st.integers(min_value=2, max_value=1024),
+        # 1e2 .. 1e6 times the cutoff: ordinary, well-conditioned work
+        log_ratio=st.floats(min_value=np.log(1e2), max_value=np.log(1e6)),
+        seed=st.integers(min_value=0, max_value=2**31 - 1),
+    )
+    def test_an_ordinary_well_conditioned_problem_is_never_warned_about(
+            self, n, m, log_ratio, seed):
+        """A warning that fires routinely gets suppressed, which is
+        worse than silence.  This is the property that keeps the other
+        two worth having, and it is the constraint that fixed the
+        factor: every widening past 2x multiplied the fire rate on
+        verdicts float64 agrees with, reaching two thirds of ordinary
+        5x..10x reports at the 8x first tried.
+        """
+        J64, _ = _fisher_with_known_ratio(n, max(m, n),
+                                          float(np.exp(log_ratio)), seed)
+        report, warned = _fim_of(J64)
+        note(f"n={n} m={m} ratio/cutoff={np.exp(log_ratio):.4g} "
+             f"rank={report.rank}")
+        assert not warned
+        assert report.rank == n
+
+    # Per push: tests/verification/hypothesis/test_hypothesis_sysid.py::TestPrecisionLimitedRank::test_the_threshold_still_separates_a_smaller_population
+    @pytest.mark.slow  # 1,350 FIM reports over a fixed population: 6-8 s on CI; still in verify-hypothesis
+    def test_the_threshold_still_separates_the_two_populations(self):
+        """A calibration gate, not a property: fixed seed, no
+        hypothesis.
+
+        ``_PRECISION_WARN_FACTOR`` is a measured number, and the thing
+        that would silently rot is its *separation* -- someone widens it
+        to catch one more case and it starts firing on ordinary work, or
+        narrows it and it stops catching anything.  Neither shows up in
+        a test that only asks whether a particular matrix warns.  So
+        this one counts over a fixed population.
+
+        The population spans short and long residuals: ``m = 400`` puts
+        the cutoff at ``sqrt(m) * eps`` rather than ``n * eps`` for
+        every ``n`` here, so a band anchored to a cutoff that stopped
+        seeing the residual length fails on the ``m = 400`` cells.
+
+        What is held changed with the route the verdict takes.  Read
+        from the eigenvalues of ``F``, the two precisions disagreed on a
+        scatter of reports around the cutoff (3 to 12 of these, by
+        jaxlib) and the gate held the warning's recall over them to
+        0.90.  Read from the singular values of ``J`` they do not
+        disagree anywhere away from the cutoff itself, so the gate is
+        exact: no disagreement, a warning on every report inside the
+        band, and none outside it.
+        """
+        self._assert_separates(*self._separation(20260919, per_cell=150),
+                               min_inside=60)
+
+    def test_the_threshold_still_separates_a_smaller_population(self):
+        """The gate above over a third of the population (50 reports per
+        cell instead of 150, same cells, its own fixed seed), on every
+        push and both JAX lanes.
+
+        Every count is exact, on every jaxlib: the verdicts are float64
+        decompositions of a float32 ``J`` on the host, and nothing in
+        them depends on how the backend reduces a sum.  A seeded warning
+        factor other than 2 fails it from either side (1.01 warns on no
+        report inside the band; 1.3 misses those between 1.3 and 2; 3, 4
+        and 8 warn outside it)."""
+        self._assert_separates(*self._separation(20261002, per_cell=50),
+                               min_inside=20)
+
+    #: How near the cutoff a report may sit and still be left out of the
+    #: exact counts.  The float32 storage of ``J`` moves the ratio by at
+    #: most ``sqrt(n) * eps / sqrt(ratio)`` relative -- one rounding per
+    #: entry, :func:`maddening.sysid._resolve_rank_rtol` -- which is under
+    #: ``4e-4`` for every cell here; twice that with room.
+    _GUARD = 2e-3
+
+    @classmethod
+    def _separation(cls, seed, per_cell):
+        """Counts over ``per_cell`` reports in each of the nine ``(n, m)``
+        cells: disagreements between the float32 report and the float64
+        reference away from the cutoff, and -- inside and outside the
+        warning's band -- how many reports there were and how many
+        warned, with the long-residual share of the inside ones."""
+        rng = np.random.default_rng(seed)
+        # The documented band, half to twice the cutoff, as a literal: read
+        # from the module, the band asserted would move with a seeded factor.
+        factor, guard = 2.0, cls._GUARD
+        assert _PRECISION_WARN_FACTOR == factor
+        dis = inside = inside_warned = outside = outside_warned = long_inside = 0
+        for n in (2, 3, 5):
+            for m in (12, 40, 400):
+                cutoff = max(n, np.sqrt(m)) * _EPS32
+                for _ in range(per_cell):
+                    rc = float(np.exp(rng.uniform(np.log(0.2), np.log(50.0))))
+                    J64, _ = _fisher_with_known_ratio(
+                        n, m, rc, int(rng.integers(0, 2**31 - 1)))
+                    report, warned = _fim_of(J64)
+                    rank64 = _rank_at(np.linalg.eigh(J64.T @ J64)[0], cutoff)
+                    if abs(rc - 1.0) > guard:
+                        dis += report.rank != rank64
+                    if (1.0 + guard) / factor <= rc <= factor * (1.0 - guard):
+                        inside += 1
+                        inside_warned += warned
+                        long_inside += m > n * n
+                    elif rc < (1.0 - guard) / factor or rc > factor * (1.0 + guard):
+                        outside += 1
+                        outside_warned += warned
+        return dis, inside, inside_warned, outside, outside_warned, long_inside
+
+    @staticmethod
+    def _assert_separates(dis, inside, inside_warned, outside, outside_warned,
+                          long_inside, *, min_inside):
+        where = (f"disagreements={dis} inside={inside} warned={inside_warned} "
+                 f"outside={outside} warned={outside_warned} "
+                 f"long_residual_inside={long_inside}")
+        # Non-vacuity: reports on both sides of the band's edges, and the
+        # ``m > n**2`` cells among those inside it.
+        assert inside >= min_inside and outside >= 2 * min_inside, where
+        assert long_inside >= min_inside // 4, where
+        assert dis == 0, f"the two precisions reached different ranks away from the cutoff; {where}"
+        assert inside_warned == inside, f"a report inside the band did not warn; {where}"
+        assert outside_warned == 0, f"a report outside the band warned; {where}"

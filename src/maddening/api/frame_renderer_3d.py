@@ -240,7 +240,7 @@ class ServerFrameRenderer3D(ServerFrameRendererBase):
         height: int = 720,
         fmt: str = "jpeg",
         quality: int = 85,
-    ):
+    ) -> None:
         self._config = config
         self._width = width
         self._height = height

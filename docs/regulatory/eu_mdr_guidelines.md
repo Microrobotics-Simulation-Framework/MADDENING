@@ -11,7 +11,7 @@ This document maps MADDENING's documentation and design to {term}`EU MDR` (EU 20
 | **1** | Devices shall achieve intended performance and not compromise safety | MADDENING provides verified computational tools; does not define intended performance | Define intended performance for their device; validate MADDENING outputs for their {term}`COU` |
 | **3** | Devices shall be safe and effective throughout intended lifetime | Version-pinned releases, {term}`SOUP` package per version, known anomalies tracked | Pin MADDENING version, monitor for updates, maintain throughout product lifetime |
 | **4** | Risk management per {term}`ISO 14971` | `NodeMeta.hazard_hints` provides technical hazard identification input; `known_anomalies.yaml` identifies candidate hazard contributors | Full ISO 14971 risk management file; clinical risk assessment |
-| **17.1** | Software developed per state of the art, considering lifecycle, risk management, V&V | {term}`IEC 62304` lifecycle mapping (Section 11), registered verification benchmarks, anomaly management | Apply IEC 62304 to their own software; cite MADDENING evidence in SOUP assessment |
+| **17.1** | Software developed per state of the art, considering lifecycle, risk management, V&V | {term}`IEC 62304` lifecycle mapping (Section 11), registered {term}`verification benchmarks <Verification benchmark>`, anomaly management | Apply IEC 62304 to their own software; cite MADDENING evidence in SOUP assessment |
 | **17.2** | Software safety classification | MADDENING provides Class C-ready SOUP documentation | Classify their software per IEC 62304 based on their risk assessment |
 | **17.4** | Repeatability, reliability, performance | Functional purity (deterministic outputs), version pinning, regression tests | Validate in their operational environment; execution-layer monitoring |
 
@@ -27,9 +27,9 @@ This document maps MADDENING's documentation and design to {term}`EU MDR` (EU 20
 ## MDCG 2019-16 — Cybersecurity
 
 MADDENING provides:
-- **{term}`SBOM`**: CycloneDX format, attached to each release (when implemented)
+- **{term}`SBOM`**: CycloneDX 1.6 JSON for the base install and the `server`, `surrogates` and `usd` extras, in `docs/validation/sbom/`, regenerated for each release and attached to it (`docs/validation/soup_package.md` §6)
 - **SECURITY.md**: vulnerability reporting process
-- **Dependency monitoring**: GitHub Dependabot + manual JAX changelog review
+- **Dependency monitoring**: GitHub Dependabot + manual {term}`JAX` changelog review
 - **Cybersecurity boundary**: documented in `docs/regulatory/intended_use.md`
 
 The manufacturer must assess MADDENING's cybersecurity posture as part of their {term}`MDCG 2019-16` documentation and implement additional controls as needed for their deployment context.

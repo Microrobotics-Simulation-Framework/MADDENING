@@ -40,18 +40,31 @@ from maddening.core.graph_manager import GraphManager
 from maddening.core.simulation.checkpoint import load_state, save_state
 from maddening.nodes.ball import BallNode
 from maddening.nodes.spring import SpringDamperNode
+from tests.conftest import EXAMPLES_COSTLY, EXAMPLES_STANDARD
 
 DT = 0.01
 EPS32 = float(np.finfo(np.float32).eps)
-ULP_TOL = dict(rtol=4 * EPS32, atol=1e-7)
+#: Tolerance for two evaluations of the *same* float32 program; the
+#: absolute part is scaled by the compared magnitudes in
+#: :func:`_assert_close`, so it carries the same units as ``rtol``.
+ULP_TOL = dict(rtol=4 * EPS32, atol=4 * EPS32)
 
 
 def _ulp_tol(n_steps):
     """Per-step round-off compounds: ``step`` (one jit per step), ``run_scan``
     (a scan body) and ``run_sweep`` (a vmapped scan body) are three XLA
     programs whose FMA contraction of ``dt * const`` can differ, so the
-    honest contract over ``n`` steps is a few ulps plus one per step."""
-    return dict(rtol=(4 + n_steps) * EPS32, atol=1e-7)
+    honest contract over ``n`` steps is a few ulps plus one per step.
+
+    The absolute part is scaled by the magnitudes the rollout actually
+    reaches (see :func:`_assert_close`), not by the final value.  Round-off
+    accumulates with the numbers the arithmetic passes through, while a
+    final value can be near zero through cancellation -- a ball's velocity
+    crosses zero on every bounce.  A fixed ``atol=1e-7`` made this suite
+    fail for about one sampled rollout in 230 (measured: 7 of 1600
+    seed/step combinations, every one of them a 15-step ball velocity
+    landing near zero with a difference of 2e-7 to 1e-6)."""
+    return dict(rtol=(4 + n_steps) * EPS32, atol=(4 + n_steps) * EPS32)
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +136,17 @@ def _leaves_equal(a, b):
 
 
 def _assert_close(a, b, msg, **tol):
+    """``numpy.allclose`` over two pytrees, with the absolute tolerance
+    scaled by the largest magnitude in either tree (floored at one).  That
+    scale stands in for the magnitudes the arithmetic passed through, which
+    is what float32 round-off is proportional to; comparing a near-zero
+    leaf against a fixed ``atol`` alone is a flaky test, not a tight one."""
+    scale = max(
+        1.0,
+        *(float(np.max(np.abs(np.asarray(v)))) if np.size(np.asarray(v)) else 1.0
+          for tree in (a, b) for v in jax.tree_util.tree_leaves(tree)),
+    )
+    tol = {**tol, "atol": tol.get("atol", 0.0) * scale}
     for (pa, x), (_, y) in zip(
         jax.tree_util.tree_flatten_with_path(a)[0],
         jax.tree_util.tree_flatten_with_path(b)[0],
@@ -181,7 +205,7 @@ class TestBakedEqualsTraced:
     """``_compiled_step(state, ext, None)`` vs ``(state, ext, gm.params)``."""
 
     @given(seed=st.integers(min_value=0, max_value=2**31))
-    @settings(max_examples=40, deadline=None)
+    @settings(max_examples=EXAMPLES_STANDARD, deadline=None)
     def test_spring(self, spring, seed):
         rng = np.random.default_rng(seed)
         state = _random_spring_state(rng, spring, ("s",))
@@ -191,7 +215,7 @@ class TestBakedEqualsTraced:
         _assert_close(_user(baked), _user(traced), "spring baked vs traced", **ULP_TOL)
 
     @given(seed=st.integers(min_value=0, max_value=2**31))
-    @settings(max_examples=40, deadline=None)
+    @settings(max_examples=EXAMPLES_STANDARD, deadline=None)
     def test_ball(self, ball, seed):
         rng = np.random.default_rng(seed)
         state = _random_ball_state(rng, ball)
@@ -201,7 +225,7 @@ class TestBakedEqualsTraced:
         _assert_close(_user(baked), _user(traced), "ball baked vs traced", **ULP_TOL)
 
     @given(seed=st.integers(min_value=0, max_value=2**31))
-    @settings(max_examples=25, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_coupled(self, coupled, seed):
         """Through the IFT-coupled group the fixed point is found by an
         early-exit while_loop; the same start must give the same iterate
@@ -225,7 +249,7 @@ class TestRunPathsAgree:
         seed=st.integers(min_value=0, max_value=2**31),
         n_steps=st.integers(min_value=1, max_value=30),
     )
-    @settings(max_examples=25, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_spring_step_scan_sweep(self, spring, seed, n_steps):
         rng = np.random.default_rng(seed)
         p = _random_spring_params(rng, spring, ("s",))
@@ -249,7 +273,7 @@ class TestRunPathsAgree:
         seed=st.integers(min_value=0, max_value=2**31),
         n_steps=st.integers(min_value=1, max_value=30),
     )
-    @settings(max_examples=25, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_ball_step_scan_sweep(self, ball, seed, n_steps):
         rng = np.random.default_rng(seed)
         p = _copy_params(ball.params)
@@ -267,12 +291,33 @@ class TestRunPathsAgree:
         _assert_close(stepped, scanned, "step vs run_scan", **_ulp_tol(n_steps))
         _assert_close(scanned, row, "run_scan vs run_sweep", **_ulp_tol(n_steps))
 
-    @given(
-        seed=st.integers(min_value=0, max_value=2**31),
-        n_steps=st.integers(min_value=1, max_value=15),
-    )
-    @settings(max_examples=15, deadline=None)
-    def test_coupled_step_scan_sweep(self, coupled, seed, n_steps):
+    @pytest.mark.parametrize("seed", [17, 61, 132, 222, 259, 337, 355])
+    def test_ball_rollouts_agree_when_the_final_velocity_is_near_zero(self, ball, seed):
+        """Seeds whose 15-step rollout ends with the velocity close to zero.
+
+        The three rollout paths then differ by 2e-7 to 1e-6 in absolute
+        terms -- ordinary float32 round-off for a velocity that reached
+        several m/s on the way -- which a fixed ``atol`` rejected while a
+        magnitude-scaled one accepts.  Pinned so the flake cannot return
+        unnoticed: each of these was a real failure of
+        ``test_ball_step_scan_sweep`` before the tolerance was fixed."""
+        n_steps = 15
+        rng = np.random.default_rng(seed)
+        p = _copy_params(ball.params)
+        p["nodes"]["b"]["gravity"] = jnp.asarray(rng.uniform(-20.0, -1.0), jnp.float32)
+        init = _random_ball_state(rng, ball)
+
+        ball._state = init  # noqa: SLF001
+        for _ in range(n_steps):
+            stepped = ball.step(params=p)
+        ball._state = init  # noqa: SLF001
+        scanned = ball.run_scan(n_steps, params=p)
+
+        assert abs(float(scanned["b"]["velocity"])) < 0.5      # the cancellation case
+        _assert_close(stepped, scanned, "step vs run_scan", **_ulp_tol(n_steps))
+
+    @staticmethod
+    def _check_coupled(coupled, seed, n_steps):
         """Same through the coupling group; ``_meta`` is batched too."""
         rng = np.random.default_rng(seed)
         p = _random_spring_params(rng, coupled, ("sa", "sb"))
@@ -289,6 +334,26 @@ class TestRunPathsAgree:
         _assert_close(stepped, scanned, "step vs run_scan", **_ulp_tol(n_steps))
         _assert_close(scanned, row, "run_scan vs run_sweep", **_ulp_tol(n_steps))
 
+    # Per push: tests/verification/hypothesis/test_hypothesis_params.py::TestRunPathsAgree::test_coupled_step_scan_sweep_at_one_length
+    @pytest.mark.slow  # rollouts and their gradients compiled per example: over 5 s on CI; still in verify-hypothesis
+    @given(
+        seed=st.integers(min_value=0, max_value=2**31),
+        n_steps=st.integers(min_value=1, max_value=15),
+    )
+    # Costly tier: each example traces step, run_scan and run_sweep
+    # through a coupling group at a freshly drawn ``n_steps``, i.e. three
+    # compiles per example.
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+    def test_coupled_step_scan_sweep(self, coupled, seed, n_steps):
+        """Same through the coupling group; ``_meta`` is batched too."""
+        self._check_coupled(coupled, seed, n_steps)
+
+    # The property above at one rollout length (one compile of each path)
+    # and three drawn parameter sets, on every push and both JAX lanes.
+    @pytest.mark.parametrize("seed", [0, 1, 2])
+    def test_coupled_step_scan_sweep_at_one_length(self, coupled, seed):
+        self._check_coupled(coupled, seed, 4)
+
 
 # ---------------------------------------------------------------------------
 # (c) params gradient vs float64 finite differences
@@ -304,13 +369,10 @@ class TestGradientMatchesFiniteDifferences:
         traj = _rollout(step_fn, ext, state0, params, n_steps, ("s",))
         return jnp.mean(traj ** 2)
 
-    @given(
-        seed=st.integers(min_value=0, max_value=2**31),
-        n_steps=st.integers(min_value=5, max_value=40),
-        which=st.sampled_from(["stiffness", "damping"]),
-    )
-    @settings(max_examples=20, deadline=None)
-    def test_spring_params_gradient(self, seed, n_steps, which):
+    @classmethod
+    def _gradients(cls, seed, n_steps, which):
+        """``(g32, g64, g_fd)``: the float32 and float64 params gradients of a
+        rollout loss on a drawn spring, and a float64 central difference."""
         rng = np.random.default_rng(seed)
         k = float(rng.uniform(1.0, 200.0))
         c = float(rng.uniform(0.0, 10.0))
@@ -326,7 +388,7 @@ class TestGradientMatchesFiniteDifferences:
         def loss_of(gm, theta, dtype, state):
             params = jax.tree.map(lambda x: jnp.asarray(x, dtype), gm.params)
             params["nodes"]["s"][which] = jnp.asarray(theta, dtype)
-            return self._loss(gm, params, state, n_steps)
+            return cls._loss(gm, params, state, n_steps)
 
         theta0 = float(gm32.params["nodes"]["s"][which])
         g32 = float(jax.grad(lambda t: loss_of(gm32, t, jnp.float32, state32))(
@@ -348,10 +410,34 @@ class TestGradientMatchesFiniteDifferences:
                 jnp.asarray(theta0, jnp.float64)))
         finally:
             jax.config.update("jax_enable_x64", prev)
+        return g32, g64, g_fd
 
-        assume(abs(g64) > 1e-6)
+    @staticmethod
+    def _assert_gradients_agree(g32, g64, g_fd):
         assert abs(g64 - g_fd) / abs(g64) < 1e-4, (g64, g_fd)
         assert abs(g32 - g64) / abs(g64) < 1e-3, (g32, g64, g_fd)
+
+    # Per push: tests/verification/hypothesis/test_hypothesis_params.py::TestGradientMatchesFiniteDifferences::test_spring_params_gradient_on_one_spring
+    @pytest.mark.slow  # rollouts and their gradients compiled per example: over 5 s on CI; still in verify-hypothesis
+    @given(
+        seed=st.integers(min_value=0, max_value=2**31),
+        n_steps=st.integers(min_value=5, max_value=40),
+        which=st.sampled_from(["stiffness", "damping"]),
+    )
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+    def test_spring_params_gradient(self, seed, n_steps, which):
+        g32, g64, g_fd = self._gradients(seed, n_steps, which)
+        assume(abs(g64) > 1e-6)
+        self._assert_gradients_agree(g32, g64, g_fd)
+
+    # The property above on one drawn spring, for both parameters, on
+    # every push and both JAX lanes.  The spring is informative (its
+    # float64 gradient is far from zero), so nothing is assumed away.
+    @pytest.mark.parametrize("which", ["stiffness", "damping"])
+    def test_spring_params_gradient_on_one_spring(self, which):
+        g32, g64, g_fd = self._gradients(3, 12, which)
+        assert abs(g64) > 1e-6, g64
+        self._assert_gradients_agree(g32, g64, g_fd)
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +448,10 @@ class TestGradientMatchesFiniteDifferences:
 class TestAdjointIdentity:
 
     @staticmethod
-    def _check(gm, nodes, rng, n_steps):
+    def _check(gm, nodes, rng, n_steps, jit=False):
+        """``jit=True`` differentiates ``jax.jit(f)``: the same rules, one
+        compile instead of an op-by-op trace (measured on the coupled pair,
+        one step, 3 cores: 2.9 s against 7.4 s eager)."""
         ext = gm._default_external_inputs()  # noqa: SLF001
         step_fn = gm._build_step_fn()  # noqa: SLF001
         state = _random_spring_state(rng, gm, nodes)
@@ -375,6 +464,9 @@ class TestAdjointIdentity:
                 s = step_fn(s, ext, params)
             return {n: s[n] for n in nodes}
 
+        if jit:
+            f = jax.jit(f)
+
         v = jax.tree.map(lambda x: jnp.asarray(rng.standard_normal(x.shape), x.dtype), p0)
         out, jv = jax.jvp(f, (p0,), (v,))
         w = jax.tree.map(lambda x: jnp.asarray(rng.standard_normal(x.shape), x.dtype), out)
@@ -384,26 +476,62 @@ class TestAdjointIdentity:
         lhs = sum(jnp.vdot(a, b) for a, b in zip(jax.tree.leaves(jv), jax.tree.leaves(w)))
         rhs = sum(jnp.vdot(a, b) for a, b in zip(jax.tree.leaves(v), jax.tree.leaves(jtw)))
         lhs, rhs = float(lhs), float(rhs)
-        scale = max(abs(lhs), abs(rhs), 1e-3)
-        assert abs(lhs - rhs) / scale < 1e-4, (lhs, rhs)
+
+        # Scale by the magnitude of the terms being contracted, not by the
+        # value that comes out.  Both sides are inner products that can
+        # cancel to far less than the vectors going into them, while the
+        # float32 rounding error stays set by those vectors -- so dividing
+        # by ``max(|lhs|, |rhs|, ...)`` measures cancellation rather than
+        # adjoint error, and a floor only fixes where it blows up, not
+        # that it does.
+        #
+        # Measured on the coupled fixture: under the old denominator the
+        # ratio has median 9.4e-8 but a tail reaching 1.29e-4 against its
+        # own 1e-4 bound (seed 8560, n_steps=2, where both dot products
+        # land near -9.2545e-4 and differ by 1.285e-7 -- float32 eps is
+        # 1.2e-7, i.e. it was asking for agreement at the noise floor).
+        # Under the norm product the same case is 1.75e-8, unremarkable
+        # against a median of 1.2e-8 and a worst case of 7.6e-8 over 78
+        # others.  The bound below therefore keeps better than an order of
+        # magnitude of headroom, and a genuinely wrong adjoint is O(1)
+        # here, so nothing is given up by moving it.
+        def _norm(tree):
+            return float(jnp.sqrt(
+                sum(jnp.vdot(x, x) for x in jax.tree.leaves(tree))))
+
+        scale = max(_norm(jv) * _norm(w), _norm(v) * _norm(jtw), 1e-30)
+        assert abs(lhs - rhs) / scale < 1e-6, (lhs, rhs, scale)
 
     @given(
         seed=st.integers(min_value=0, max_value=2**31),
         n_steps=st.integers(min_value=1, max_value=3),
     )
-    @settings(max_examples=25, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_single_spring(self, spring, seed, n_steps):
         self._check(spring, ("s",), np.random.default_rng(seed), n_steps)
 
+    # Per push: tests/verification/hypothesis/test_hypothesis_params.py::TestAdjointIdentity::test_coupled_pair_at_one_example
+    @pytest.mark.slow  # rollouts and their gradients compiled per example: over 5 s on CI; still in verify-hypothesis
     @given(
         seed=st.integers(min_value=0, max_value=2**31),
         n_steps=st.integers(min_value=1, max_value=3),
     )
+    # Absolute, not ``EXAMPLES_COSTLY``: a jvp and a vjp through the
+    # coupling group's ``custom_jvp`` IFT rule, measured at 4.4 s an
+    # example -- the single most expensive property in this file.  At
+    # the costly tier the ``ci`` profile would spend six minutes here
+    # alone; the depth stays pinned at the house floor instead.
     @settings(max_examples=20, deadline=None)
     def test_coupled_pair(self, coupled, seed, n_steps):
         """The IFT rule is a ``custom_jvp``; its transpose (via
         ``custom_linear_solve``) must be the true adjoint."""
         self._check(coupled, ("sa", "sb"), np.random.default_rng(seed), n_steps)
+
+    # The property above at one drawn example, one step: a jvp and a vjp
+    # through the IFT rule on every push and both JAX lanes, jitted so the
+    # two transforms compile once each rather than tracing op by op.
+    def test_coupled_pair_at_one_example(self, coupled):
+        self._check(coupled, ("sa", "sb"), np.random.default_rng(5), 1, jit=True)
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +545,7 @@ class TestParamsAreARuntimeArgument:
         seed=st.integers(min_value=0, max_value=2**31),
         n_steps=st.integers(min_value=1, max_value=10),
     )
-    @settings(max_examples=25, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_no_dirty_no_recompile_no_mutation(self, spring, seed, n_steps):
         rng = np.random.default_rng(seed)
         p_mod = _random_spring_params(rng, spring, ("s",))
@@ -437,7 +565,7 @@ class TestParamsAreARuntimeArgument:
             assert np.array_equal(np.asarray(x), y), "gm.params mutated"
 
     @given(seed=st.integers(min_value=0, max_value=2**31))
-    @settings(max_examples=25, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_default_params_after_modified_step(self, spring, seed):
         """``step(params=p_mod)`` followed by ``step()`` uses ``gm.params``
         for the second step — the modified pytree does not stick."""
@@ -464,7 +592,7 @@ class TestParamsAreARuntimeArgument:
 class TestCheckpointRoundTrip:
 
     @given(seed=st.integers(min_value=0, max_value=2**31))
-    @settings(max_examples=20, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_params_round_trip(self, seed):
         rng = np.random.default_rng(seed)
         gm = _coupled_gm()

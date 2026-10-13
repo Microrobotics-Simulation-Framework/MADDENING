@@ -1,4 +1,4 @@
-"""Tests for the FMI 3.0 directional-derivative substrate (v0.3.0 §A1)."""
+"""Tests for the FMI 3.0 directional-derivative substrate (added in v0.3.0)."""
 
 import os
 

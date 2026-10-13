@@ -10,7 +10,8 @@ from typing import Callable, Sequence
 import jax
 import jax.numpy as jnp
 
-from maddening.surrogates.architecture import SurrogateArchitecture
+from maddening.surrogates.architecture import PyTree, SurrogateArchitecture
+from maddening.surrogates.types import MutableStateDict, StateDict
 from maddening.surrogates.architectures._utils import (
     check_equinox,
     compute_sizes,
@@ -43,12 +44,17 @@ class MLPDirect(SurrogateArchitecture):
         self,
         hidden_sizes: Sequence[int] = (64, 64),
         activation: Callable = jax.nn.relu,
-    ):
+    ) -> None:
         check_equinox()
         self.hidden_sizes = tuple(hidden_sizes)
         self.activation = activation
 
-    def init_params(self, rng_key, state_spec, boundary_spec):
+    def init_params(
+        self,
+        rng_key: jax.Array,
+        state_spec: dict[str, tuple[int, ...]],
+        boundary_spec: dict[str, tuple[int, ...]],
+    ) -> PyTree:
         input_size, output_size = compute_sizes(state_spec, boundary_spec)
 
         mlp = eqx.nn.MLP(
@@ -61,7 +67,14 @@ class MLPDirect(SurrogateArchitecture):
         )
         return eqx.partition(mlp, eqx.is_array)
 
-    def forward(self, params, state, boundary_inputs, dt):
+    # Dynamic keys (the node's own fields): an alias, not a TypedDict.
+    def forward(
+        self,
+        params: PyTree,
+        state: StateDict,
+        boundary_inputs: StateDict,
+        dt: float,
+    ) -> MutableStateDict:
         arrays, static = params
         mlp = eqx.combine(arrays, static)
         x = flatten_inputs(
@@ -93,12 +106,17 @@ class MLPDerivative(SurrogateArchitecture):
         self,
         hidden_sizes: Sequence[int] = (64, 64),
         activation: Callable = jax.nn.relu,
-    ):
+    ) -> None:
         check_equinox()
         self.hidden_sizes = tuple(hidden_sizes)
         self.activation = activation
 
-    def init_params(self, rng_key, state_spec, boundary_spec):
+    def init_params(
+        self,
+        rng_key: jax.Array,
+        state_spec: dict[str, tuple[int, ...]],
+        boundary_spec: dict[str, tuple[int, ...]],
+    ) -> PyTree:
         input_size, output_size = compute_sizes(state_spec, boundary_spec)
 
         mlp = eqx.nn.MLP(
@@ -111,7 +129,14 @@ class MLPDerivative(SurrogateArchitecture):
         )
         return eqx.partition(mlp, eqx.is_array)
 
-    def forward(self, params, state, boundary_inputs, dt):
+    # Dynamic keys (the node's own fields): an alias, not a TypedDict.
+    def forward(
+        self,
+        params: PyTree,
+        state: StateDict,
+        boundary_inputs: StateDict,
+        dt: float,
+    ) -> MutableStateDict:
         arrays, static = params
         mlp = eqx.combine(arrays, static)
         x = flatten_inputs(

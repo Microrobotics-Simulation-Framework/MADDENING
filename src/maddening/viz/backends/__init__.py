@@ -4,6 +4,27 @@ Backends are imported lazily to avoid pulling in matplotlib / rich
 when only one backend (or none) is needed.
 """
 
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # PEP 562: the names below are resolved lazily by the module
+    # `__getattr__`, which a type checker cannot see through -- without
+    # these re-exports it reports every one of them as missing from
+    # `__all__`, and a downstream `from maddening.viz.backends import
+    # X` is an error.
+    # Nothing here runs at import time; the lazy table stays the only
+    # runtime path.
+    from maddening.viz.backends.matplotlib_renderer import (
+        MatplotlibRenderer,
+        MatplotlibSceneRenderer,
+        MatplotlibTimeSeriesRenderer,
+        run_matplotlib,
+    )
+    from maddening.viz.backends.pygfx_viewer import GPUHistoryViewer
+    from maddening.viz.backends.selkies_renderer import SelkiesRenderer
+    from maddening.viz.backends.terminal_renderer import TerminalRenderer
+
+
 _INSTALL_HINTS = {
     "MatplotlibTimeSeriesRenderer": "viz",
     "MatplotlibSceneRenderer": "viz",
@@ -15,7 +36,7 @@ _INSTALL_HINTS = {
 }
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> Any:
     _lazy = {
         "MatplotlibTimeSeriesRenderer": "maddening.viz.backends.matplotlib_renderer",
         "MatplotlibSceneRenderer": "maddening.viz.backends.matplotlib_renderer",

@@ -151,6 +151,39 @@ class TestCouplingGroupPrim:
         assert prim.GetAttribute("maddening:maxIterations").Get() == 20
         assert prim.GetAttribute("maddening:acceleration").Get() == "aitken"
 
+    def test_every_fallback_is_the_dataclass_default(self):
+        """An attribute a stage does not author reads back as the schema's
+        fallback, so the fallback is what a stage written before that
+        attribute existed loads with.  A fallback that drifted from
+        ``CouplingGroup``'s default would silently reconfigure every such
+        stage; this pins the two together."""
+        from dataclasses import fields
+
+        from maddening.core.coupling.group import CouplingGroup
+        from maddening.usd.serialization import (
+            _COUPLING_GROUP_ATTRS,
+            _COUPLING_GROUP_FIELDS_ATTR,
+        )
+
+        stage = Usd.Stage.CreateInMemory()
+        prim = stage.DefinePrim("/coupling/defaults", "MaddeningCouplingGroup")
+        default = CouplingGroup(nodes=frozenset({"a", "b"}))
+
+        for attr_name, field_name, convert in _COUPLING_GROUP_ATTRS:
+            attr = prim.GetAttribute(attr_name)
+            assert attr.IsValid(), attr_name
+            assert not attr.HasAuthoredValue(), attr_name
+            assert convert(attr.Get()) == getattr(default, field_name), attr_name
+        # ``accelerated_fields`` is JSON, and its default (None) is the
+        # empty string rather than "null".
+        assert prim.GetAttribute(_COUPLING_GROUP_FIELDS_ATTR).Get() == ""
+        assert default.accelerated_fields is None
+        # Every field is either in the table or one of the two beside it.
+        covered = {f for _a, f, _c in _COUPLING_GROUP_ATTRS}
+        assert covered | {"nodes", "accelerated_fields"} == {
+            f.name for f in fields(CouplingGroup)
+        }
+
 
 class TestExternalInputPrim:
     """Test MaddeningExternalInput prim."""

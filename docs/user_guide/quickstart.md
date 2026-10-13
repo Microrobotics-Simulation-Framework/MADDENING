@@ -71,6 +71,7 @@ Connect nodes with {term}`edges <Edge>` to exchange data every timestep.
 Here a spring reacts to the ball's height and pushes back on it — the
 ball drives the spring, and the spring's force feeds into the ball:
 
+<!-- snippet: continues -->
 ```python
 import jax.numpy as jnp
 from maddening import GraphManager, SimulationNode
@@ -81,16 +82,18 @@ class SpringNode(SimulationNode):
     """Restoring force toward a fixed rest height."""
 
     def __init__(self, stiffness=12.0, rest_height=2.0, **kwargs):
-        super().__init__(**kwargs)
-        self.stiffness = stiffness
-        self.rest_height = rest_height
+        # Constants go to the base class, which keeps them in self.params:
+        # that is what a saved graph (gm.to_dict()) carries.
+        super().__init__(stiffness=stiffness, rest_height=rest_height, **kwargs)
 
     def initial_state(self):
         return {"force": jnp.array(0.0)}
 
     def update(self, state, boundary_inputs, dt):
-        anchor = boundary_inputs.get("anchor_position", self.rest_height)
-        return {"force": -self.stiffness * (anchor - self.rest_height)}
+        stiffness = self.params["stiffness"]
+        rest_height = self.params["rest_height"]
+        anchor = boundary_inputs.get("anchor_position", rest_height)
+        return {"force": -stiffness * (anchor - rest_height)}
 
 
 # BounceNode is the node defined in the first example above.
@@ -109,26 +112,122 @@ final_state, history = gm.run_scan_with_history(n_steps=1000)
 print(f"Final ball height: {float(final_state['ball']['position']):.2f}")
 ```
 
+The spring hands its two constants to `super().__init__(...)` instead of
+keeping them as attributes (`self.stiffness = stiffness`).  A saved graph
+is rebuilt from each node's `params` and nothing else, so a constant kept
+anywhere else is not saved: a graph reloaded from `gm.to_dict()` would run
+the default stiffness, and `to_dict()` warns when a node was built with
+such an argument.  See
+[where a constant belongs](../developer_guide/node_authoring.md#where-a-constant-belongs-and-what-a-saved-graph-carries).
+
 ```{note}
 **Advisories on multi-node graphs.**
 
-* A *disconnected* node (no edges or external inputs into the rest
+* A *disconnected* node (no edges or {term}`external inputs <External input>` into the rest
   of the graph) emits a `UserWarning` from `gm.compile()`.
   Disconnected-but-intentional nodes run correctly — the warning is
   advisory, not an error.
 * A *feedback loop* is logged at `INFO` level through
   ``logging.getLogger("maddening.core.graph_manager")`` (no
   warning).  Back-edges are staggered to the previous timestep, so
-  intentional coupling loops also run correctly.
+  intentional {term}`coupling <Coupling>` loops also run correctly.
 
 Both messages are designed to surface unintentional graph mistakes
 without breaking deliberate constructions.
+
+One construction is an error.  A field takes an edge or a declared
+external input (`gm.add_external_input`), not both.  An external input
+replaces whatever any edge delivers to its field on every step, an
+additive edge included, with zeros when it is not fed, so the edge would
+never reach the node.  `gm.compile()` therefore raises a `ValueError`
+naming the edge and the input, whichever was added first, and
+`gm.validate()` lists the same text as an `ERROR:` entry.  Keep one of the
+two.  To keep the edge, leave the `add_external_input` call out where the
+graph is built (there is no `remove_external_input`); to keep the input,
+`gm.remove_edge(...)`.
+
+A field also has one declaration.  `gm.add_external_input` for a field
+that is already declared with another shape or dtype raises a
+`ValueError` naming both, and so does loading a file that holds two: the
+shape and dtype are what the step casts a supplied value to, what the
+{term}`FMU` export types the input as and what `to_dict()` saves, and until 0.4.0
+the last of two won.  Declaring it again with the same shape and dtype is
+accepted and changes nothing.
 ```
+
+### An edge from a node to itself
+
+An edge may start and end at the same node.  Which of its own values the
+node then reads depends on one thing, whether the node is in a {term}`coupling group <Coupling group>`:
+
+- **outside a coupling group** the edge is a back edge, like the staggered
+  edge of any loop: the node reads its own value from the *previous* step,
+  so the term the edge carries is explicit;
+- **in a coupling group** (a group of that one node is enough) the edge is
+  iterated with the group: once the group has converged the node has read
+  its own *new* value, so the term is implicit.
+
+A rod at a uniform temperature that loses heat in proportion to it,
+`dT/dt = -k T`, written as an edge from the rod's temperature to its own
+heat source:
+
+<!-- snippet: continues -->
+```python
+import jax.numpy as jnp
+from maddening import GraphManager
+from maddening.nodes import HeatNode
+
+k, dt = 1.0, 0.01
+
+
+def one_step(grouped):
+    gm = GraphManager()
+    gm.add_node(HeatNode("rod", dt, n_cells=4, thermal_diffusivity=0.1))
+    gm.add_edge("rod", "rod", "temperature", "heat_source",
+                transform=lambda T: -k * T)
+    if grouped:
+        gm.add_coupling_group(["rod"], max_iterations=50)
+    gm.compile()
+    gm.set_node_state("rod", {"temperature": jnp.ones(4)})
+    return float(gm.step()["rod"]["temperature"][0])
+
+
+explicit, implicit = one_step(grouped=False), one_step(grouped=True)
+print(f"{explicit:.6f}")   # 0.990000 = 1 - k dt        the previous step's value
+print(f"{implicit:.6f}")   # 0.990099 = 1 / (1 + k dt)  iterated with the group
+assert abs(explicit - (1 - k * dt)) < 1e-6 and abs(implicit - 1 / (1 + k * dt)) < 1e-6
+```
+
+Neither graph draws a warning: putting a node in a group is how one of its
+terms is made implicit.  `gm.validate()` says which of the two the edge
+is, in one `INFO:` line for each such edge, and that line is how you learn
+which reading an edge has.  For the first graph and for the second:
+
+```text
+INFO: edge rod.temperature -> rod.heat_source is from node 'rod' to itself. Outside a coupling group it is a back edge: the node reads its state of the previous step, so the term the edge carries is explicit.
+INFO: edge rod.temperature -> rod.heat_source is from node 'rod' to itself. With the node in a coupling group (['rod']) the edge is iterated with the group and at convergence the node reads its new value, so the term is implicit.
+```
+
+An `INFO:` line is not an error and `gm.compile()` does not warn for it.
+Nothing else changes which value is read (not the node's other edges, a
+neighbour's group or the order the graph was built in), `gm.print_graph()`
+says which beside the edge ("back edge: reads the previous step's value"
+or "iterated inside its coupling group"), and `gm.auto_couple()` groups
+only cycles of two or more nodes, so it leaves such an edge explicit.
+
+"Implicit" is what a *converged* group gives.  The first pass of a group
+reads the previous step, so `max_iterations=1` returns the explicit value,
+and the plain iteration converges only while `|k dt| < 1`; past that the
+group needs an `acceleration`.  That, {term}`sub-cycled <Sub-cycled>` members, {term}`multi-rate <Multi-rate>`
+graphs and edges from a node's own flux are in
+[An edge from a node to itself](../developer_guide/coupling_algorithm_guide.md#an-edge-from-a-node-to-itself)
+in the coupling guide.
 
 ## Differentiable Everything
 
 The entire {term}`graph step <Graph step>` is JIT-compiled and differentiable:
 
+<!-- snippet: continues -->
 ```python
 import jax
 
@@ -141,7 +240,18 @@ def loss(initial_velocity):
 
 grad_fn = jax.grad(loss)
 print(f"d(final_pos)/d(init_vel) = {grad_fn(jnp.array(0.0))}")
+
+# The loss stepped the graph under a transform, so its state is not one
+# you want to keep running from.  Say what it should be next:
+gm.reset_state()
 ```
+
+`run_scan` (like `step` and `run`) writes its result back into the
+graph, and under `jax.grad` that result is made of {term}`JAX` tracers.  The
+gradient is correct either way, and the graph puts itself back to the
+state it had before the transform — with a `RuntimeWarning` — the next
+time you use it.  Setting the state you actually want, as above, is
+cheaper than relying on that and clearer to read.
 
 ## Deploy to Cloud
 
@@ -152,11 +262,12 @@ pip install maddening[runpod]
 
 # Set up credentials (one-time)
 mkdir -p ~/.maddening
-cp src/maddening/examples/cloud/cloud_credentials.example.yaml ~/.maddening/cloud_credentials.yaml
+cp src/maddening/examples/cloud/config/cloud_credentials.example.yaml ~/.maddening/cloud_credentials.yaml
 # Edit ~/.maddening/cloud_credentials.yaml with your RunPod API key
-# You can also choose a different path, in which case use the `creds` argument in the CloudLauncher constructor.
+# You can also choose a different path, in which case pass it as `credentials_path=` to the CloudLauncher constructor.
 ```
 
+<!-- snippet: no-run, reason: cloud: provisions a cloud GPU instance -->
 ```python
 from maddening.cloud.launcher import CloudLauncher
 
@@ -173,8 +284,90 @@ job.teardown()
 
 See `src/maddening/examples/cloud/` for complete examples and config templates.
 
+```{warning}
+**The simulation API requires a bearer token unless it is bound to
+loopback, and it still has no TLS.**  Running locally on `127.0.0.1`
+nothing changes.  The cloud image binds `0.0.0.0`, so every route there
+— including `POST /cloud/launch` and `POST /cloud/teardown`, which
+provision and destroy paid GPU instances using the credentials stored on
+that host — needs `Authorization: Bearer <token>`.  Set
+`MADDENING_API_TOKEN` in your job's `envs:`, or read the token the server
+generates and logs once at startup.  A blank `MADDENING_API_TOKEN` is a
+configuration error and the server refuses to start.
+
+`JobConfig.ports` no longer defaults to `[8000]`, so the provider's
+firewall stays shut unless you ask for the port.  Reach the API through
+an SSH tunnel:
+
+    ssh -L 8000:127.0.0.1:8000 root@<vm-ip> -p <ssh-port>
+    # then talk to http://localhost:8000
+
+Because there is no TLS, the token crosses the network in cleartext:
+prefer the tunnel, or a TLS-terminating reverse proxy, to a public port.
+`/docs` is not served when the token is enforced (Swagger UI cannot send
+a bearer header when it fetches its own schema).  {term}`WebRTC` signaling on
+8443 authenticates separately, once you set `MADDENING_STREAM_SECRET` and
+share it with the viewer.  The container streams its simulation there (a
+time series of its scalar state fields, at `StreamConfig.fps`): it logs
+the session id at startup, and the viewer's token is
+`maddening.cloud.generate_session_token(<session id>, <secret>)`.  Build
+the graph through the REST graph routes, which take the built-in node
+types; `MADDENING_GRAPH_USD` is not loaded.
+
+**The ZeroMQ transports follow the same rule.**
+`NetworkRelay` (state, 5555), `CommandPublisher` (commands, 5556) and the
+multi-job `Coordinator` (5580) bind **loopback** by default, so local work
+needs no configuration at all:
+
+    relay = NetworkRelay()            # tcp://127.0.0.1:5555, no token
+    receiver = NetworkReceiver()      # tcp://localhost:5555
+
+To watch a remote simulation, tunnel to its loopback port — still no
+token, because both ends are loopback:
+
+    ssh -L 5555:127.0.0.1:5555 root@<vm-ip> -p <ssh-port>
+
+To publish the port instead, bind a non-loopback address. That turns on
+**{term}`ZMQ` CURVE encryption**, and the socket refuses to open without a shared
+secret:
+
+    # both machines
+    export MADDENING_TRANSPORT_TOKEN=<the same secret>
+    relay = NetworkRelay("tcp://0.0.0.0:5555")
+    receiver = NetworkReceiver("tcp://<vm-ip>:5555")
+
+There are **no key files**: both CURVE keypairs are derived from that one
+secret. Unlike the API, ZMQ traffic *is* encrypted once it leaves
+loopback. Port 5556 is an actuation path — its payload reaches
+`GraphManager.step(external_inputs=...)` — so publish it deliberately.
+
+**Use a different secret from `MADDENING_API_TOKEN`.** If
+`MADDENING_TRANSPORT_TOKEN` is unset, the transports fall back to
+`MADDENING_API_TOKEN`, which keeps a single-variable setup working — and
+means the CURVE seed is the same string the API sends in an
+`Authorization` header, in cleartext, on every request. Anyone who can
+see one such request can then derive both CURVE keypairs and read the
+"encrypted" state and command streams; that is measured over a real
+socket, not a theoretical worry. It only bites where both an API port
+and a ZMQ port are published on an untrusted network — an SSH tunnel to
+loopback ports is unaffected, since nothing is encrypted or published
+there — but two variables cost nothing:
+
+    export MADDENING_API_TOKEN=<one secret>        # HTTP bearer, cleartext
+    export MADDENING_TRANSPORT_TOKEN=<another>     # CURVE seed, never sent
+
+One asymmetry to know: a client decides whether to use CURVE from the
+address *it* connects to, but the server's posture comes from the address
+*it* bound. If you reach a coordinator bound to `0.0.0.0` over
+`127.0.0.1` (rank 0's own worker, or a tunnel), pass `secure=True`
+explicitly. When the two disagree, the handshake is refused and **no data
+arrives at all**: a `NetworkReceiver` or `CommandReceiver` in that state
+logs the cause once and exposes it as `receiver.handshake_error`, which
+is worth checking before concluding that the simulation is idle.
+```
+
 ## Next Steps
 
 - **[Installation Guide](installation.md)** — all extras, GPU setup, cloud providers
 - **[DESIGN.md](https://github.com/Microrobotics-Simulation-Framework/MADDENING/blob/main/DESIGN.md)** — architecture decisions, node authoring contract
-- **`examples/`** — coupling, adaptive timestepping, surrogates, servers
+- **`examples/`** — coupling, adaptive timestepping, {term}`surrogates <Surrogate>`, servers

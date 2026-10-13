@@ -9,8 +9,8 @@ Location: `tests/<module>/test_<name>.py`
 Requirements:
 - Test each public method
 - Test normal operation and edge cases
-- For nodes: verify {term}`JAX-traceability <JAX-traceable>` (`jax.jit`, `jax.grad`, `jax.vmap`)
-- Test boundary input handling (missing inputs, default values)
+- For {term}`nodes <Node>`: verify {term}`JAX-traceability <JAX-traceable>` (`jax.jit`, `jax.grad`, `jax.vmap`)
+- Test {term}`boundary input <Boundary inputs>` handling (missing inputs, default values)
 - Test parameter edge cases
 
 ```python
@@ -30,7 +30,7 @@ def test_your_node_jit():
 
 ## 2. Integration Tests (mandatory for nodes)
 
-Test the node within a `GraphManager`:
+Test the node within a {codeterm}`GraphManager`:
 
 ```python
 def test_your_node_in_graph():
@@ -41,7 +41,7 @@ def test_your_node_in_graph():
     assert "test" in state
 ```
 
-Test edge connections if the node consumes or produces coupled data.
+Test {term}`edge <Edge>` connections if the node consumes or produces coupled data.
 
 ## 3. Verification Benchmarks (mandatory for physics nodes)
 
@@ -50,17 +50,19 @@ Location: `tests/verification/test_<name>_<benchmark>.py`
 Compare against analytical solutions or published reference data. Register with the `@verification_benchmark` decorator:
 
 ```python
-from maddening.core.validation import verification_benchmark
+from maddening.compliance import BenchmarkType, verification_benchmark
 
 @verification_benchmark(
     benchmark_id="MADD-VER-XXX",
     description="Analytical solution comparison for ...",
-    node_class="YourNode",
-    reference="AuthorYear",
+    node_type="YourNode",
+    benchmark_type=BenchmarkType.ANALYTICAL,
+    acceptance_criteria="Max error below the stated tolerance",
+    references=("AuthorYear",),
 )
 def test_your_node_analytical():
     """Compare YourNode output to analytical solution."""
-    node = YourNode("bench", timestep=0.001, ...)
+    node = YourNode("bench", timestep=0.001)  # plus your node's own parameters
     gm = GraphManager()
     gm.add_node(node)
     state = gm.run(n_steps=1000)
@@ -98,6 +100,7 @@ python -m pytest tests/nodes/test_your_node.py tests/verification/test_your_node
 python scripts/check_anomalies.py
 python scripts/check_impl_mapping.py
 python scripts/check_citations.py
+python scripts/check_numeric_constants.py
 ```
 
 ## Environment Variables
@@ -107,27 +110,267 @@ python scripts/check_citations.py
 | `JAX_PLATFORMS` | Force CPU backend (avoids GPU issues) | `cpu` |
 | `XLA_FLAGS` | Disable GPU autotune (avoids equinox segfaults) | `--xla_gpu_autotune_level=0` |
 | `PYTEST_DISABLE_PLUGIN_AUTOLOAD` | Prevent plugin conflicts | `1` |
+| `MADDENING_HYPOTHESIS_PROFILE` | Hypothesis depth/settings profile (`dev` or `ci`) | `dev` |
+| `MADDENING_SEARCH_ENTROPY` | Unset: every slow hunt of the targeted searches draws under its own fixed seed. `fresh`: the hunts explore under one integer of entropy, which each prints. That integer: replays the exploring run (see *Targeted searches* below). CI leaves it unset | unset, `fresh` |
+| `MADDENING_TEST_SHARD` | Keep only shard `i` of `N` of the test files (`tests/_sharding.py`); CI sets it per job. `i/N:weighted` deals the files by measured time, as the slow lane does. Unset: every file | `2/4`, `2/6:weighted` |
+| `MADDENING_TEST_JAX_TIMING` | Record each test's {term}`JAX` trace / lower / compile / cache-read time and processes started into the JUnit XML (`tests/_jax_timing.py`), for the time budget. CI sets it | `1` |
+| `MADDENING_TEST_RELEASE_BETWEEN_FILES` | When a test file's last test has run, clear the caches the test modules define, JAX's compiled programs and the freed heap, and print the resident size before and after (`tests/_release_between_files.py`). The slow lane sets it; unset, nothing is released | `1` |
+| `MADDENING_REQUIRE_PACKAGING_TESTS` | Fail, rather than skip, the wheel test when the build backend is missing. CI's test lanes set it | `1` |
+| `JAX_COMPILATION_CACHE_DIR` | JAX's persistent compilation cache directory; the test lanes point it at the restored or empty cache (see *The compilation cache* below). Unset locally: no cache | `$RUNNER_TEMP/jax-cache` |
 
 ## 4. Property-Based Testing (recommended for physics nodes)
 
-Location: `tests/verification/hypothesis/`
+Location: `tests/verification/hypothesis/` for the numerics suite; property
+tests that belong with a package (`tests/fmi/`, `tests/core/`) stay there.
+Configuration is global either way — see *Hypothesis profiles* below.
 
 Beyond analytical benchmarks, MADDENING provides a Hypothesis-based
 property-testing layer. See the full [Verification Guide](verification.md).
 
 **Property-based testing** (hypothesis) — test universal invariants:
 
+<!-- snippet: no-run, reason: pseudo-code: my_node and bounds={...} are placeholders -->
 ```python
 from maddening.testing.strategies import node_states, bounded_dt
-from hypothesis import given, settings
+from hypothesis import given
 
 @given(state=node_states(my_node, bounds={...}), dt=bounded_dt())
-@settings(max_examples=500, deadline=None)
 def test_my_node_finite(state, dt):
     out = my_node.update(state, {}, dt)
     for val in out.values():
         assert jnp.all(jnp.isfinite(val))
 ```
+
+Note the absence of `@settings`: `deadline`, `print_blob`, the example
+database and `max_examples` all come from the active profile.
+
+### Hypothesis profiles
+
+Profiles are registered and loaded in the **root** `tests/conftest.py`, so
+every property test in the tree gets them, whether or not the Hypothesis
+pytest plugin is loaded (the suite runs with
+`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`, which disables the plugin and its
+`--hypothesis-profile` flag). Do not register profiles in a sub-directory
+`conftest.py`, and do not repeat `deadline=None` per test.
+
+| Profile | `max_examples` | Used by | Notes |
+|---------|----------------|---------|-------|
+| `dev`   | 50  | default for every local run | fast enough to keep the full suite in its ~50-minute budget |
+| `ci`    | 200 | the `verify-hypothesis` GitHub Actions job | 4x the search; the depth tiers below scale with it |
+
+A per-test `@settings(max_examples=...)` **overrides the profile**, so a test
+that sets its own cap runs at that cap under both profiles and `ci` buys it
+nothing. That is the whole reason for the house rule and the depth tiers
+below.
+
+Both set `deadline=None` (a JAX compile blows any wall-clock deadline),
+`print_blob=True` (a failure prints a `@reproduce_failure` blob you can
+paste into the test) and `suppress_health_check=[HealthCheck.too_slow]`.
+
+Select a profile with the `MADDENING_HYPOTHESIS_PROFILE` environment
+variable; an unknown name is a hard error rather than a silent fallback:
+
+```bash
+# local default -- same as setting nothing
+MADDENING_HYPOTHESIS_PROFILE=dev pytest tests/verification/hypothesis/
+
+# reproduce what CI runs
+MADDENING_HYPOTHESIS_PROFILE=ci pytest tests/verification/hypothesis/
+```
+
+Every run prints the active profile in the pytest header, e.g.
+`hypothesis profile: ci (max_examples=200, database=.../.hypothesis/examples)`.
+
+### The example database
+
+Failing examples are written to `<repo>/.hypothesis/examples` (git-ignored,
+absolute path fixed in `tests/conftest.py` so it does not depend on the
+working directory). Hypothesis replays them first on the next run, so a
+falsifying example found once stays found. The `verify-hypothesis` CI job
+caches that directory with `actions/cache`, keyed per run with a
+`restore-keys` prefix, so the database survives across runs; a cache miss
+is not an error, the job just starts from an empty database.
+
+To clear a stale entry locally, delete `.hypothesis/`.
+
+### Depth tiers
+
+A hand-picked `max_examples` overrides the profile, so a test that carries
+one runs at that number under `dev` and under `ci` alike. With about a
+hundred such call sites across the tree, the deeper profile bought almost
+nothing: `tests/verification/hypothesis/` measured **707 s under `dev`
+against 721 s under `ci`** — 2% apart, for a profile that asks for four
+times the search. With the tiers in place the same suite measures **462 s
+under `dev` and 1365 s under `ci`** — `dev` is a third faster than it was,
+and `ci` is 3x `dev` because it is finally doing more work rather than the
+same work.
+
+Depth a test really does need to state is therefore expressed as a
+**tier**: a multiple or fraction of the active profile's `max_examples`,
+resolved once in the root `tests/conftest.py` and imported by name.
+
+<!-- snippet: no-run, reason: external: imports the repository's tests/conftest.py, which only the test suite can -->
+```python
+from tests.conftest import EXAMPLES_CHEAP, EXAMPLES_COSTLY, EXAMPLES_STANDARD
+
+@given(x=st.floats(-1e4, 1e4, allow_nan=False))
+@settings(max_examples=EXAMPLES_CHEAP)
+def test_clamp_is_idempotent(x):
+    ...
+```
+
+| Tier | Resolves to | `dev` | `ci` | One example is |
+|------|-------------|-------|------|----------------|
+| `EXAMPLES_CHEAP` | 4x the profile | 200 | 800 | a {term}`pure function <Pure function>` on scalars or small arrays, or a codec/socket round trip: no JAX trace, no graph build, no fresh compile — a few milliseconds at most |
+| `EXAMPLES_STANDARD` | the profile itself | 50 | 200 | an eager node update on a fixed shape, a call into an already-compiled step, a constrain/unconstrain round trip |
+| `EXAMPLES_COSTLY` | 2/5 of the profile, floored at 20 | 20 | 80 | a fresh JAX trace and compile, a dense solve or a `vjp` per draw, an optimiser loop, a multi-device `shard_map`, a full rollout, a graph built and compiled per draw |
+
+The tiers are named for **cost per example**, because that is the only
+thing the test author is in a position to judge; how wide to search at
+that cost is the profile's business. Pick one by reading what a single
+example actually does, not by matching the number that used to be there.
+Every run prints the resolved tiers in the pytest header beside the
+profile name.
+
+`stateful_step_count` is deliberately **not** tiered: it sets how long one
+example is, not how many there are, so scaling it with the profile would
+multiply `ci`'s work by the square and turn one example into seconds. The
+state machines in `tests/property/` keep an absolute step count — with the
+reason in the docstring — and leave `max_examples` to the profile.
+
+### `max_examples`: the house rule
+
+**A property test carries no `max_examples`. The profile owns it.** That is
+what makes "run the suite deeper" a one-line change instead of a hundred.
+
+An explicit `max_examples` is an exception that must be justified *in a
+comment on the line above it*, and is only justified when a single example
+is genuinely expensive — a fresh JAX trace/compile per draw, an optimiser
+loop, a multi-device `shard_map`, a full rollout. Then:
+
+* the floor is **20**. Below that Hypothesis barely gets past reuse and
+  generation and the test is decoration: it can pass for months and fail
+  once, which is exactly the failure mode this configuration exists to
+  remove;
+* reach for a **tier** before a number. A tier says what the example costs
+  and lets `ci` search deeper than `dev`; a number freezes both;
+* a bare number is still right where it encodes a real constraint, and the
+  comment must say which:
+  * *the search space is exhausted anyway* — a rate multiplier drawn from
+    2..5, a pair of timesteps sampled from four values. Hypothesis stops
+    when it has seen every case, so a profile-relative cap would promise
+    depth that does not exist;
+  * *one example is measured in seconds* — a 30-iteration
+    Levenberg–Marquardt fit over a full rollout. `EXAMPLES_COSTLY` under
+    `ci` would turn that test into minutes on its own;
+* an explicit value *above* the profile default is fine and needs no
+  special pleading — it only ever deepens the test.
+
+`verify_node` / `assert_node_verified` are a separate knob: they build
+their own `settings` internally (with `database=None`), so the profile does
+not reach them. Their `max_examples` argument defaults to 200; a call site
+that lowers it is subject to the same floor and the same
+comment-your-reason rule.
+
+### `assume` is a budget, and nothing tells you when you have spent it
+
+**Generate the valid shape instead of rejecting the invalid one.** Every
+`assume()` that fails, and every strategy `.filter()` that rejects, throws
+away a draw the test already paid to build — and says nothing about it. A
+test rejecting 5% of its draws and one rejecting 85% print the same green
+tick and the same `max_examples`.
+
+The one thing that ever says otherwise is `HealthCheck.filter_too_much`, and
+it is a sampling test on the first few dozen draws, so its edge is very
+soft. Measured against the constants in Hypothesis (50 rejected draws before
+10 accepted ones — unchanged across 6.165-6.168, and checked behaviourally on
+whatever version is installed), the chance that *one run* of a test trips it
+is:
+
+| filter rate | 40% | 55% | 64% | 70% | 80% | 85% | 90% |
+|---|---|---|---|---|---|---|---|
+| per-run risk | 2e-12 | 1e-6 | 4e-4 | 7e-3 | 23% | 61% | 93% |
+
+Which is how a test sits green for months and then goes red for whoever next
+narrows an unrelated strategy.
+`test_accelerating_every_field_lands_on_the_same_answer_as_plain_iteration`
+did exactly that: its first gate rejected 55% of draws on a clean tree, an
+inert-knob change moved it to 64%, and together with five more `assume`
+calls it failed CI with "9 inputs generated successfully, 50 filtered out".
+
+What a high rejection rate does **not** do on this Hypothesis version is
+silently shallow the search. The engine keeps drawing until it has
+`max_examples` *valid* examples and only gives up below ~1% valid; measured
+against a synthetic gate, a test at 98% rejection still ran its full 200
+examples, using 9068 draws to do it. So the cost is wall-clock and
+health-check fragility, not a number of examples that lies.
+
+**Measure it, do not guess.** `scripts/audit_property_rejection.py` prints
+the rate for every test in a run:
+
+```bash
+MADDENING_HYPOTHESIS_PROFILE=ci PYTHONPATH=src JAX_PLATFORMS=cpu \
+    python scripts/audit_property_rejection.py \
+        tests/property tests/verification/hypothesis
+```
+
+`--check` turns it into a gate: the run fails if any test exceeds
+`MAX_REJECTION`. That is what the `verify-hypothesis` CI job runs, wrapped
+around the suite it was already running, so the measurement costs nothing.
+
+**The pattern.** When a gate rejects anything worth mentioning, the fix is
+almost always a parameter on the strategy, defaulted so no other caller
+changes:
+
+<!-- snippet: no-run, reason: fragment: lines inside a composite strategy -->
+```python
+# before: a third of every draw built a graph and threw it away
+recipe = draw(graph_recipes(require_coupling_group=True))
+assume(not any(g.subcycling for g in recipe.coupling_groups))
+
+# after: 0.0% rejected
+recipe = draw(graph_recipes(require_coupling_group=True,
+                            allow_subcycling=False))
+assert not any(g.subcycling for g in recipe.coupling_groups), (
+    "allow_subcycling=False must not produce a subcycled group")
+```
+
+Note the second half. **Promote the `assume` to an `assert`.** A generator
+that stops holding up its end then fails loudly instead of quietly going
+back to discarding half the search.
+
+Where the condition is an outcome rather than a shape — did the solve
+converge, did the fit find a gradient — it cannot be generated. Say so, and
+**put the measured residual in the test's docstring** so the next reader
+knows what that test's `max_examples` actually buys.
+
+**Never reach for `suppress_health_check=[HealthCheck.filter_too_much]`.**
+It makes the red go away and deletes the only signal anyone gets that the
+gate is getting worse — the test goes on spending most of its wall-clock on
+draws it throws away, and the next person to narrow that strategy has
+nothing to notice. Measure it and fix the generator, or measure it and
+record the residual; suppressing is neither.
+
+**A rejection rate is a property of the checkout path, not just the test.**
+Since the 6.16x line Hypothesis harvests the literal constants out of every
+*local* module and injects them into draws. Whether a module counts as local
+is decided by `is_local_module_file`, which excludes any path containing a
+`test` or `tests` component — so a git worktree under
+`MADDENING-wt/test/<branch>/` has the whole of `src/` classified as test
+files and injection silently **off**, while CI at
+`/home/runner/work/MADDENING/MADDENING` has it **on**. Measured on one
+commit: 0 local constants in such a worktree against 497 without the
+component, and the four `TestFIM` rates came out 3–10 points *lower* with
+injection on. The audit prints which side it ran on with every run; if you
+are comparing two measurements, check that line first.
+
+**Overruns are a different problem.** The audit reports them in their own
+column. An `overrun` is Hypothesis running out of entropy for a large draw,
+not the test rejecting an input; it answers to `HealthCheck.data_too_large`
+(20 overruns before 10 valid, a much tighter window) and it is fixed by
+drawing smaller structures, not by removing a gate. Every
+`hypothesis.extra.numpy.arrays` property in this tree overruns a few percent
+of its draws with no `assume` written anywhere in it.
 
 **Node battery** — finite outputs, structure, determinism, jit/eager
 agreement, finite gradients, in one call:
@@ -140,6 +383,1585 @@ def test_my_node():
 ```
 
 Install with `pip install maddening[verify]`.
+
+### Targeted searches: a score instead of a grid
+
+A grid tests the points someone chose; `tests/property/targeted_search.py` hunts between them. You give `targeted_search(strategy, score, threshold, profile=...)` a strategy that draws every number from a continuous range and a **score**: a function of one drawn example that returns `(value, details)`, where `value` is a non-negative float saying *how wrong* the result is (0 where there is nothing to say, larger the further it is from the claim; `nan` is refused) and `details` is whatever explains it. The helper runs the property `value <= threshold` and passes every value to `hypothesis.target`, so Hypothesis mutates the worst example it has seen towards a worse one, and a failure reports the shrunk example with its score and details. To add a score, write the claim as a distance (the relative error of a fit that says `converged=True`; the gap between a reported loss and the loss of what was returned), return 0 for every outcome that is right without being the expected one (a refusal; an optimum that is not the truth), keep the score continuous below the threshold so the search has something to climb, set the threshold to the tolerance the claim states, and prove the score can fire by running the search on a tree that has the defect it is for. Each search runs twice: under `PER_PUSH` (derandomised, the house floor of examples) and, slow-marked, under `SLOW` (the hunt: many examples, under a seed of its own). Build the problem so that drawn numbers are arguments of the compiled programs and only a change of structure compiles. `tests/property/test_sysid_targeted_search.py` is the worked example: three scores over `fit_lm` on the parameter guide's spring.
+
+**A hunt is seeded; exploring is a switch.** In the slow lane every hunt runs under a fixed seed of its own, written `SLOW.seeded(n)` (`HUNT_SEED` in the linear {term}`coupling <Coupling>` search, 1000 + block in the nonlinear one, 2000 to 2002 + 10 block in the geometry one, 4000 + the search's place in the {term}`sysid` one), with no example database: the same tree run by the same command draws the same examples and gets the same verdict, so a red slow lane is a change in the tree, as a red push is. `targeted_search` refuses a random profile that has no seed, and `tests/property/test_targeted_search.py` scans, per push and with nothing compiled, every test module that names the slow profile for a hunt written without one. "The same command" is part of the statement: under one seed the draws also depend on the constants Hypothesis collects from the local modules loaded in the process (here the `maddening` ones), so a hunt can draw other examples in a slow-lane shard than in a run of its file alone, and a literal added to `src/` moves them (that is a change in the tree). A jax installed outside a `site-packages` path (`pip install --target` into a scratch directory) counts as local too and changes every draw: put it on the path through a directory named `site-packages`. The search also climbs its scores, so another jaxlib's rounding can lead a hunt elsewhere (the linear search's 42 hunts, in the same layout, against jaxlib 0.11.0: the same examples on 0.10.2 in all of them, and in 36 on 0.11.2). So can another machine's: an example's gains are scaled through LAPACK (`values_of`), whose kernels round differently per CPU, so one `Case` is not the same float problem everywhere. The example that found MADD-ANO-247 scores 1.098 on one CI runner and 0.21 on another machine (0.12 there under another BLAS kernel), on jaxlib 0.10.2 and 0.11.2 alike. The statement is one verdict per tree, command and machine; a find whose score a last bit decides is pinned from explicit values with a margin, as that entry's is (`tests/core/test_coupling_interface_floor_of_a_delivered_difference.py`), not by its example's score. **To explore**, set `MADDENING_SEARCH_ENTROPY=fresh` on a slow run of a search file, one file per process: `MADDENING_SEARCH_ENTROPY=fresh pytest tests/property/test_coupling_targeted_search.py -m slow -rP`. One integer of entropy is drawn for the process and mixed into the seed of every hunt (linear, nonlinear, geometry, sysid); each hunt prints it (`bound: exploring under MADDENING_SEARCH_ENTROPY=1234567890 ...`, shown by `-rP`, and by pytest for any test that fails), and so does the message of a find. The per-push searches read no switch, and nothing in CI sets it. **To replay** an exploring run, give the same command that integer in place of `fresh`: every hunt draws what it drew. A find is kept by its example, not by its seed: the failing example in the message (shrunk in the linear and the sysid search, as drawn in the other two) goes into the module's table of pinned cases, where it runs on every push whatever a later tree draws.
+
+### The coupling targeted search
+
+`tests/property/test_coupling_targeted_search.py` runs four such searches over the numbers `coupling_diagnostics()` reports with a flag that says they can be relied on. They exist because sampling did not converge: each review found one more graph shape on which a number was wrong with its flag set.
+
+| Search | Reported number, and its flag | Exact answer | Score (a broken promise is over 1) |
+|---|---|---|---|
+| error bound (CPL-088) | `spectral_error_bound`, `spectral_usable` | the distance to the group's {term}`fixed point <Fixed point>`, in its norm at the returned state | distance / bound |
+| {term}`spectral radius <Spectral radius>` (CPL-087) | `rho_spectral`, `spectral_usable` | the spectral radius of the pass's Jacobian | \|reported − exact\| / (1e-4 of the radius + what a rounding-sized perturbation of the weighted Jacobian moves it by; past rank eight, where the claim says "an estimate", also the 5% of `1 - rho` the flag tests); for a Jacobian that is normal in the norm's weights also how far the estimate is *above* the radius |
+| gradient bound (CPL-093) | `gradient_relative_error_bound`, `gradient_bound_usable` | the implicit derivative taken at the returned iterate against the same dense solve at the fixed point, the worst over every scalar gain and every mapping weight the graph holds that the pass resolves (the row's condition: its whole value moves one pass by more than `RESOLVED_MARGIN` of the reported floors; what the others read is in the report, and is no score) | relative error / (bound + 64 eps) |
+| floor (CPL-097, CPL-100) | the floor `precision_limited` reads and the bound adds | the exact residual of the returned state | (exact residual − reported residual) / floor |
+
+A score is 0 where its flag is False: an unusable number is never a failure. A search that only ever sees unusable numbers proves nothing, so each reports the fraction of its examples whose flag was set and the slow profile fails under a half.
+
+- **The generator** (`cases`) draws a *cell* and the numbers put on it. A cell is what a compiled graph bakes in: a structure of `coupled_topologies.search_topologies()` (rings of 2 to 8 scalars, a {term}`multi-rate <Multi-rate>` ring, a pair that carries a prescribed spectrum, a pair of twelve scalars that eight Krylov steps do not resolve, a fan-out hub with a chord and a field read twice, a ring of mapped edges, dense or sparse), float32 or float64, a row of `KNOBS` (each stock acceleration, both schedules, the three norms) and a cap of five passes or 120. Everything else is an argument of the compiled step, so a cell compiles once: the loop gain, non-normal gains, a field small beside what drives it (`place_group_fixed_point` puts the fixed point where the example says, so a bias cancels its inputs), slow modes within a drawn fraction of each other, a mapping row that differences two entries of a large field, a decimal change of units on one node (`rescale_node_units`), and how far from the fixed point the step starts.
+- **The reference** is `coupled_topologies.LinearModel` of the values as the graph holds them: the fixed point and the pass's Jacobian in closed form, in extended precision. Nothing in a score calls the code it scores, with one exception: the floor is also read back out of the reported bound, so a floor the report computed differently from the documented rule is seen.
+- **What the scores allow, and why.** The floor is promised only where no node cancels inside itself (CPL-092's condition), which a relay whose bias cancels its inputs does: the bound and floor scores allow the floor the measured factor (`_cancellation`), counted on the node's own terms, so a cancellation inside a *mapping* that a member reads is not allowed for (MADD-ANO-212). Where the {term}`interface norm <Interface norm>` itself reads a value an edge delivers by cancellation, the floor's unit is the delivered value's own magnitude and the value rounds at its source's (MADD-ANO-247, open): the scores allow the floor that factor as well (`_reading_cancellation`: the largest sum of magnitudes a row of a mapped edge adds over that edge's largest delivered entry, exactly 1 wherever the norm reads a field as stored), and the defect is held with no allowance by `tests/core/test_coupling_interface_floor_of_a_delivered_difference.py`. The radius has two scores, one per statement of CPL-087: `radius` holds `rho_spectral` to what a backward-stable computation in the analysis dtype delivers (the radius's movement under perturbations of the weighted Jacobian of that dtype's rounding), and `radius_strict` to the statement a user can check without the Jacobian (within 5% of `1 - rho_spectral` wherever `spectral_usable`). A closed finding moves from the strict-xfail `KNOWN` table to `FIXED`, which pins its score *and* what its flag reads.
+- **Per push** each search scores 150 examples on five cells (`PER_PUSH_CELLS`), under a fixed seed of its own: an example costs about 20 ms once its cell is compiled, and at the house floor of 20 a search did not find a resolvent factor halved. **Slow**, 800 examples a search over every cell (about sixty), a block of cells at a time so each compiles once, every hunt under its own seed (`HUNT_SEED`).
+- **The domain.** `CLAIMED` is what the claims are made on and the tree holds. A direction a known defect lies in is a wider `Domain` (`SMALL_FIELD`, `DEGENERATE`, `CANCELLING`); what a hunt over it found is pinned in `KNOWN` as a strict xfail that names the finding, and `SEEDS` holds one clean example per direction.
+
+**To add a shape:** if it is a number (a magnitude, a ratio, a start), add a field to `Case`, apply it in `values_of`, draw it in `cases` behind a `Domain` field, and add an example to `SEEDS`. If it is structure (an edge, a node size, a knob), add a topology to `search_topologies()` or a row to `KNOBS`; `_cells()` picks it up for the slow profile, and it joins `_FIRST` only if it should cost every push a compile (about 3 s). Then run the hunt over the new domain on three seeds (`search(name, cells=..., domain=..., profile=SLOW.seeded(k, shrink=False), fail=False)` gives the examples-to-find). An over-threshold example that is a defect goes into `KNOWN` with the claim it breaks; one that the claim does not promise goes into the score as an allowance with its reason. Prove a new score can fail with seeded faults in a scratch copy of `src/` (a halved factor, a dropped term, a flag forced True), each of which the per-push profile must find.
+
+### The interface norm's side of a mapped edge
+
+`convergence_norm="interface"` reads a mapped internal edge on one side of its mapping: the compact side (the decision of 2026-10-07). A static mapping whose target is larger than its source is read at its source value (before the mapping and the transform, which the step applies after the mapping), a tie and a smaller target at the delivered value. One constant says which rule the tree implements, `tests/property/coupled_topologies.py::INTERFACE_SIDE`, now `"compact"`; the library's one place is `_norm_side` in `core/coupling/_interface_plan.py`. The instruments below were written, and their failing rows pinned, while it read `"delivered"`: every expectation follows the constant, and each comparison under the *other* rule is a strict expected failure wherever the two rules differ, so each instrument is shown able to tell them apart. (The exact model also accepts a per-edge declared side, `{edge: "source" | "delivered"}`; the library has no such declaration.)
+
+| Instrument | Where | What it holds |
+|---|---|---|
+| The claim as a property | `tests/property/test_coupling_interface_side.py`, on the graphs of `tests/property/interface_side_graphs.py` (m markers coupled to N cells through a gather and a scatter, N up to 1e6) | `converged=True` implies the distance to the fixed point in the compact readings is at most K tolerances. K is `\|D (I - A)^{-1} (I - L) D^{-1}\|` of the loop on its compact readings (the identity behind CPL-088, with a converged residual at most its threshold): about `1 / (1 - gain)`, and independent of N. Asserted on every kind: where every edge gathers, and where one scatters at sizes two and three decades apart (those rows were strict expected failures raising `Diluted`, on the growth of the excess with the large side, until the rule landed). |
+| The reference of each rule | the same module | The plain loop's residual, verdict and pass count against the float64 reference under the tree's rule, and under the other rule wherever the two read the same thing. Where they differ the comparison under the other rule must fail (strict), so the reference is shown able to tell them apart. |
+| The marker-side twin | the same module (`interface_side_graphs.marker_side_twin`) | The two-way graph with its scatter applied inside the grid node: both internal edges carry marker-sized values, so its interface norm reads the compact side by construction. It stops where the compact reference does (per push), and an edge-mapped graph reports what it reports, key for key, with and without `diagnostics=True`. This is the comparison that holds the criterion, the floor and the spectral analysis to one reading: a bound taken on another reading is a different number but rarely an understated one, which a score against the true distance does not see. It has numbers to compare only where the spectrum settles: on the three original diagnosed rows (6 and 20 markers) both graphs report `spectral_usable=False` and an infinite bound, so `TWIN_SETTLED` adds rows of three and four markers, where `spectral_error_bound` and the gradient bound are finite and agree to 1e-7 (one of them per push, in `tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py`). Float32 with the `sparse-transposed` layout is not a row: the two graphs sum the scatter in different orders and the float32 Krylov bounds amplify that rounding (1.60 against 1.17 measured). |
+| The exact model's option | `LinearModel(interface_side=...)` | `"delivered"`, `"compact"`, or `{edge: "source" \| "delivered"}` for declared sides; `None` follows `INTERFACE_SIDE`. `interface_side_of(edge)` is the rule, and asks the module's `interface_side_of(topology, edge, rule)`: the one statement of it on the test side; `pass_residual`, `plain_exit` (residual, pass count, verdict and state of `acceleration="none"`, with the margin its prediction holds by) and `interface_claim` (the distance and K) are stated under it. |
+| The fifth search score | `test_coupling_targeted_search.py`, the block at its foot | `"side"`: where a group reports converged under the interface norm, distance in the compact readings / K. Its cells are the pairs and the hub of `side_topologies()`, size ratios 1/300 to 300, dense, dense-local and sparse-local. Per push the tie and one cell of ratio 300; every cell is claimed, and the two cases the hunt reached under the delivered rule (3.73 and 4.72 K tolerances) are held as fixed. The same structures at small sizes are also cells of the four scores above (slow). |
+| The library's functions, edge by edge | `tests/core/test_the_interface_norm_reads_a_mapped_edge_on_its_compact_side.py` | No graph: the residual of one mapped edge is, to the bit, the residual of a plain edge over the prescribed reading (value, entry count and magnitude) on the dense form, both sparse layouts and a mapping class of the caller's own, expanding, reducing and tied, with and without a transform, float32 and float64; the float floor takes its `eps` and its dead band on the side that is read (the two cells where a floor on the other side is another number). On compiled pairs: a group owns `reading_floor` exactly where an edge is read through its mapping, the step writes the slots it was compiled with, and the plans `validate()`, `compile()` and the trace build read every edge on the same side. |
+| The numerical reference's reading | `test_coupling_nonlinear_search.py` (`edge_readings`) | The nonlinear search hands `coupling_reference` the norm's reading itself, and asks `coupled_topologies.interface_side_of` for each edge's side. It had kept "what each edge delivers" when the rule changed, and on the one hunted cell with a mapping onto a larger member under this norm the floor and the error bound were scored in a reading the library does not report in (4.3 floors and 1.106 of the bound, for 0.0008 and 0.905 in the rule's); the hunt reached such a draw on some jax versions and machines only. Per push, with no graph compiled, the search's reading is the linear model's on every structure under either rule (`test_the_search_reads_an_edge_where_the_linear_model_does`); slow, three draws on that cell (found by its configuration) where the two sides are different numbers, with the premise that they are: a reference or a library on the other side fails there. Slow as well, each score is hunted on each such cell alone (`test_the_hunt_over_a_cell_whose_mapping_is_read_at_its_source`): a block hunt spreads 115 examples over seven to nine cells and climbs towards the worst score of any, and on the appended block it drew this cell once or not at all, so that neither seeded fault failed it. |
+| The frozen identity | `test_differential_geometry_edges.py`, the block at its foot | The static twin of a frozen geometry case reports the interface residual of the tree's rule (per push); the frozen graph against it waits for the stage that lets the interface norm read a geometry. `frozen_interface_entries` is the one place the static rule and the geometry rule meet. |
+
+A predicted pass count is only asserted where every estimate the reference's loop compared was at least 5% from the threshold (`EXIT_MARGIN`), and the seed is chosen by the reference's float64 arithmetic alone, so the same draw is used on every platform.
+
+**To add a mapping shape:** a size pair in `coupled_topologies.SIDE_PAIRS` (its search cells follow), a pattern under a new kind in `LOCAL_KINDS` (`mapping_pattern` returns its mask; `build` decides its layout), or a kind or a layout in `interface_side_graphs.py` (`KINDS`, `MAPPINGS`: the reference reads the matrices, so a new layout needs no new arithmetic). The gradient score differentiates with respect to the weights the graph holds: every entry of a matrix held dense (a zero one included), and of a sparse mapping the entries of its pattern, since an entry outside it is structure and no parameter (`coupled_topologies.parameter_entries`, which a new kind must answer for; `test_the_gradient_constants_of_a_mapped_edge_are_the_weights_its_build_holds` compares it with what `build` lays out). Give that score cells with no member above eight entries (`GRADIENT_PROBE_ENTRY_LIMIT` is 64 entries a constant).
+
+### A numerical reference, nonlinear cells, and twins with the same interface reading
+
+The coupling search above scores against a closed form, which exists only for linear relays. Three instruments extend it to groups that have none: a nonlinear node today, and a mapping that reads a moving geometry once the diagnostics read one.
+
+**The numerical reference** (`tests/property/coupling_reference.py`, `PassReference`) computes, in float64, what the closed form gave: the group's fixed point, the dense Jacobian of one pass at any iterate, and from them the spectral radius, the distance of a returned iterate in the norm the report states its bound in, the exact residual, and the error of the implicit gradient for every scalar constant.
+
+- **How the pass map is obtained.** The caller builds an *x64 twin* of the graph under test: the same nodes, edges, schedule and {term}`sub-cycling <Sub-cycling>` in float64, its group at `max_iterations=1` with no acceleration and `predictor="linear"` (`twin_knobs`). One step of the twin is one pass, differentiated straight through. The pass starts from the predictor's extrapolation `2 pred_0 - pred_1`, which the step keeps in three `_meta` slots of the state; writing the iterate `x` into both gives `P(x; pre)`: one pass from the iterate `x`, each member integrating from the pre-step state. The map is the graph's own compiled step called on a state, so nothing of the estimator is called, and `jax.jacfwd` of it holds every dependence the pass has on the iterate (transforms, mappings, a geometry field a member holds). The slots' layout is found, not assumed: the twin is stepped once on a drawn example and the order of members whose flattened fields equal the stored `pred_0` is taken.
+- **What it catches:** anything by which the estimator's numbers disagree with the map the solve iterates (a term of the pass missing from the estimator's Jacobian, a reading at another time level than the pass's, a Jacobian taken at another state than the returned one, a bound in another norm). **What it does not:** a defect in the pass itself, which the reference inherits (the closed-form and time-level references hold the pass); a difference between the single-pass branch and the pass an iterating group runs (checked separately: three passes of an iterating twin are three compositions of the reference's map, to float64 rounding); a node that branches on its dtype; a graph with more than one {term}`coupling group <Coupling group>`.
+- **Validated against the closed form** on every per-push draw of the linear search (its 556 distinct examples on five cells, its seed shapes, and 150 draws on the multi-rate cell, in the slow lane; forty draws on one cell per push). Worst differences measured: the radius 1.0e-15; the Jacobian 1.6 float64 `eps` of its largest entry; the fixed point 5.7 `eps` of the field times the resolvent's norm; the distance 2.4e-12 of itself; the gradient error 1.9e-12. `ALLOWED` in `tests/property/test_coupling_nonlinear_search.py` holds each to at most 2**12 roundings.
+- **Cost:** per twin, its build and two compiles (the pass with its Jacobian; the constants' sensitivities), together under two seconds for a dozen scalars; per example, a few dozen jitted calls (about 20 ms). The seconds of a cell are the compile of the graph under test with its diagnostics.
+
+**The nonlinear cells** (`tests/property/test_coupling_nonlinear_search.py`) are structures of the linear search whose members pass each port's input through a nonlinearity centred on a parameter `c` before its gain: a saturating gain `c + tanh(s (u - c)) / s`, a quadratic term `u + s (u - c)^2`, or the product of two fields' deviations. Each has `phi(c) = c` and `phi'(c) = 1`, so with `c` the input at the linear group's fixed point the nonlinear group has the same fixed point and the same Jacobian *there*: the numbers of a case are drawn exactly as the linear search draws them, plus the curve `s max|c|` (0.01 to 100), and the linear closed form checks the reference's fixed point on every example. Away from the fixed point, where a capped solve returns, the Jacobian is another matrix, and only the reference knows it.
+
+| Score | What changes for a map that is not affine |
+|---|---|
+| error bound (CPL-088) | the claim is for a linear `F` and "asymptotic" otherwise, so the distance is divided by the bound times `1 / (1 - h)`, with `h = ‖(I − J(x))⁻¹ (J_mean − J(x))‖` measured by the reference (`J_mean` the mean Jacobian between the fixed point and the returned iterate). `x − x* = (I − J_mean)⁻¹ (x − F(x))` exactly, so a bound that is right for the linearisation at the returned iterate is short by at most that factor: a score over one is a wrong number, not a nonlinear map. Unscored where `h ≥ 1` |
+| spectral radius (CPL-087) | scored against the reference's Jacobian **at the returned iterate**, which is what the claim says and which differs from the fixed point's here |
+| gradient bound (CPL-093, CPL-095) | two scores: over the gains, biases and mapping weights (`gradient`), and over each nonlinearity's `c` and `s` (`gradient_vanishing`), which the fixed point does not respond to, so that the relative error is of order one at any other iterate |
+| floor (CPL-097, CPL-100) | the exact residual is the reference's |
+
+**A cell's index is its name.** The pinned cases of the three searches (`SEEDS`, `FIXED`, `KNOWN`, `UNRESOLVED`, ...) say `Case(26, ...)`, and the comment beside each describes the configuration it was found on, so a cell never changes its index or its configuration. To add a cell, *append* it after every cell the search has (`APPENDED` in the nonlinear search; the blocks of small cells at the foot of the linear one) and add its digest to `PINNED` in `tests/property/test_coupling_search_cells_are_pinned.py`, which the guard's failure message prints. To add a field to a cell's class, give it a default at which every cell there is stays the configuration it was, and name the field and that value in `ADDED_SINCE_PINNED` in the same file: at that value the field is left out of the digest, so no pinned digest is replaced (the geometry cells' `tolerance`, zero for the linear search's). A search lays its cells out over tuples frozen for the purpose (`ROTATED_KNOBS`), never over the length of a table another module can grow: on 2026-10-07 a row appended to the linear search's `KNOBS` turned 21 of the nonlinear search's 43 cells into other configurations, four slow tests went red a day later and two pinned cases kept passing on configurations their comments no longer described. The guard runs per push with no compile: it holds a digest of everything each cell bakes in (its fields, the group's configuration as resolved, the structure), names the cells that moved and the pinned cases on them, and is itself held by five seeded faults (`L1` to `L5` in `tests/compliance/test_guard_mutations.py`). The linear search's returned-state cells (`RETURNED_CELLS`) are under it too, as `linear-returned`. A table that other test files import is changed only with those files' tests run, their slow ones included.
+
+Per push: one cell (`tri`, three members with one nonlinearity each, float32, five {term}`Jacobi` passes), twenty derandomised examples a score, and two seed examples on which a number is within an eighth of its limit. Slow: 115 random examples a score on each of six blocks of seven cells (every structure, each nonlinearity, both dtypes, every configuration), not shrunk (a shrink is thousands of steps). The gradient bound is scored twice, over the gains, biases and weights and over each nonlinearity's own constants (`gradient_vanishing`), and in both only over the constants the pass resolves (`PassReference.pass_responses` above `RESOLVED_MARGIN` floors: CPL-093's condition). To add a nonlinearity, add a branch to `phi` with `phi(c) = c` and `phi'(c) = 1`; to add a structure, add it to `STRUCTURES` (single-rate: a {term}`sub-cycled <Sub-cycled>` member reads its input interpolated, and `c` would not be its input at the fixed point).
+
+**The twins with the same interface reading** (`tests/property/geometry_graphs.py`, `tests/property/test_interface_reading_twins.py`). `convergence_norm="interface"` reads an internal edge as delivered unless its static mapping delivers more entries than its source holds, when it reads the source field. The node-inlined twin of a geometry edge moves the mapping into the *target*, so its edges deliver the raw source field and its interface norm is another norm wherever the edge-mapped graph reads a delivered value. Two twins keep the reading of an edge read as delivered; under the interface norm each is built with `keep=gg.read_at_its_source`, which leaves an edge the norm reads at its source as it is (a relay field or a transform in the mapping's place would be read as delivered, which is another reading there; the twin that moves a scatter's mapping is the marker-side twin above):
+
+- `transform_twin` writes a static mapping as its edge's transform: the same state and the same reading, so every number of the report but the gradient bound is the edge-mapped graph's (bit for bit as measured; held to 2**10 `eps`). The gradient bound probes the step's parameters, and the weights are constants of a transform.
+- `relay_twin` moves the mapping into a relay fused with the *source* node, whose state field is the mapped value; a plain edge delivers it. The reading is the same entry for entry, and a geometry the mapping reads sits inside the relay (source anchors only: a target-anchored geometry would reach the relay over an internal edge the norm would read too, and so would a relay that is a node of its own). The state has the relay's field in it, so what is equal is what the reading decides: every iterate of an unaccelerated solve, the residual, the pass count, the verdict, `rho_spectral` where the spectrum is resolved, the flags. `spectral_error_bound`'s factor is 1.1% to 3.4% apart (it is the norm of a resolvent compressed onto a Krylov basis of the state), the float floor 13% apart, and the gradient bound is in another norm; under Jacobi the relay doubles the scalars a pass carries, so the comparison is made under {term}`Gauss-Seidel`.
+
+On a static mapped edge both twins report as the edge-mapped graph does, and a fault seeded in the library's reading (the edge read without its mapping) puts the two residuals 8.8% apart. On the solve path the relay twin of a *moving* source-anchored geometry steps as the edge-mapped graph bit for bit, and a geometry read from the pre-step state in place of the iterate breaks that after two passes (a converged solve does not see it: at a fixed point the two agree). The interface norm reads a `multilinear_grid` edge in a single-rate group (a gather as delivered; a scatter at its source value and, for a source anchor, its positions in grid spacings) and is refused for another kind or a sub-cycled group. Neither twin above states that rule for a scatter: the relay twin puts the mapping on the delivered side, and the node-inlined twin weighs a geometry by its own magnitude. The instruments of the rule are `tests/property/geometry_interface_graphs.py` (a float64 restatement of the pass, the reading with what each part is measured against, the plain loop's exit, the fixed point and the claim's `K`; and `marker_side_twin`, the scatter inside the grid node with the positions on a plain edge, carried relative to a pinned marker so that the edge's own magnitude is exactly one spacing) and its test module `tests/property/test_coupling_geometry_interface_norm.py`, whose docstring lists the seeded faults and the first test that sees each; the geometry search has nine cells under this norm (`test_coupling_geometry_search_under_the_interface_norm.py`). The bounds under this norm are withheld: `RELAY_INTERFACE_CASES`, in the harness's phase-1 block, are the cases whose reports are compared with their relay twins' once `INTERFACE_BOUNDS_READ_GEOMETRY` is set, and then for the gather only. The harness module's docstring lists the six faults that later work is held to, the instrument for each and the signal measured where the fault can be seeded today.
+
+## Test time budget
+
+Every push runs the default lane (everything not marked
+`@pytest.mark.slow`) twice, once per JAX lane, and it is what everyone waits
+on. Each test's wall-clock on the GitHub runner (setup + call + teardown)
+falls in one of three bands:
+
+| Time on CI | What it means |
+|---|---|
+| up to 1 s | Fine. |
+| 1–5 s | The watch list. Optimise it when you are in the file; usually the cost is {term}`JIT compilation` (see below). |
+| over 5 s | Mark it `@pytest.mark.slow`, unless it can be made much faster, or it guards something important enough to pay for on every push. In that case, add it to `tests/duration_allowlist.txt` as `<node id> # kept: <why>`. |
+
+Slow tests still run, but less often, and not on every branch.
+`slow-tests.yml` runs the whole suite, slow tests included, on a schedule
+(Monday, Wednesday and Friday) that covers `main` only, because GitHub runs
+a scheduled workflow on the default branch and nowhere else. A release
+branch (`release/**`) gets a slow-lane run only when someone dispatches the
+workflow on it by hand, from the Actions tab or with
+`gh workflow run slow-tests.yml --ref <branch>`. So a slow test you add on
+a release branch has not run on that branch until someone does. A property
+under `tests/verification/hypothesis/` that is marked slow also still runs
+on every push, at the `ci` profile's depth, in the `verify-hypothesis` job,
+which selects `-m "slow or not slow"`, but that job installs jax 0.10.2
+only. So on the other JAX lane the property runs only in the slow lane.
+Give it an unmarked sibling at reduced depth (a few fixed draws, one
+rollout length, a smaller population) that the default lane runs on both
+JAX lanes, and name it at the mark as `# Per push: <node id>`. Every slow
+property in that directory has one. A slow test that needs a tool the
+default lane installs (valgrind, for `tests/fmi/test_c_unit.py`) needs
+`slow-tests.yml` to install it too, or it skips there and runs nowhere.
+Before you slow-mark a test that checks a framework property, read *What
+only the slow lane checks* below.
+
+Two more ways a test can fail to run where you expect it to:
+
+- **A test that reads documentation.** A pull request that changes only
+  documentation (`docs/`, Markdown, `plans/`, `.claude/`, `LICENSE`,
+  `CITATION.cff`) runs the `compliance` job alone, and that job runs
+  `tests/compliance/` and nothing else. A test that reads one of those
+  paths therefore belongs in `tests/compliance/`;
+  `tests/compliance/test_ci_workflows.py` fails if a test elsewhere names
+  one. A push to `main` or `release/**` always runs every lane.
+- **A test that needs `usd-core`.** Only the `test-usd` job installs the
+  `usd` extra, so a test outside `tests/usd/` that imports `pxr` or
+  `maddening.usd` skips in the sharded lanes. List its file in `test-usd`'s
+  pytest command in `ci.yml`; the same compliance test checks that you did.
+  Do not slow-mark it: `test-usd` runs no slow test and the slow lane has
+  no `usd-core`, so it would run nowhere (the compliance test checks this
+  too).
+
+CI enforces the budget in the `Test time budget` step of each test lane
+(`scripts/report_test_durations.py`, reading pytest's JUnit XML):
+
+- The run page's summary shows the band counts, the 30 slowest tests and
+  the 15 slowest files. Every test over 1 s is also listed at the end of the
+  log (`--durations=0 --durations-min=1.0`). The XML is uploaded as the
+  `test-durations-*` artifact and kept for 90 days.
+- An unlisted test over **5 s** gets a warning annotation on the run.
+- An unlisted test over **20 s** fails the job. An allowlisted one passes
+  (the allowlist has no ceiling), but gets a warning annotation, so a kept
+  test that regresses is still seen.
+- GitHub shows at most ten annotations per step, and the script emits no
+  more than that: the summary table is the complete list. The `Test
+  durations` job emits the 5 s warnings again for the whole lane, so each
+  one appears once on its shard and once on the lane summary.
+
+The hard line is four times the policy line because of runner noise. On
+eight green lane-runs of the same tree, one test's time varied by 1.7x
+between runs at the median and 3x at the 90th percentile. Some of that is
+the runner. The rest is that the first test to compile something pays for
+every later test that reuses it, so moving or marking one test moves
+another's time. Judge a test on more than one run.
+
+### Sharded lanes
+
+Each JAX lane runs as six jobs on six runners, each running its share of
+the suite one test at a time (`MADDENING_TEST_SHARD=i/6`,
+`tests/_sharding.py`). The split is by test file, and it is stable. A file's
+shard is a hash of its path, or an explicit pin in `PINS` for the heaviest
+files, never a function of the test list. So:
+
+- adding or removing tests, or whole files, moves no other file;
+- a file's tests stay together, so its fixtures build once;
+- shard *i* of a pull request holds the same files as shard *i* of the base
+  branch, which is what lets a shard reuse that shard's compilation cache.
+
+`slow-tests.yml` is split by file too, but on ten runners per lane and by
+measured time, not by hash (`MADDENING_TEST_SHARD=i/10:weighted`). It
+restores no compilation cache, so nothing there needs a file to stay on its
+shard, and its files are far from equal: the heaviest takes 48 minutes, and
+by hash one shard of four held nearly half of the lane (166 to 172 minutes
+against a 175-minute timeout, with the others at 50 to 85). The weighted
+split deals the files listed in `tests/slow_lane_weights.json` (seconds per
+file on its slower JAX lane, from a slow-lane run's JUnit artifacts),
+longest first, each onto the shard with the least time so far. A file the
+table does not list (a new one, or one under ten seconds) goes by the hash
+of its path. The table of 2026-10-10 (243 files, 635 minutes) predicts 64
+minutes of test time on every shard (eight shards held 79 each); the
+heaviest file alone is 49.
+
+The table deals by time, not memory. Each shard runs in one process, and
+JAX keeps every program it compiles; a file that keeps graphs in a
+module-level `functools.lru_cache` keeps them and their programs too. So
+the slow lane sets `MADDENING_TEST_RELEASE_BETWEEN_FILES=1`
+(`tests/_release_between_files.py`). When a file's last test has run, the
+caches defined in modules under `tests/` are cleared, then JAX's compiled
+programs, then the freed heap goes back to the OS, and the log gets one
+line with the resident size before and after. A shard then holds about as
+much as its largest file, not the sum of its files. Without the release, a
+re-dealt table put three such files on one shard, and the runner ran out of
+memory (an abort inside an {term}`XLA` compile, 2026-10-12). Within a file nothing
+is released, so a file's tests still share their module fixtures and
+caches.
+
+Every job still collects the whole suite, so every `conftest.py` runs as
+it would in a single process, and deselects the other shards' files. The
+per-shard `Test time budget` step gates. The `Test durations` job writes
+one summary per lane from all six shards' reports.
+
+The lane ran four shards until 2026-10-11. On three cold push runs the
+slowest of the four jobs took 43 to 48 minutes. Six shards are predicted
+at 28 to 30 with six files pinned (33 to 37 by hash alone), and at
+33.7 at most if every compiled program that files on one shard shared in
+a cold run had to be compiled again. That prediction is for the runners
+those runs drew: the same files take up to 1.6 times as long on one hosted
+runner as on another.
+
+To rebalance, edit `PINS`, which moves only the files you pin, and take the
+per-file totals from the lane summary. Changing the job count re-deals
+every file, and the count is written in several places that must move
+together:
+
+- in `ci.yml`: `shard:` and `MADDENING_TEST_SHARD` in the `test` job, the
+  `of6` in the compilation cache's key and in the durations artifact's
+  name, and the `-ne 6`, `-eq 6` and "of 6" in the `Test durations` job's
+  "Summarise the lane" step;
+- `PINS_FOR` in `tests/_sharding.py`, and the pins themselves.
+
+The slow lane's count is separate (`SLOW_LANE_SHARDS` in
+`tests/_sharding.py`) and is written in `slow-tests.yml` as `shard:`,
+`MADDENING_TEST_SHARD`, the artifact name's `of10`, the "of 10" in the step
+title and the `/10` in the three issue titles. No pin depends on it: the
+table is dealt for whatever count the spec names. Twelve shards are
+predicted at 56 minutes for the slowest and fit what the organisation's plan
+runs at once (60 jobs; the lane would be 24): the next step after ten.
+
+The compliance tests pin these counts, so a change to one fails them until
+each place is updated: `test_ci_sharding.py` (`shard:`,
+`MADDENING_TEST_SHARD` and every other mention of the count, in both
+workflows, against `PINS_FOR` and `SLOW_LANE_SHARDS`), `test_ci_workflows.py`
+and `test_report_test_durations.py` (the cache key, and the lane summary
+run on six shards' reports and on five).
+
+To rebalance the slow lane, regenerate the table from a run's artifacts.
+The script prints the heaviest files and the minutes it predicts per shard,
+before and after, on each JAX lane:
+
+```bash
+gh run download <run id> --dir /tmp/slow --pattern 'slow-durations-*'
+python scripts/slow_lane_weights.py --run <run id>=/tmp/slow --commit <run id>=<sha> --write
+```
+
+A shard that timed out wrote no report, so its files have no measurement in
+that run: give an earlier run first (`--run` repeats, and the later
+measurement of a file wins). `test_ci_sharding.py` fails if the table lists
+a file that no longer exists, or predicts more than 100 minutes on the
+heaviest shard; then raise `SLOW_LANE_SHARDS`, or split the heaviest file.
+
+A run's times carry the speed of each runner it drew. Between two runs of
+one deal on 2026-10-10 the same files on the same shard took from 0.57 to
+1.59 times as long, in compile time as in the rest: the hosted runners are
+of several CPU models (on the per-push lane one shard's files took 1.6
+times as long on an EPYC 7763 as on an EPYC 9V45). So the table balances
+the shards to within the runners' spread, not to the minute, and a shard
+dealt the mean can still run half as long again.
+
+Every allowlist entry is `<node id> # kept: <why it must run on every
+push>`. The tests that were already over 5 s when the budget arrived
+(2026-09-24) have all been marked slow, made faster, or kept that way. The
+summary lists entries that may now be removable: ones no longer in the lane,
+or that passed under 5 s (a skipped or failed test says nothing about its
+cost, so it is never listed).
+
+### The compilation cache: warm and cold runs
+
+The test lanes use JAX's persistent XLA compilation cache, and whether a
+run reads it decides what its times mean:
+
+| Run | Cache | Times mean |
+|---|---|---|
+| Pull request | **warm**: restores the base branch's cache, never saves one | Fast. A program the PR adds or changes is not in the base cache, so it still compiles from scratch and a new slow test is caught on the PR that adds it. A cost that *moves* is not: see below. |
+| Pull request whose diff adds or removes a slow mark, removes a test function, or edits `tests/duration_allowlist.txt` or `tests/_sharding.py` | **cold**, not saved | Accurate for the tests the change moved a compile onto (see below). |
+| Push to `main` / `release/**` (after a merge) | **cold**: starts empty, saves the result for the next PRs | Accurate: each program compiles in full the first time the run needs it. A later test that needs the same program reads it back from the cache the run is writing (17-25% of lookups on CI), so it can look fast because an earlier test paid. |
+| `slow-tests.yml`: scheduled Mon/Wed/Fri on `main` only; on a release branch only when dispatched by hand | **off**, one process per shard | A cold, uncontended timing of the whole suite, for the commit it ran on. Triage and allowlist edits are based on these runs, so check that commit: on a release branch the last run is the last dispatch, which may be well behind the tip. |
+| Pull request with `[cold-ci]` in its head commit message | **cold**, not saved | For before/after numbers while optimising tests. The job reads the message from its checkout; if it cannot, it runs cold and says so in a warning. |
+
+Pull requests never save, so a second push cannot read the first push's
+cache: a new test that takes 25 s cold would otherwise pass at 8 s.
+
+**Why some pull requests run cold.** The first test to compile a shared
+program pays for every later test that reuses it. When a pull request
+slow-marks, deletes or moves that test, the next one inherits the compile.
+On a warm run it reads the program from the base branch's cache and looks
+fast; only the cold run after the merge sees what it now costs, and fails
+it (commit `04cad05` found one such case by hand). So the `changes` job asks for
+a cold run when the diff adds or removes `mark.slow`, removes a
+`def test...` line (a test deleted, renamed or moved), or edits the
+allowlist or the shard assignment. What it does not see, so a pull request
+that does one of these runs warm and the cold run after the merge is the
+first to see what the change moved:
+
+- a new test placed before an existing one that shares its program, which
+  reads the program from the base cache on the pull request and pays for
+  it after the merge;
+- slow marks applied by a helper or a hook rather than written as
+  `mark.slow`;
+- a parametrize case removed (a value deleted from the list, with no
+  `def test` line removed);
+- a test that stops running without being deleted: an added `skip`,
+  `skipif`, `xfail(run=False)` or `importorskip`.
+
+Closing the last two is planned for 0.5.0. Until then, put `[cold-ci]` in
+the head commit of a pull request that does either to a test sharing a
+compiled program with the tests after it.
+
+Each shard has its own cache, which works because shard *i* holds the same
+files on every branch (see *Sharded lanes*). XLA:CPU compiles for the
+host's instruction set, and what keeps an executable off a host it was not
+built for is JAX's own cache key, which includes the CPU's features. The
+workflow's key also includes the runner's CPU model, but only to raise the
+hit rate: runners reporting the same model can still differ in features,
+and a shard on one of those restores a cache and then misses almost every
+lookup. So the summary labels each shard from the hits and misses its
+report records: **warm** only when it restored a cache *and* more than half
+its lookups hit, otherwise **restored but unused (cold)**. It prints every
+shard's label and hit rate, and the lane as `warm`, `cold`,
+`restored but unused (cold)`, or `mixed` when the shards differ or a shard
+recorded no mode. A run in which any shard restored a cache never lists
+allowlist entries as removable, because a test that is only fast when its
+compile is cached is still slow.
+
+`slow-tests.yml` runs with no cache. If its report records cache lookups in
+more than one file, the summary warns: a test switched a persistent cache
+on in-process and left it on, and the times after it are partly warm. A
+test that turns a cache on (`maddening.core.simulation.compile_cache.enable`
+or `warm_cache`) must restore the JAX settings and reset JAX's cache
+object afterwards, as `tests/core/test_compile_cache.py` does.
+
+A cache is saved only after a push run whose test step passed, and only
+once `scripts/prune_jax_cache.py` has deleted every entry that does not
+decompress whole. JAX writes an entry in place and never rewrites one, and
+a test's subprocess (which inherits the cache directory) can be killed
+mid-write; a truncated entry, once saved, would make every pull request
+that restores it raise (JAX warns, and `filterwarnings = ["error"]` turns
+that into a test error).
+
+A shard whose report holds nothing but collection errors (a test file that
+fails to import stops pytest before any test runs) fails the budget step
+with exit 2: no test ran, so there is nothing to pass. The lane summary
+leaves such a report out and lists no allowlist entry as removable.
+
+### Why a test is slow
+
+Each lane records every test's JAX tracing, lowering, XLA compile and
+cache-read time, and how many processes it started (`tests/_jax_timing.py`,
+switched on by `MADDENING_TEST_JAX_TIMING=1`). The summary splits the
+slowest tests into:
+
+- **compiling**: XLA backend compilation. This is the only part a cache
+  removes. JAX's compile timer wraps the whole compile-or-read-the-cache
+  call, so on a cache hit what it times *is* the cache read; the read is
+  subtracted from it and shown on its own.
+- **cache read**: reading compiled programs back from the persistent
+  cache. A warm run pays it; a cold run does not.
+- **tracing/lowering**: building the program in Python. No cache removes
+  it.
+- **running**: executing, Python overhead, I/O, and anything a subprocess
+  does. An un-jitted `for` loop over `node.update` lands here.
+
+JAX's timers can overlap: on jax 0.10.2 one test's tracing alone summed to
+more than its wall time. A share is therefore capped at 100%, and the
+diagnosis says when the parts add up to more than the whole.
+
+**Slow even with a warm cache** lists every test still over 5 s once its
+compile time (not its cache reads) is subtracted. Every run shows this
+list, cold or warm. A cache cannot fix these tests; they need a code change
+or `@pytest.mark.slow`.
+
+**Work in a subprocess (not measured here)** lists the tests that would
+otherwise be on that list but started a process. For a child that runs
+JAX, the child's tracing and compiling never reach the pytest process, and
+the child inherits the cache directory, so a warm cache may still speed it
+up. Measured: a test whose JAX work runs in a child recorded no compile at
+all, and a warm run took it to about half its cold time. Compare a warm
+run before treating one as slow. The list does not know what a child
+runs, though: a test whose child is a C compiler, valgrind or a fuzzer is
+listed here too, although no cache can help it. Telling the two apart is
+planned for 0.5.0; until then, read the test before concluding a warm
+cache would help. Processes are counted from Python's audit events (`subprocess.Popen`,
+`os.system`, `os.fork`, `os.posix_spawn`), which miss `multiprocessing`
+children started with the `spawn` or `forkserver` method. A report written
+before the count existed cannot tell, so there a test with no JAX activity
+at all in the pytest process is listed here.
+
+The usual fixes:
+
+- **Running**: move the loop into JAX. Use `jax.lax.fori_loop` or
+  `jax.lax.scan` over a jitted update instead of a Python `for` loop that
+  dispatches every step op by op. Measured 2026-09-24:
+  `test_heart_pump.py::test_steady_state_pressure` (16,660 eager steps) and
+  `test_rigid_body.py::test_quaternion_stays_normalized` (10,000) spent
+  over 99% of their time this way. Both now step in a `fori_loop` and take
+  under a second, with the same results (the heart pump's mean pressure
+  is bit-identical).
+- **Tracing/lowering**: build the graph or function once, in a
+  module-scoped fixture, and reuse it rather than rebuilding it per test
+  or per example.
+- **Compiling**: in a property test, keep array shapes and static arguments
+  fixed across examples. A new shape or a new Python-level constant is a
+  new program, so draw values rather than shapes and pass them as traced
+  arguments. Use the `EXAMPLES_COSTLY` tier (see *Depth tiers* above) for
+  properties that still compile per example.
+
+### What only the slow lane checks
+
+A slow mark takes a property off every push. On a release branch it then
+runs only when someone dispatches `slow-tests.yml`, so a regression can sit
+unseen until then. So write the reason at the mark: what the test costs on
+CI and what makes it cost that. For a test of a framework property (the
+coupling solvers and their reports, gradients, the params {term}`pytree <Pytree>`,
+{term}`sharding <Sharding>`, {term}`checkpoints <Checkpoint>`, the CI gates), say one of two things there as well:
+
+- **where the property is still checked on every push.** Usually this is a
+  cheaper witness: a smaller graph, one step instead of eight, one check of
+  a battery, a closed-form reference instead of a converged one. Name it in
+  a comment among the comments and decorators directly above the test's
+  `def` (or above its class, or the module's `pytestmark`, if the mark is
+  written there), as `# Per push: <node id>`: the full id,
+  `tests/<file>.py::[<Class>::]<test>[<params>]`, one or more, with any
+  prose after them on the same or the following comment lines. A test
+  named without its parameters stands for its parametrisations that are
+  not slow-marked. For example, the adjoint of a coupling group with a
+  {term}`sharded <Sharded>` member is slow-marked in
+  `tests/cloud/multigpu/test_coupling_group_with_sharded_and_replicated_members.py`,
+  and its comment names
+  `tests/cloud/multigpu/test_coupling_group_adjoint_through_a_sharded_member.py::test_reverse_mode_ad_through_a_coupling_group_with_a_sharded_member`,
+  which differentiates one step of the same group on every push;
+- **or that it is slow-only on purpose**, in which case the property
+  belongs in the table below with the reason.
+
+**What a witness must be.** A witness is a test that runs on every push and
+can fail there, so that a fault in the property turns a push red. It is
+therefore:
+
+- not slow-marked, and collected under the id you wrote, by the per-push
+  lane itself: not under a path its pytest command passes `--ignore` for
+  (`tests/viz`) or that `scripts/check_anomalies.py` records in
+  `PATHS_CI_NEVER_RUNS`, not deselected, and in a file whose name matches
+  pytest's `python_files` (`test_*.py`): the lane runs `pytest tests/`,
+  which collects nothing else, even where a run naming the file would;
+- not skipped: no `skip` mark, no `skipif` whose condition is true in the
+  default lane, no `pytest.skip()` that its body (or a helper it calls, a
+  fixture it requests, or an xunit `setup_function` / `setup_method`)
+  reaches on every run, no `unittest.skip` and no `raise
+  unittest.SkipTest`; and no mark whose condition reads
+  `MADDENING_TEST_SHARD`, which the guard's collection unsets and the
+  sharded lanes set. A `skipif` whose condition
+  is false in the default lane is fine: the multi-device tests under
+  `tests/cloud/multigpu` are skipped only where there are too few devices,
+  and that directory's conftest provides them. The guard takes the
+  condition's value from pytest, not from the decorator's text; write the
+  condition as an expression, not as a string. A witness whose body skips
+  under a condition (a `pytest.skip()` under an `if`, a
+  `pytest.importorskip()`) must be listed in the guard's
+  `CONDITIONAL_BODY_SKIPS` with the reason the condition is false on a
+  push;
+- not expected to fail: no `xfail` mark in any form (strict or not, with
+  `raises=` or `run=False`, on one parameter, on the class or the module),
+  no `pytest.xfail()` call and no `unittest.expectedFailure`. An xfail test reports success when its assertions
+  fail, so it stays green on exactly the fault the slow test would catch.
+  Name a test that passes and checks the property; if there is none, write
+  the cheapest case of the slow test as one, and say in its docstring what
+  it leaves to the slow lane.
+
+There is one exception. A slow test that is itself the strict xfail pin of
+an open anomaly has nothing that passes to point at, and may name a
+per-push strict xfail pin of the same anomaly: that one turns red on the
+push that fixes the defect. "The same anomaly" is decided from the marks
+pytest collects and from the registry, never from prose: one registry id
+(`MADD-ANO-<n>`) is written in the `reason=` of the witness's mark and of
+the mark of every slow-marked parametrisation of the slow test, all of
+those marks are `strict=True`, the witness's mark does not say
+`run=False` (pytest would never run it), and the registry holds that
+entry as `open` or `partially_resolved`. A slow test that is expected to pass never takes
+the exception.
+
+`tests/compliance/test_slow_only_rule.py` checks this rule on every push
+for every slow-marked test under `tests/core`, `tests/property`,
+`tests/verification`, `tests/cloud/multigpu`, `tests/compliance`,
+`tests/api` and `tests/fmi`, using pytest's own collection (so a mark
+applied through a parameter list or a class counts). It fails when a
+slow test has neither, when a named witness is not a test the default
+lane runs (it is slow-marked itself, misspelt, or named without its
+class) or cannot fail there (it is skipped or expected to fail, as
+above), and when a table row or an exemption names no slow test. Files
+under those paths that check a node rather than the framework (the {term}`LBM`
+and wavelet convergence studies, the `run_pod` session harness, two
+timing benchmarks) are listed in its `NOT_FRAMEWORK`, each with the
+reason. Under `tests/verification/hypothesis/` the table is no way out:
+those properties need a per-push sibling (see *Test time budget*).
+
+These framework properties are checked only in the slow lane, on purpose:
+
+| Property | Slow-marked tests | Why nothing checks it on every push |
+|---|---|---|
+| Second-order differentiation (a Hessian) through the {term}`IFT` coupling step | `tests/core/test_coupling_ift_forward_mode.py::test_hessian_through_ift_step` | A second-order transform of the IFT step, compiled for both solvers: 5-10 s on CI, nearly all compile. First-order forward and reverse mode through the same step run on every push. |
+| The coupling fixture registry at full width: every registered fixture builds and steps; 19 of the 24 recorded baseline rows; 22 of the 24 cells of the multi-rate solver-equivalence class | `tests/core/test_coupling_fixture_invariants.py::test_every_registered_fixture_builds_and_steps` and `::test_every_recorded_fixture_still_measures_its_baseline_row`; `tests/core/test_coupling_solver_equivalence.py::test_the_multirate_solvers_agree_across_the_configuration_class` | Each fixture, row or cell is a graph of its own to build and compile: 4-10 s each on CI, and 34-50 s for the registry. The fixtures the per-push tests use are built on every push anyway. Five baseline rows, at least one from each recorded file, and the two cells in the counterexample's own configuration stay on every push. |
+| The {term}`FMU` C wrapper under valgrind's memcheck, and the libFuzzer campaign | `tests/fmi/test_c_unit.py::test_c_unit_tests_under_valgrind`, `::test_libfuzzer_short_campaign` and `::test_fuzz_long_run` | The tools' own run time: 22-28 s each on CI for the first two. On every push the wrapper's unit tests and a short fuzz run pass built plain and under ASan/UBSan, and the fuzz binary runs under valgrind. |
+| The compile-count gate end to end: the baseline regenerated by the one command the gate prints, and the gate pinning its own device count under inherited `XLA_FLAGS` | `tests/core/test_compile_counts.py::test_regenerating_the_baseline_is_the_documented_one_command` and `::test_the_gate_measures_its_own_device_count_not_the_ambient_one` | Each runs the gate twice in a subprocess: 7-11 s on CI. The gate itself (`scripts/compile_counts.py --check` against the committed baseline) runs on every push, and so do its refusals, on synthetic documents. |
+| The CI guards fail when what they guard is broken: a seeded fault in a workflow, the budget script, the shard split, the conftest, `pyproject.toml`, the timing plugin, the cache pruner or the allowlist is caught | `tests/compliance/test_guard_mutations.py::test_every_seeded_ci_fault_fails_a_guard` | Each mutant re-runs its guard test files in a fresh copy of the tree, so the whole table takes minutes. Per push, `test_every_mutant_anchor_matches_the_tree_exactly_once` checks that every mutant still applies to the tree, and `test_every_seeded_inventory_fault_fails_a_rule_that_reads_only_the_tree` applies the mutants that edit a claims inventory in memory; see *Guard mutations* below. |
+| The {term}`deprecated <DEPRECATED>` `calibrate()` and `tune_coupling_params()` | `tests/core/test_calibrate.py::TestCalibratePhysics`, `tests/core/test_calibration.py::TestTuneCouplingParams` and `tests/property/test_sysid_contract.py::TestTuneCouplingParams` | Hundreds of eager gradient steps (30-165 s on CI) and a compiled graph per grid point (up to 15 s each), over APIs deprecated for removal in 0.5.0 in favour of `maddening.sysid.fit`, which is tested on every push. Their deprecation warnings are checked on every push. |
+| The coupling benchmark script runs end to end and writes its JSON | `tests/core/test_cross_feature_edge_cases.py::test_bench_coupling_script_runs_on_springs` | A subprocess that imports the library and times a coupled and an uncoupled spring graph: over 5 s on CI. `benchmarks/bench_coupling.py` is a measurement tool, not library code; the coupling step it times is tested on every push. |
+
+To add a row, say what the property is, which tests check it, and why no
+cheaper test can. If a cheaper test can, write it instead.
+
+### Guard mutations
+
+A guard that still passes when the workflow, script or config it reads is
+broken protects nothing. `tests/compliance/test_guard_mutations.py` checks
+the CI guards mechanically. Each entry in its `MUTANTS` table is one seeded
+fault: an id (a group letter and the next free number), the file, an
+`anchor` that occurs exactly once in it, the `replacement`, the guard tests
+to run, and what the fault would let through in CI. The slow-marked
+`test_every_seeded_ci_fault_fails_a_guard` applies each fault to a
+`git archive HEAD` copy in a temporary directory, never the working tree,
+and requires at least one guard test to fail. Per push,
+`test_every_mutant_anchor_matches_the_tree_exactly_once` fails if an anchor
+is missing or ambiguous, so a refactor cannot quietly turn a mutant into a
+no-op. The slow lane runs on a schedule, on the default branch, so a
+mutant that starts to survive is not seen on the pull request that caused
+it. For the mutants that edit a claims inventory (a row's conditions, a
+domain cell citing a test of another domain) one more test runs per push:
+`test_every_seeded_inventory_fault_fails_a_rule_that_reads_only_the_tree`
+applies each to its row in memory and asks the row rule and the witness
+rule, which read only the files and the cited tests' sources. A mutant of
+a guard's own code has no such shortcut. When you add or change a guard,
+add one entry for the fault it exists to catch, commit, and run that case
+with
+`pytest "tests/compliance/test_guard_mutations.py::test_every_seeded_ci_fault_fails_a_guard[<id>]" -m "slow or not slow"`
+(it reads `HEAD`, not your working tree). If you touch an anchor, update it
+to the new spelling and keep the same fault. Two kinds of entry are
+exceptions, and each needs its reason. A mutant that changes nothing CI
+relies on gets `equivalent="<why>"` and is asserted to survive. A live gap
+gets `gap="<what is unguarded>"` and runs as a strict xfail until a guard
+catches it.
+
+## The claims inventories
+
+Each `docs/validation/*_claims.yaml` lists the documented claims of one
+audit area that a user could rely on:
+
+| file | prefixes | covers |
+|------|----------|--------|
+| `coupling_claims.yaml` | `CPL` | coupling groups, their solvers, schedules and accelerations; sub-cycling, multi-rate groups and the adaptive steppers on coupled graphs; `coupling_diagnostics()`, `coupling_report()` and `strict_convergence`; the {term}`precision floor <Precision floor>` and every bound and `*_usable` flag; IFT gradients; the profiler's coupling statistics; `windowed_loss`'s convergence mask |
+| `sysid_fmu_claims.yaml` | `SYS`, `FMU` | `maddening.sysid` (`windowed_loss`, `fim`, `fim_core`, the three fitters and their results, truth recovery and units); {codeterm}`ParamSpec` bounds and transforms; `node.params` and `gm.params` as fitting and export see them; the {term}`FMI` 3.0 export: model description, TCP bridge, {term}`sidecar <Sidecar>`, FMU state, C wrapper, conformance, refusals, timeouts, tokens and the terminated state |
+| `rest_runpod_claims.yaml` | `REST`, `RPD` | the HTTP API: authentication, the `Host` and `Origin` rules, request bounds and budgets, the graph lock and its 409/503, `/graph/*`, `/sim/*`, `/checkpoint/*`, shutdown and the runner behind `/sim/start` (not the {term}`experimental <EXPERIMENTAL>` {term}`surrogate <Surrogate>` and streaming endpoints); `benchmarks/multigpu/run_pod.py`, its runbook, records, verdicts and exit codes |
+| `mapping_claims.yaml` | `MAP` | {term}`interface mappings <Interface mapping>`: the registry of mapping kinds (`register_mapping`: names, declarations, the trust boundary of a file that names a kind, what a factory may raise and must return); what a mapping may put into `gm.params["mappings"]` and how those weights are fitted, checkpointed and exported; the sparse mappings (`StaticSparseMapping`, its two layouts, the three sparse kinds, their limits) and the structure digest a checkpoint carries for sparse weights |
+
+Each row records:
+
+- the claim's wording and where it is stated;
+- the domain the documentation states, with any part it leaves unstated
+  called out;
+- the oracle: how truth is known (an exact float64 fixed point, a dense
+  solve, finite differences, bit-identity, a closed form, the graph the
+  FMU was exported from, or what an earlier release wrote);
+- the pytest node ids that fail if the claim stops holding;
+- a status: `verified`, `failing`, `untested` or `ambiguous`.
+
+An audit attacks the lists rather than hunting open-ended, and a fix PR
+re-classifies the rows it touches.
+
+To add a claim, add a row in the same change as the sentence, in the file
+whose area it belongs to. Give it the next free id under that file's
+prefix and cite a test that can fail at the edge of the claim's
+conditions, not in their comfortable middle: units on every axis, a value
+on and just past a bound, every transform, float32 and float64, multi-rate
+and sub-cycled graphs, each surface that serves the same model. If the
+tree does not meet the claim, the test is
+`@pytest.mark.xfail(strict=True, raises=..., reason="<ID>: <one line>; pending fix")`
+and the row is `failing`, with a `finding` that gives the reproducer and a
+file:line guess. If the documentation leaves the domain unstated, or two
+documents disagree, the row is `ambiguous`: it carries the
+`proposed_wording` its tests support and leaves the docs to the fix PR.
+
+A new inventory needs only its file: `schema_version: 1`, a `prefixes`
+list of the id prefixes it owns (two to six capital letters, owned by no
+other file) and its `claims`.
+`tests/compliance/test_claims_inventories.py` finds every
+`docs/validation/*_claims.yaml` and checks six rules, mutation-tested by
+self-tests in the same module:
+
+- every file is well-formed, and no two files own a prefix;
+- every row is well-formed, with an id under one of its file's prefixes;
+- every cited test is collected and runs on every push, or is slow-marked
+  with a `# Per push:` witness;
+- every `failing` row cites a strict xfail that names it;
+- no `verified` row cites an xfail, and every xfail that names a row is
+  strict, cited by that row, and names a row some inventory holds;
+- every row of a file with a domain matrix fills it (below).
+
+A row may cite a test under `tests/usd/`, which needs `usd-core`. The
+sharded lanes do not install it and skip that directory, so such a test
+runs on every push in the `test-usd` job only, and the guard fails if that
+job's selection does not hold it. The guard itself runs both with
+`usd-core` (the `compliance` job) and without (the sharded lanes). Without
+it pytest cannot import those modules, so the guard reads their items from
+source: each test function, with the `slow`, `skip` and `xfail` marks
+written on it, on its class or in the module's `pytestmark`. The same
+rules then run, so a citation of a USD test that does not exist, never
+runs or disagrees with its row's status fails in both. The reader expands
+no parameters and reads no mark attached to one parameter or imported from
+another module; the `compliance` job compares it with what pytest collects
+from the cited files on every push, so a spelling it does not know fails
+there. A test directory behind another optional extra needs the same three
+things: the job that runs it, the lane rule, and the reader's comparison.
+
+### The domain matrix
+
+Audits kept breaking claims in a *domain* their conditions covered but no
+test exercised: x64, a predictor inside a windowed fit, a write pending at
+an FMU export. So an inventory can name a `domain_set` at its top level,
+and then every row carries a `domains` mapping that says, for each domain
+of the set, how the claim stands there. The coupling, sysid+FMU and
+mapping inventories use the `numeric` set below; the REST and run_pod inventory
+uses the `server` set ("The server set", at the end of this section). A
+new set is one entry in the guard's `DOMAIN_SETS`, with the spellings its
+conditions use and the words its tests must name.
+
+| domain | what it means |
+|---|---|
+| `f32` | float32 state and parameters, x64 off (the default lane) |
+| `f64` | under `jax_enable_x64`, float64 throughout |
+| `mixed_dtype` | under x64 with float32 leaves beside float64 ones |
+| `16bit` | float16 or bfloat16 leaves |
+| `jit` | the feature inside a `jax.jit` trace; a feature inside a compiled {term}`graph step <Graph step>` is traced by `compile()` itself |
+| `grad` | reverse- and forward-mode derivatives through the feature, or a value a differentiated computation returns or consumes (a loss, a mask) |
+| `vmap` | the feature under `jax.vmap` (`run_sweep` included) |
+| `multi_rate` | a graph whose nodes fire at different rates |
+| `sub_cycled` | a coupling group with `subcycling=True` whose members sub-step |
+| `predictors_warm_starts` | coupling predictors, IQN-IMVJ warm starts |
+| `adaptive` | `run_adaptive` / `run_adaptive_scan` |
+| `checkpoint_restart` | state saved and loaded mid-run (`save_state` / `load_state`, `reset_state`, an FMU state), and `windowed_loss`'s per-window restarts |
+| `sharded` | a graph with a sharded node on CPU virtual devices |
+
+Each domain's value is one of:
+
+- **a test** (a node id, or a list of them) that exercises the claim *in
+  that domain*. The guard checks it the way it checks the row's `tests`
+  (collected, not skipped, slow only with a `# Per push:` witness, the
+  xfail rules), and that its source, read three levels into the helpers
+  it names, at least names the domain (a float64 cell's test mentions
+  x64): a floor that catches a cell citing a test from another domain,
+  not a proof that the test is apt. A helper every test shares is not
+  read as any test's words (the guard's `TRANSPORT_MODULES`: the
+  in-process client `tests/_loopback_client.py`, which names a loopback
+  Host and peer for every REST test that constructs it), nor is the line
+  that imports it. An equivalence oracle counts where it
+  compares every quantity the claim reads against the domain the row's own
+  tests verify (`vmap == per-member` for a report claim, say).
+- **`narrowed`**: the row's `conditions` now exclude the domain, in a
+  trailing clause that starts `Not claimed for` and names it ("Not claimed
+  for float64 (x64), {term}`vmap` or sharded graphs."). The clause may name only
+  narrowed domains. Narrowing changes a documented claim, so reword the
+  source document too where it over-claims.
+- **`n/a`**: the claim cannot apply there -- a construction-time refusal
+  has no float dtype, a host-side report has no `vmap`. A domain the
+  conditions name before the clause, or cover with a phrase such as "any
+  dtype" or "any graph", cannot be `n/a`.
+
+To fill a row, decide which domains its conditions cover: unstated means
+covered. Then, for each covered domain, cite a test that runs the claim
+there. Where none exists, a row whose claim is a bound or a `*_usable`
+flag, a verdict, a gradient, write or sync semantics, an FMU value, time
+or refusal, or identifiability gets the test, written at the claim's edge
+in that domain; if it fails, it is a strict xfail naming the row, the row
+is `failing`, and its `finding` gives the reproducer. Any other row is
+narrowed, or gets the test if it is cheap. While a parallel branch that
+will cover a cell is open, the cell may read `TODO-oracle` or `TODO-fix`;
+the guard accepts both only while `PENDING_ALLOWED` is set, and a release
+has none.
+
+Most coupling cells cite one of two batteries, which state each report,
+bound and gradient claim once, as a check keyed by its row id, and run it
+in every domain on a two-member affine group whose fixed point and
+derivatives have closed forms:
+`tests/core/test_coupling_claims_in_every_domain.py` (every domain but
+one) and `tests/cloud/multigpu/test_coupling_claims_on_a_sharded_graph.py`
+(a sharded member). To put a row in them, add a check decorated with
+`@check("<ID>")`; it then runs in every domain unless `SKIP` or `ONLY`
+says otherwise. `tests/core/test_sysid_claims_in_every_domain.py`,
+`tests/core/test_params_claims_in_float64.py` and
+`tests/fmi/test_fmu_claims_in_float64.py` do the same for the sysid and
+FMU rows they cover, and `tests/core/test_sysid_claims_under_x64.py` holds
+the sysid rows' `f64` and `mixed_dtype` cells: each test is parametrized
+over `float64` (every leaf float64) and `mixed` (float32 leaves in the x64
+process, where the fitters' coordinates are promoted to float64 around
+them) and sits at float64's own edge where the claim has one.
+
+A claim the batteries' affine pair cannot state is lifted with
+`tests/core/coupling_domains.py`: `pair(domain, ...)` builds a memoryless
+two-member group in a domain (`f64`, `mixed_dtype`, `bfloat16`, `float16`,
+`vmap`, `multi_rate`, `sub_cycled`, `predictors_warm_starts`,
+`checkpoint_restart`, `adaptive`, `sharded`) and `run` / `run_sequence` step
+it as that domain does, so the claim is written once and parametrised over
+`EVERY` (`test_coupling_{norm_edges,accelerations,configuration,groups,nonfloat_leaves}_in_every_domain.py`;
+the sharded cells call the same bodies from
+`tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py`),
+and the topology harness runs its invariances in the same domains
+(`DOMAINS` in `test_differential_coupling_topologies.py`).  A claim about a
+dtype's edges is held at that dtype's own `tiny`, `eps` and `maxexp`.
+
+Both members of `pair` have one size, so a mapped edge between them is a
+tie.  A claim about a mapped edge that expands or reduces is lifted with
+`tests/core/coupling_domain_sizes.py`: `build(Cell(domain, kind, form,
+...))` puts the small field coupled to a large one of
+`tests/property/interface_side_graphs.py` in a domain (either member the
+small one), `Stored` is that module's exact reference with every number as
+its member stores it, and `build_twin` the same pair with the scatter
+applied inside the large member (`test_coupling_pairs_of_two_sizes_in_every_domain.py`).
+A claim about an edge with a {term}`geometry-dependent mapping <Geometry-dependent mapping>` is lifted the same
+way: `build_geometry(GeoCell(domain, kind, anchors, ...))` puts the markers
+and the grid of `tests/property/geometry_interface_graphs.py` in a domain,
+`GeoStored` is that module's reference as the members store its numbers,
+and `build_geometry_twin` its marker-side twin.  Its members have a memory
+(the positions integrate from the pre-step state), so a reference is
+handed the state its step started from (`from_state`) and a predictor's
+guess is the loop's first iterate, not what the members integrate from.
+Write the markers after `compile()`, as a step's state is: `compile()`
+warns of positions a dtype cannot resolve to the tolerance on the state it
+sees, and the suite turns a warning into an error (`build_geometry` hands
+its advisories back; a cell that compiles with the markers in place asserts
+them).
+
+The cross-cutting oracles fill cells too, and a narrowed cell is
+re-examined whenever one lands: if it now runs the claim in that domain,
+the cell cites it and the domain leaves the row's clause. A parametrized
+oracle is cited at the parameter that reaches the domain, not by its
+function name. The covering array
+(`test_differential_coupling_interactions.py`) runs every oracle on its
+float64 rows in a subprocess (one test, slow) and has per-push float32
+rows with a sub-cycled group (`r06`, `r18`, `r28`) and with a predictor
+(`r05`, `r13`, `r28`). Its reference model reads the iteration mode,
+the sub-steps, the interpolation weights and the norm, so a claim about
+any of them is exercised wherever a row sets it. The replay oracle's
+checkpoint mid `run_adaptive` (`test_differential_replay.py`) is a
+`checkpoint_restart` cell for a claim about state carried in `_meta`,
+and its multi-rate and sub-cycled records are cells for the windowed
+losses. The FMU oracles' `[coupled]`, `[multirate]` and `[subcycled]`
+families do the same for the FMU rows. None of them is an `adaptive`
+cell: a restart that matches the uninterrupted run says nothing about
+the claim under `run_adaptive` itself.
+
+`tests/property/test_coupling_invariances.py` holds three metamorphic rows:
+
+- renaming every node changes nothing;
+- the build order changes nothing (the members' relative order excepted:
+  Gauss-Seidel follows it on purpose);
+- an identity relay on an internal edge moves the fixed point only by
+  rounding.
+
+#### The server set
+
+`rest_runpod_claims.yaml` names `domain_set: server`. Its domains:
+
+| domain | what it means |
+|---|---|
+| `loopback_bind` | the server bound to a loopback address (127.0.0.0/8, `::1`, `localhost`): the default |
+| `non_loopback_bind` | bound to anything else (`0.0.0.0`, `::`, a routable address or name) |
+| `token_enforced` | a request the bearer token is demanded of: any request on a non-loopback bind, or a routable peer's behind a loopback one |
+| `no_token` | a request no token is demanded of: a loopback bind and a loopback or non-IP peer |
+| `concurrent` | simultaneous requests on a real loopback server: uvicorn on `127.0.0.1`, the requests meeting on one socket, event loop and worker pool (in-process `TestClient` threads are not this domain) |
+| `runner_active` | the realtime runner running beside the request |
+| `sim_run_active` | a `POST /sim/run` in flight beside the request |
+| `large_payload` | at and past the body, state, budget and size caps |
+| `hostile_input` | malformed, wrong-typed, non-finite, oversized, path-traversal input; for run_pod, a truncated or tampered record |
+| `shutdown` | SIGINT or SIGTERM arriving mid-request |
+| `wrapper_nodes` | `HybridNode` and the sharded wrappers as the target of a write or a load |
+| `checkpoint_restore` | the claim on a graph restored by `POST /checkpoint/load` (and the loads themselves) |
+| `dry_run_cpu` | run_pod: the records a `--dry-run` on CPU virtual devices writes, as written |
+| `relabelled_records` | run_pod: those records relabelled as a real 4-GPU run (the evidence a pod session brings back) |
+| `mixed_commits` | run_pod: a directory whose files record more than one commit |
+
+A `concurrent` cell's test must name two things in its source or its
+helpers': a call that starts a server (`uvicorn.run(...)`, in a server
+script too, or `uvicorn.Server(...)`, which
+`rest_claims_support.loopback_server` makes) and requests sent at once
+(the word "simultaneous", a barrier, a gather, or a thread the test
+starts). A loopback URL, a WebSocket, the word "uvicorn" and the call
+quoted in backticks in a docstring are no server, and the thread the
+server itself runs in is no second request.
+
+A REST row's run_pod domains are `n/a`, and so are an RPD row's server
+domains but `hostile_input`. Within a REST row `n/a` is kept for these:
+
+- a domain the claim's subject does not reach: a rule decided from the
+  bind, the peer and the headers before any route reads the graph
+  (authentication, the Origin and Host rules) has no `wrapper_nodes` or
+  `checkpoint_restore` cell; a construction-time rule or a function (the
+  token's source, `APIAuth.verify`, the runner object) has no request, so
+  no `concurrent`, `runner_active`, `sim_run_active` or `shutdown` cell;
+- `shutdown` for a claim decided before the request takes the graph (the
+  authentication and browser rules, the request model's 422s, the size
+  refusals told before anything is built) and for a route that never takes
+  it (a stop, the stride, `/healthz`): the signal reaches a request only
+  through what holds the graph -- an in-flight `/sim/run` stops at its next
+  slice, the runner stops at the lifespan's end (REST-052, REST-053);
+- `runner_active` and `sim_run_active` for a route REST-041 refuses beside
+  a stepper (the state and structure writes, a load, a step or run): the
+  409 is that domain's claim, and REST-041's and REST-096's cells test it;
+  and `sim_run_active` where the claim needs the runner's thread alive, as
+  no `/sim/run` can be in flight then;
+- `wrapper_nodes` and `checkpoint_restore` for a claim about the runner,
+  its routes, the stride or the lock, which read no node and no state;
+- `large_payload` and `hostile_input` for a claim about what a valid
+  request does (a write takes effect, a read returns the state): an
+  oversized or hostile request is refused, and the refusal is a row of its
+  own (REST-029 to REST-037, REST-080, REST-081, REST-092, REST-095).
+
+Most REST cells cite one of two batteries. `tests/api/rest_claims_support.py`
+states each route row's claim once, as a check keyed by its row id (the
+`@check(...)` decorator; `skip=` / `only=` say which domains it runs in),
+written to hold wherever the claim does: it compares only what its own
+requests could change, writes the same values in every copy, and puts back
+what it changed. `tests/api/test_rest_claims_in_every_domain.py` runs each
+check, on a fresh server and graph, on a loopback bind with no token, on a
+non-loopback bind with the token, beside the runner, beside an in-flight
+`/sim/run` (its slices slowed to one 30 ms step), on a graph restored from
+a checkpoint, on wrapper nodes (a `HybridNode` spring, `ShardedStencilNode`
+rods on a one-device mesh), and with SIGTERM raised -- through the handler
+the server chains ahead of the installed one -- while the check's first
+request (or the one it marks `ctx.under_test()`) holds the graph.
+`tests/api/test_rest_claims_under_concurrent_requests.py` runs four copies
+of each check at once against uvicorn on loopback while a reader reads the
+state, and states the claims whose point is concurrency (the lock's
+serialisation, its 409 and 503, the graph budget, runner starts and stops,
+saves of one name, a saturated worker pool) once each. To put a new route
+row in them, add a check; to leave a domain out, say why in the row (`n/a`
+by the rules above, or a narrowed condition). The run_pod rows' record
+cells cite `test_run_pod_verdict_integrity.py`, `test_run_pod_dry_run.py`
+and `tests/cloud/multigpu/test_run_pod_claims_across_records.py`.
+
+## Numeric constants carry their units
+
+`scripts/check_numeric_constants.py` (CI's compliance job) scans
+`src/maddening/core/`, `src/maddening/sysid.py` and
+`src/maddening/cloud/multigpu/` for small float literals (`|v| <= 1e-3`, or a
+decimal exponent of `-4` or below) and for `finfo(...).tiny` / `.eps` used
+additively or as a floor (`x + eps`, `max(x, tiny)`).  Each must carry an
+inline `# units: <what it is relative to>` comment or a counted line in
+`scripts/numeric_constants_allowlist.txt`.  A stale or miscounted line fails
+the gate, as does a scope that no longer exists.
+
+Four 0.4.0 defects were one mistake: an absolute constant inside a
+relative computation.  The IFT solve's `atol=1e-8` returned gradients of
+exactly zero for small-unit states, IQN and `fit_lm` had `1e-12` floors, and
+the accelerators' steps flushed at small magnitudes.  The gate found four more
+that had shipped: the public Krylov solvers' `atol=1e-8`, the multi-rate
+GCD's `1e-9`, Adam's `eps`, and the adaptive error norm's `1e-300`.  So when you
+add a small constant to the numerical core:
+
+- **Write the justification as a ratio.**  "Dimensionless, a fraction of
+  `max|b|`" or "dtype range: the smallest normal number" is one; "small" or
+  "avoids division by zero" is not.  If you cannot say what the number is
+  relative to, it is absolute in some quantity's units, and the fix is to
+  make it relative, not to allowlist it.
+- **Pin the fix with a scale test.**  The test that catches this class runs
+  the same computation at two power-of-two scales and asserts bit-identity
+  (`tests/core/test_linear_solvers_in_any_units.py`,
+  `test_sysid_adam_in_any_units.py`, `test_multirate_in_any_units.py`).
+  A decimal scale changes the inputs' rounding; a power of two does not.
+- **Compare coordinates only where no units move them.**  A cutoff relative
+  to the largest eigenvalue, a norm over several parameters or a projection
+  is a constant in disguise when its coordinates carry units: the fitters'
+  identifiability guard held a determined parameter written in units of
+  `1e-5` until it made its tests relative to each parameter's size
+  (`tests/core/test_sysid_hold_in_any_units.py` runs it over decades).
+- **Compare a value against a bound on the host.**  XLA's CPU backend
+  flushes subnormal operands, so a `jnp` comparison passed float32 `-1e-40`
+  as `>= 0` (`tests/core/test_bounds_checks_compare_exactly.py`).
+- **Build a power-of-two frame with `maddening.core._pow2_frame`.**  It is
+  the one place the coupling runtime, the solvers and the fitters build
+  their frames.  `tests/core/test_pow2_frame.py` refuses a `frexp` or
+  `ldexp` anywhere else in the scanned scope, and a frame that is not an
+  exact power of two breaks the coupling bit-identity claims.
+
+## Differential tests
+
+A differential test compares two paths through the library that must agree,
+over generated inputs, so a disagreement is found by CPU rather than by an
+audit. Each harness writes tests only: a disagreement it finds is pinned as
+`@pytest.mark.xfail(strict=True, reason="differential: ...; pending fix")`,
+so CI stays green and the fix must flip it. Each subsection below is owned
+by one harness.
+
+### State and I/O
+
+Files: `tests/property/test_differential_{rest_params,param_writes,checkpoint,serialisation,fmu}.py`,
+`tests/usd/test_usd_differential_round_trip.py`,
+`tests/cloud/multigpu/test_property_sharded_state_io_differential.py`.
+Shared scaffolding: `tests/property/node_catalogue.py` (every built-in
+node, with valid constructions and writes in named categories) and
+`tests/property/differential.py` (exact NaN-safe comparison, and a guard
+that points `HOME` at an empty directory and makes every cloud launcher
+raise). Every comparison is bit for bit: dtype, shape and bytes. No oracle
+takes a tolerance, because both sides run the same compiled computation.
+
+| Oracle | Paths compared | Covers | Cannot see |
+|---|---|---|---|
+| REST write is a reload | `PUT /graph/params/{node}` then run, against `to_dict` -> JSON -> `from_dict` with a checkpoint loaded, then run; and after `POST /sim/reset` against `reset_state()` on the reload. A 4xx must leave every node's params, every `gm.params` leaf, the whole state and the dirty flag unchanged; `GET` must equal what the step reads and what a save carries | Every cheap built-in node per push, with valid, boundary, out-of-bounds, non-finite, oversized, wrong-type, unknown, initial-condition, structural and cross-parameter writes; a coupled member with a `ParamSpec` override; the LBM, pipe and wavelet nodes and generated multi-node graphs in the slow lane; a sharded rod (re-wrapped reload) | A defect the constructor and the live step share; a write the catalogue does not propose |
+| `gm.params` / fit write is a reload | A write into `gm.params` (leaf by leaf, or the whole tree as `gm.params = fit(...).params`), run, against the saved config plus a checkpoint, run; and after `reset_state()` on both. A refused write must be refused by the next run and by `to_dict()` alike | In-bounds writes into every cheap node; the output of `maddening.sysid.fit`; calibration-like writes into generated graphs (slow); a sharded rod | Out-of-bounds and non-finite values (a graph does not check `gm.params` writes against `ParamSpec`; the REST route and the FMU do) |
+| Checkpoint resumes the run | `save_state` at step *k*, `load_state` into a fresh graph or one that ran ahead, then *N* steps, against the run that never stopped; the restored state is compared before stepping, `_meta` included; `reset_state()` must equal a freshly compiled graph | Every cheap node with calibrated params; predictor history, IQN-IMVJ warm starts, sub-cycling and multi-rate phase; the REST `/checkpoint/save` and `/load` routes crossed with the in-process calls; generated graphs, the costly nodes and a diagnostics group in the slow lane; a sharded rod | State outside `gm._state` and `gm.params`; a defect `save_state` and `load_state` share (one key scheme) |
+| Serialisation is the original | `to_dict` -> JSON -> `from_dict`, and a USD stage, against the original: config, structure, initial state, params, `param_specs()` and trajectory | Every built-in node with generated arguments; generated graphs over seven node kinds (`strategies.ALL_NODE_KINDS`), with coupling groups in the slow lane; a sharded rod reloads unsharded with a warning and, re-wrapped, bit for bit | A field both `to_dict` and `from_dict` ignore that changes nothing they compare |
+| Three FMU paths are one model | The TCP bridge over a socket, `FmuSidecar` driven in process, and the `GraphManager` itself, over generated `set` / `get` / `step` / `get_state` / `set_state` / `reset` sequences: every value and the full state agree after every operation; a parameter refused by the bridge's `set` is refused by `set_params` (same reason) and by `check_params`; an edited snapshot is refused by `set_state` and `set_fmu_state` with the same message and changes nothing | A uniform graph, a multi-rate graph with an array input, a coupled graph with a predictor per push; generated graphs in the slow lane | A defect in the compiled step (all three share it); input values, which only the bridge checks |
+
+Per push, each property stays under about 5 s on a CI runner by drawing
+values on a fixed graph shape (`EXAMPLES_COSTLY`), reusing compiled graphs
+where the oracle checks the reuse itself (a reset graph must equal a fresh
+one), or by a short fixed table where every case compiles. Every slow mark
+names its per-push sibling. Every property is `derandomize=True`, so CI
+draws the same examples on every run. Each oracle was mutation-tested on a
+scratch copy of `src/` (the PR that added them lists the mutants and the
+test that caught each).
+
+### The REST oracles: generated sequences, and requests from the schema
+
+Files: `tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py`,
+`tests/property/test_rest_requests_generated_from_the_schema.py`; the
+invariants both ask are in `tests/property/rest_oracle.py`. The REST tests
+before them are fixed scenarios, and two audit rounds in a row found a
+defect that only a *sequence* reaches (PUT, save, PUT, load, PUT a value
+back) or that is one malformed value on a documented field (a NaN
+`timestep`). These two generate those inputs. Neither predicts an answer:
+whatever the server replies, no reply is a 5xx; a refused request changed
+nothing (the config, every parameter, the whole state, the files under the
+checkpoint root, the streams' clock); an accepted graph reloads
+(`from_dict(to_dict())`, with a checkpoint on top), steps bit for bit as its
+reload and is inside the stability limit its constructor enforces; a 4xx
+names no directory of the deployment; a 2xx is strict JSON.
+
+- **The sequence oracle** is a Hypothesis `RuleBasedStateMachine` over the
+  state-changing routes, with a direct `gm.params` write between requests
+  standing in for a fit. Its vocabulary puts a rod *at* its Fourier limit,
+  returns to values the graph has already held as often as it proposes new
+  ones, and reuses four node names and four checkpoint names, which is what
+  makes a sequence like MADD-ANO-178's reachable. Ten requests a sequence
+  per push, drawn the same on every run; a hundred in the slow lane at the
+  profile's depth. Each historical sequence is also pinned, replayed
+  through the machine's own `do_*` requests.
+  **To add a rule:** write a `do_<request>` method that sends one request
+  through `send()` (which asks the first two invariants) and a `@rule`
+  that draws its arguments and calls it; add the request, in a form the
+  server takes and one it refuses, to
+  `test_every_kind_of_request_the_machine_sends_is_both_accepted_and_refused`.
+  The other invariants are asked after every rule without being named. A
+  node class with a stability limit also gets an entry in
+  `rest_oracle.STABILITY_LIMITS` (a test fails for a stock node that has
+  none) and its values in `VOCABULARY`.
+- **The request oracle** reads the routes from the app's OpenAPI document.
+  Each has a *seed* in `SEEDS`: a request the served graph takes, which is
+  the part a schema cannot say. The battery replaces every path parameter,
+  query parameter and body member of every seed, in turn, by every
+  malformed value of its kind, and does the same to the headers a proxy or
+  the HTTP server interprets (in process, and as raw HTTP to a uvicorn
+  server on loopback); a fuzzer draws combinations.
+  **To add a route:** add it to the server, and
+  `test_every_documented_route_has_a_request_generator` fails until `SEEDS`
+  has an entry for it, with every parameter the route declares; the fields
+  and their malformed values follow from the schema. A route whose
+  acceptance leaves its seed valid goes in `KEEPS_ITS_SEED`; a route that
+  changes the state also gets a rule in the sequence oracle. The
+  out-of-scope prefixes (`/surrogate/`, `/ws/`, `/cloud/`) are listed in
+  `OUT_OF_SCOPE`, and nothing is ever sent to them.
+- **Both serve the graph in two configurations**, drawn with each example:
+  the default loopback bind, and the one a network bind requires
+  (`rest_oracle.serve(token_enforced=True)`: the server is *told* its bind
+  is `0.0.0.0`, no socket is opened, and the client presents the token). A
+  token-holder's requests are held to every invariant above, failure
+  injection included. The one invariant only that configuration has is in
+  `tests/property/without_the_token.py`: the same request without the
+  token, in each of nine ways of not presenting it, is a 401 with
+  `WWW-Authenticate: Bearer`, changes nothing, and its body is byte for
+  byte the one a server with an empty graph gives another request. The
+  request oracle asks it of every route the app has, read from
+  `app.routes` (so the surrogate routes too, which are refused before they
+  are reached); `/cloud/*` and the stream handshakes are never sent to
+  (`NEVER_SENT`). **A new way of presenting a credential** goes in
+  `CREDENTIALS`.
+- **Coupled, mapped and multi-rate graphs**
+  (`rest_oracle.COUPLED_AND_MAPPED_GRAPHS`: a coupling group under each
+  solver, a dense and a sparse static mapped edge, nodes at three rates)
+  are graphs the routes cannot build and users serve. The sequence oracle
+  starts examples from them and tours one of each kind per push; the
+  request oracle has a seed on one of each kind for every write route
+  (sent as it is per push, its battery in the slow lane). Keep them tiny: a
+  coupled graph's compile is most of an example.
+- **Writes beside the runner** (the last section of the sequence oracle's
+  file): requests sent while `POST /sim/start`'s thread steps the graph. A
+  route documented to answer 409 beside the runner must, and a parameter
+  write is applied after a whole number of steps, read from the streams'
+  clock inside the write's transaction; what the runner leaves when it is
+  stopped must be, bit for bit, what a fresh server leaves that takes the
+  same steps one at a time and the accepted writes at those steps. Nothing
+  reads the graph beside the runner except through a route.
+
+A defect either oracle finds is kept as a strict xfail with its minimal
+request, and, where the generators would otherwise report nothing else, a
+tolerance exactly as narrow as the defect, pinned by a test of how narrow,
+that goes when the xfail passes (of the request oracle's none is left: the three it
+found on the tree it was written on are fixed, and their cases are under
+"What the battery found" in its file). To show an oracle can
+still fail, run it against an older tree: `git archive <commit> src` into
+a scratch directory, and that `src` on `PYTHONPATH` with this tree's tests.
+
+Two strict xfails are left in the sequence oracle's file, found when its
+examples began to start from coupled and mapped graphs:
+`test_a_graph_whose_coupling_group_lost_a_member_still_reloads` and
+`test_a_length_written_after_a_load_is_held_to_the_points_a_mapping_was_built_from`.
+The machine withholds exactly those two requests (`_grouped`, `_withheld`);
+each filter goes with its xfail.
+
+### Coupling and numerics
+
+`tests/property/test_differential_*.py`, over graphs of synthetic nodes
+from `tests/property/coupled_graphs.py`. Every node is `x <- alpha x_pre +
+sum G_j f(u_j) + b + beta dt` (or explicit Euler on the same right-hand
+side). The gains are drawn and rescaled to a drawn spectral radius (up to
+0.999, non-normal or rank one). Nodes can have `tanh` inputs, `int32`,
+`uint32` and `bool` leaves, an unread float field, a clock, and flux
+edges. A graph has a cycle, chords, a driver and a sink. A group of
+linear nodes has its fixed point as a float64 solve. The per-push cases
+fix the structure and configuration and draw the values, which reach the
+compiled step as parameters, so each case compiles once. Each slow-marked
+broad case draws the structure and configuration too, and names its
+per-push sibling.
+
+Two programs that evaluate the same arithmetic with different rounding
+(the two solvers' loops, a fused against an unrolled update, batched
+against unbatched kernels, eager against jitted) are held to *round-off
+per pass*: the forward error of each node's sum, `2 T eps sum |term|`,
+per coupling pass (`rounding_bound` in the kit). That is at least eight
+ulps of `|x|`, and more where large terms cancel, which a non-normal gain
+does.
+
+| Oracle | Paths | Tolerance | Cannot see |
+|---|---|---|---|
+| fori == ift | `solver="fori"` against `"ift"`: every acceleration, norm, mode, predictor, cap, flux edges, `tanh` | `iterations` and `converged` are equal when the threshold clears the norm's float32 floor (`residual_noise_floor`) by 4x, unless an estimate lies within its own rounding of the threshold (`criterion_is_resolved`). With equal passes, states agree to round-off per pass | The one-pass map, the norms and the criterion arithmetic, which both solvers share |
+| diagnostics on == off | the same group with `diagnostics` False and True, both solvers | Bitwise: states, `iterations`, `converged`, the predictor and IMVJ warm starts, and `jax.grad` through `run_scan` | A fault that moves both settings the same way |
+| converged => near the exact fixed point | the returned state against the float64 solve, measured in a NumPy restatement of the group's norm | Single coupling mode, iterate started on it, `none` or `fixed`: distance <= threshold + `floor * amp` + `2 omega floor amp**2`. That is the estimate's own float32 resolution, derived from its formula; at a rate of 0.99 it admits that float32 cannot certify the distance. `precision_limited` and `ratio_usable=False` groups are outside the claim, as documented. A usable `spectral_error_bound` must be >= the distance, with no slack, on general non-normal spectra under every acceleration | Non-linear groups (no closed form); the definition of "fixed point of the evaluated map" |
+| multi-rate == hand-unrolled | the gated multi-rate step against a Python loop that fires each block or leaves it alone, with the group as a uniform-rate sub-graph | Bitwise: a non-firing block's state and `_meta` are unchanged. States agree to round-off per pass; `iterations` are equal | A fault inside the coupled solve that both paths call |
+| sub-cycled == uniform-rate | `subcycling=True` with constant interpolation, against a hand-written node that sub-steps `d` times in a `lax.scan` at the macro timestep | Equal passes; round-off per pass. Clocks are bitwise equal to the reference's, and exact against the graph's time when `d` is a power of two. `quadratic` == `linear` bitwise (MADD-ANO-027). `linear` == `constant` to round-off under Jacobi or with the sub-cycled node first | The shared sub-step update |
+| adaptive at a pinned dt == run_scan | `run_adaptive`/`run_adaptive_scan` with `dt_min = dt_max`, against `run_scan` at half the timestep; replaying `dt_history` through the dt step | Round-off per pass. The replay is bitwise. Every node's clock equals the stepper's time (MADD-ANO-061), within the rounding of its float32 sum | The dt-parameterised step itself |
+| vmap == per-member, jit == eager | `run_sweep` against `run_scan` per member; `jax.vmap` of the step against the step; `vmap(grad)` against `grad`; `jax.disable_jit()` against `jit` | States to round-off per pass; `iterations` equal; the residual to the norm's float32 floor; `rho_spectral` to its Arnoldi residual + `sqrt(8 eps)` (a nearly defective non-normal Jacobian moves its eigenvalue by the square root of a perturbation); `gradient_relative_error_bound` within 25% (its ~8% is documented); gradients within 1e-4 relative | Every fault in the step, which is the same batched and unbatched |
+| int/uint32/bool leaves survive | each non-float leaf after `k` updates, against its closed form, in every configuration above and under sub-cycling, waveform sweeps, multi-rate, adaptive stepping and `vmap` | Bitwise, dtype included | A leaf that reads a coupled input (the solver oracle covers that) |
+| units-invariance | the same equivariant group (no `beta * dt`, no leaves, linear) with every bias and initial state times `2**k`, `k` in -53..66, against the unscaled run (`test_differential_coupling_units.py`), every acceleration, norm, mode and solver | Bitwise: passes, verdict, residual, amplification, state / `2**k`. Powers of two only: a decimal scale changes the inputs' rounding, which Aitken is sensitive to | A constant that happens to be a power of two |
+| long Gauss-Seidel chains at the floor | a stalled ring of 8 (per push, both modes) or 24-32 relays (slow) against its float64 fixed point; drawn rank-one gains **and** the worst-case uniform ring (every link `rho**(1/m)`, no cancellation), which is what fails a floor that undercounts the chain | A usable `spectral_error_bound` >= the distance, no slack | Chains shorter than the floor's headroom (per push) |
+| adversarial chains | Gauss-Seidel rings closed by an affine head: links with relative gain above one and no cancellation (`u**2`, `u**4`, `u0 * u1`), and signed affine links whose terms cancel (`|a u|` up to 150 `|x|`), kept as separate cases, under Gauss-Seidel (under Jacobi their noise keeps the residual above the floor); the exact fixed point by float64 Newton on the head's loop map, started at the designed root | A usable `spectral_error_bound` >= the distance; a usable `gradient_relative_error_bound` >= the true relative error of the gradient in the head's bias (slow) | Cancellation inside a node's own update, which nothing outside it can see |
+| IFT derivatives at every scale | `jax.jacfwd` and `jax.grad` of a step under `linear_solver="gmres"` against `"dense"` (an LU solve, no tolerance) and against `solver="fori"` (unrolled), the group at `2**k`, `k` in -100..60, 6 and 60 coupled DOF, both modes, the draw rescaled so its sweep contracts (`test_differential_ift_derivatives.py`), jitted once through `gm._compiled_step`; `jacfwd` in a gain multiplier so its rhs scales with the state | Relative 1e-3 | A defect all three solves share (the one-pass map's JVP) |
+
+Each oracle was mutation-tested against a scratch copy of `src/` with at
+least one seeded fault, and each fault was caught. The PR that added the
+harness lists them. Random draws have twice let a floor defect through
+(rank-one gains are below one per link almost surely): an oracle whose
+claim rests on a model's premise needs a generator that attacks the
+premise, not only one that samples around it.
+
+### Configuration interactions and graph shapes
+
+Files: `tests/property/test_differential_coupling_interactions.py` and
+`test_differential_coupling_topologies.py`, with the scaffolding in
+`covering_array.py` and `coupled_topologies.py`.  The coupling-and-numerics
+harness above draws one group in a cycle, and its tables hold one knob at
+a time.  This harness draws *combinations* of knobs and *shapes* of graph.
+
+**The covering array** (`covering_array.py`) is a deterministic IPOG
+greedy with constraints.  The coupling knob space is `solver`,
+`iteration_mode`, `acceleration`, `convergence_norm`, `linear_solver`,
+`predictor`, `subcycling`, `boundary_interpolation`, `waveform_iterations`,
+`diagnostics`, `strict_convergence`, the dtype and a budget.  Over it the
+generator gives 65 rows, in which every valid pair and triple of values
+appears.  `test_the_array_covers_every_valid_triple` regenerates the array
+and checks its coverage, and dropping any one row fails the check.  The
+constraints are the inert-knob rules: under `"fori"` `linear_solver` and
+`strict_convergence` do nothing, and without sub-cycling neither do the
+two waveform knobs.  `"bicgstab"` is not an option (CPL-039).  Per push
+the harness runs a one-way slice of the array, the float32 rows that hold
+every value of every knob.  The slow lane runs every row, and the float64
+rows in subprocesses under `jax_enable_x64`.
+
+**The topology generator** (`coupled_topologies.py`) describes whole
+graphs of linear relays:
+
+- several groups: rings, stars and nested cycles;
+- outside nodes inside a group's component, two groups in one component,
+  and ungrouped cycles;
+- drivers and readers in any build order;
+- additive edges (three into one port), flux edges, mapped edges between
+  sizes and transformed edges;
+- `int32`, `uint32`, `bool` and typed PRNG-key leaves, and three-argument
+  nodes.
+
+Per push the harness runs four named structures, each in its own build
+order and in an *interleaved* one: readers added before the cycle they
+read, and outside nodes added between a group's members.  The slow lane
+draws the structure.
+
+**The monolithic reference** is `LinearModel`.  One step of linear relays
+is one linear system: each edge reads its source's new value, except a
+back edge, which reads the old one.  The back edges come from the
+documented rule, restated rather than called: an edge between two
+components points forward; inside a component the nodes run in their
+build order, each group as one block at its first member's place.  The
+system is solved in 80-bit extended precision, refined from a float64
+solve, so a float64 graph's rounding is about 2000 reference ulps.  The
+oracle is local:
+
+- a node outside every group is within its float rounding of its update
+  at the values it read;
+- a group's defect `x - Phi(x)` is within what its *reported* residual
+  allows, `-(I - L)(F(x) - x) + epsilon` for an affine pass, and the
+  reported residual is `||F(x) - x||` of the returned state to its
+  rounding;
+- a converged group is within its threshold's tolerance of its exact
+  fixed point;
+- the whole state is within `|(I - M)^{-1}|` of those allowances of the
+  exact solve.
+
+The same structures carry renaming, build-order and identity-relay
+invariances.  The build order keeps the relative orders the documentation
+says reach the result: a group's members, every node of a component that
+is not exactly one group, and three or more additive edges into one port.
+
+| Oracle | Paths | Tolerance | Cannot see |
+|---|---|---|---|
+| monolithic reference | the step against the extended-precision solve of the whole graph, per step from the library's own pre-step state, for every array row and every structure | A node's float rounding, `T eps sum|term|`. `T` counts the rounding chain: the constants, and per port the product, the additive sum and a mapping's inner product. `T eps` is twice `T u`, which covers `1 / (1 - T u)` and any reassociation or FMA. A group adds `||D S (I - L) S^+ diag(rho_up)||` times its reported residual, and its float evaluation `(N + 4) eps` | Non-linear nodes. Multi-rate and adaptive stepping. A fault the restated schedule shares with the documentation |
+| fori == ift | the array row against its solver twin, in lock step: before each step the twin takes the row's whole state, node states and the shared warm-start slots, so each step compares one solve from one input | The coupling-and-numerics oracle's parity rule, at every step; with equal passes, round-off of that step's passes | As above |
+| diagnostics on == off | the row against its diagnostics twin | Bitwise: states, `_meta` slots, passes, verdicts | A fault that moves both settings the same way |
+| strict == report | the row with `strict_convergence` against without | It raises on exactly the steps reported unconverged. With `waveform_iterations > 1` it also raises where an earlier sweep hit the cap (CPL-052). Where it does not raise, bitwise | A raise that happens to fall on a step that is also unconverged |
+| usable bounds | `spectral_error_bound` against the distance in the returned state's weights; `gradient_relative_error_bound` against central differences of the exact fixed point in every member's gains and biases (slow) | None: the bound must be at least the truth | Constants outside the group |
+
+The harness found MADD-ANO-156 to 159, pinned as strict xfails naming
+CPL-003, CPL-186 and CPL-187.  158 and 159 are fixed in 0.4.0 and their
+cases run as tests; 156 and 157 (CPL-186) are still strict xfails.  Each
+oracle was mutation-tested against a scratch copy of `src/` with a seeded fault, and the PR that added the
+harness lists them:
+
+- back edges decided over the node order rather than the block order;
+- readers downstream of a cycle scheduled in build order;
+- an understated residual;
+- the ift loop returning the iterate after the measured one;
+- Aitken dropping its relaxation carry (caught in the slow lane, by the
+  rows whose Aitken runs past three passes);
+- IQN-IMVJ ignoring `jacobian_reuse` under `"ift"`;
+- the fori loop not freezing the converged iterate;
+- diagnostics nudging the state;
+- `strict_convergence` that never raises;
+- a spectral bound reported at a tenth of its value, and a gradient bound
+  at a hundredth (caught in the slow lane);
+- a group swept in its members' name order (caught by renaming).
+
+### System identification and the params machinery
+
+Two oracles; each was mutation-tested against a scratch copy of `src/`
+(the PR that added them lists the faults).
+
+| Oracle | Paths compared | Covers | Cannot see |
+|---|---|---|---|
+| Truth recovery (`tests/property/test_sysid_truth_recovery.py`) | A fit's `converged=True` against the truth it was generated from: noiseless data, a truth drawn anywhere inside the bounds (near them too), a start anywhere in the box. The fit must recover the truth to 1e-3 of the coordinate's range, or say `converged=False`; and the same fit with one parameter measured in a unit up to 1e6 times larger or smaller must give the same answer -- the same returned point, `excited_rank` and `hold_declined` -- in about as many iterations | `fit_lm` per push on a closed-form problem whose only constrained stationary point is the truth (one strictly monotone, non-saturating block of residuals per coordinate, nonlinear so that a Gauss-Newton step overshoots), over every transform: a clipped `transform=None` leaf, `log`, `logit`. In the slow lane, more draws, `fit` (Adam with a `tol`), and all three fitters on the spring graph | A problem with a second stationary point (a plateau where the model saturates is one, and a fit may stop there); the size of a fit's error when it says `converged=False` |
+| Entry points and readers agree after a `node.params` write (`tests/property/test_differential_entry_points_after_a_node_write.py`) | `gm.step`, `gm.run`, `gm.run_scan` at a length traced before the write and at a new one, `gm.run_scan_with_history` and `sysid.windowed_loss`, each from one fixed state, after a write with no compile and again after `compile()`: all must run the model the write leaves. Readers likewise, with nothing run first: `gm.params`, a `jax.jit` and a `jax.grad` of a sysid loss handed `gm.params`, `to_dict` reloaded, a checkpoint, `GET /graph/params` (the FMU export: `tests/core/test_node_params_writes_are_observed.py`) | A constant of a three-argument node, a structural `int` and a `gm.params` leaf of a params-taking node; two writes in a row | An entry point that keeps its own copy of the compiled step (an FMU sidecar built before the write runs the step it was given) |
+
+### Domains the claims cover: precision, replay, acceptance, FMU writes, stability
+
+Five oracles over domains the claims inventories state and audits kept
+finding defects in, because no test drew from them: x64, a predictor's
+history inside a windowed fit, a structural write pending at an FMU export,
+the FMU's acceptance rules, the stability filter.  Each disagreement is a
+strict xfail naming its finding (`B1-H1` ... `B1-M2` and `B2-H1`, `B2-H2`,
+`B2-L10` from the audits, `N1` to `N4` found here) rather than an inventory row, so the row stays where its fix PR puts
+it; the fix flips the xfail.  Every fault in the table at the end was
+seeded into a scratch copy of `src/` and caught by the per-push tests.
+
+#### Precision: float32 against float64
+
+`tests/property/test_differential_precision.py`, with the cases in
+`tests/property/precision_cases.py`.  x64 is process-global, so each case
+runs in float32 in the pytest process and in float64 in a worker process
+started with `JAX_ENABLE_X64=1` (one per module, fed one JSON request per
+case, run concurrently with the float32 side).  On problems drawn away from
+every decision threshold the verdicts must be equal (`converged`,
+`excited_rank`, `hold_declined`, the {term}`FIM`'s `rank`, the coupling report's
+`converged`, `ratio_usable`, `spectral_usable`, `precision_limited`,
+`gradient_bound_usable`) and the answers must agree within a tolerance
+derived from the problem; where the truth is known each precision must
+recover it within its own, so a float64 run that computed in float32 fails.
+
+| Covers | Tolerance | Cannot see |
+|---|---|---|
+| `fit_lm` on a closed-form problem (every transform) and float32 leaves in an x64 graph | `norm(pinv(J)) * 6 eps * norm(g)` (the residual's forward error, six roundings an entry, moved into the parameters by the problem's sensitivity) plus `step_tol` | A defect both precisions share |
+| `fit` (Adam with a `tol`) | `norm(pinv(J)) * sqrt(2 tol)` plus the floor above | Adam's trajectory near its `tol` |
+| `fit_multiple_shooting` (slow) | `norm(pinv(J_w)) * sqrt(best_loss)`, `J_w` the windowed simulation's sensitivity | Window states that move far |
+| `fim` | Weyl: `(N + 2n + 12) eps32 trace(F)` | The CRB of a near-singular `F` |
+| `windowed_loss` | `0.0` at the truth in both; elsewhere `2 sqrt(M L) d + M d^2`, `d` the stable integrator's forward error over the window and the record | An unstable integrator |
+| `coupling_diagnostics()` on a pair contracting at 0.06-0.48 with a tolerance two orders above the float32 floor | Each state within its `spectral_error_bound` of the step's exact fixed point; `rho_spectral` to its Arnoldi residuals plus `sqrt(8 eps32)` | A precision-limited group, where the two read differently by design |
+| An IFT gradient (slow) | Each within its own `gradient_relative_error_bound`, plus `2 * 8 eps32 / (1 - rho)` | |
+
+It found B1-H1 (under x64 the identifiability guard missed the spring's
+exact scale degeneracy, with float64 leaves and with float32 ones) and B1-L1
+(`fit_lm` reported `converged=False` at its float64 floor), both fixed in
+0.4.0.  Two differences are documented, and pinned as such: a parameter
+whose truth is exactly 0 (float32 lands on 0.0 and converges, float64 on
+rounding noise no relative step resolves), and a direction whose gradients
+lie below float32's cutoff and above float64's -- so a drawn problem holds
+`excited_rank` to "float64's is at least float32's", not to equality.
+
+#### Replay and restart
+
+`tests/property/test_differential_replay.py`.  A restart from recorded
+state must land on the recorded run, bit for bit: `windowed_loss` at the
+generating parameters is `0.0` teacher-forced and under multiple shooting
+(`init_window_states`, any continuity weight), for every window, sample
+spacing and multi-rate `start_step`; a fit started at the truth, in
+identity coordinates, sees a zero loss at every iterate and returns it
+(under a `log` spec `constrain(unconstrain(p))` is an ulp off, a rounding
+the oracle does not claim through); and a checkpoint taken mid
+`run_adaptive` resumes it with the same `dt_history` and state.  Drawn over
+no predictor, `linear` and `quadratic`, Aitken, {term}`IQN-ILS`, IQN-IMVJ with
+Jacobian reuse, multi-rate graphs and sub-cycling.  Tolerance: none.
+It found B1-H2 (`windowed_loss` zeroed the carried `_meta`, so a group
+whose next step reads predictor history or IMVJ warm starts replayed from
+another state), fixed in 0.4.0; the history families are checked to carry
+history their next step reads.  Cannot see: a defect the record and the replay share.
+`run` and `step` resumes are the checkpoint oracle's (State and I/O).
+
+#### Acceptance: every door that writes or restores a parameter
+
+`tests/property/test_differential_param_acceptance.py`.  For a drawn
+`ParamSpec` (bounds `None`, finite, infinite the unbounded way, zero, a
+float32 subnormal; every transform) and a drawn value (inside, on and one
+float32 step past each bound, the open edge of a `log` / `logit`
+coordinate, subnormals, values that flush to `+-0`, overflow, non-finite,
+integers, booleans, wrong types), every door either accepts the value with
+the same resulting model -- the same leaf, bit for bit -- or refuses it,
+and a door on the graph that refuses leaves every node's params, every
+`gm.params` leaf, the state and the dirty flag where they were.  The doors:
+`gm.check_params`, `FmuSidecar.set_params`, the bridge's `set` and
+`set_state` over a sidecar with and without `param_specs`,
+`PUT /graph/params/{node}` (in process, launchers stubbed); the restore
+doors `GraphManager.load_state` and `POST /checkpoint/load` (the graph's
+own checkpoint with the leaf's member replaced); and `POST /graph/nodes`
+building a node of the class with the value, against the class's own
+specs.  Over a plain spring, a `HeatNode` rod (whose constructor refuses a
+diffusivity past its Fourier limit), and the wrappers `HybridNode`,
+`ShardedStencilNode` (a generated {term}`stencil <Stencil>` node and a rod) and
+`ShardedUnstructuredNode` on a one-device mesh; the FMU doors are asked
+where the description exports the leaf.
+Documented differences: **D1** `check_params` judges the value held in the
+leaf's dtype (a value the dtype overflows or flushes is "does not fit its
+type" to every other door); **D2** it is not asked about a value that is
+not a number; **D3** a snapshot restores a parameter at the value the FMU
+was instantiated with whatever its bounds, and `POST /checkpoint/load`
+asks nothing of a value that is the leaf's now or the node's own (a graph
+built outside its bounds reloads its own checkpoint); **D4** (retired: the
+REST route bounds a JSON integer past `MAX_NODE_PARAM_INT` only for an
+integer parameter, so a float leaf takes one at every door); **D5** PUT
+and the route's load ask the node's constructor and refuse a value it
+refuses (a `HeatNode` past its Fourier limit), which `check_params`, the
+sidecar and the bridge take (`MADD-ANO-047`'s residual, deferred to
+0.5.0); **D6** `GraphManager.load_state` restores any number the leaf's
+dtype holds, as a `gm.params` write takes it (a graph whose parameters
+Python moved outside their bounds must resume its own checkpoint), and
+refuses only text, booleans and what the dtype cannot hold.  B1-M2 (a
+`log` spec without a lower bound advertised no `min`) is fixed in 0.4.0
+and its cases run as tests, as do B2-H1 (`POST /checkpoint/load` restored
+what PUT refuses: out of bounds, non-finite, a boolean, a numeric string,
+a value the constructor refuses; `load_state` a boolean and a numeric
+string), B2-L10 (`POST /graph/nodes` applied no
+`ParamSpec` bounds), B2-H2 (a write to a `HybridNode` was lost), N1 (the
+REST route stored a numeric string as the number), N3 (`POST
+/graph/nodes` took a boolean for a float constant) and N2 (an open bound
+in the band where a float32's spacing flushes, or a `logit` edge whose
+neighbour's coordinate rounds onto the bound, was advertised one float
+inside it, where `ParamSpec.check`
+refuses), all fixed in 0.4.0.  Each pinned case compares only the doors its
+finding is about, so a fix shows even while another finding on the same
+value is pending.
+Cannot see: a rule every door shares, and arrays.
+
+#### The FMU with `node.params` writes, four ways
+
+`tests/property/test_differential_fmu.py` (the end of the module).  The
+three-path oracle (State and I/O) gains the compiled C wrapper, through
+`ctypes` against a bridge of its own, and sequences that write a constant
+or a structural `node.params` value, with and without `compile()` before
+`build_model_description`, on a multi-rate graph and a sub-cycled group,
+each followed by an export wired as the guide wires one.  The graph path
+takes the same write and runs what `gm.step` runs.  Every value read
+through `fmi3Get*` must equal the bridge's, the C wrapper's bridge's full
+state the TCP bridge's, and every operation the C API can express must
+succeed exactly when the bridge's does.  Tolerance: none.  A structural write pending at the export must be
+refused, naming `compile()` (B1-H3, fixed in 0.4.0: the FMU ran the old
+model); the sequence then follows the advice and exports again.
+Cannot see: an operation the C API cannot express (a string time), and a
+defect every path shares.  Without a C compiler it compares three paths,
+and `test_the_c_wrapper_is_a_fourth_path_here` says so by skipping.
+
+#### The FMU's clock patterns, with restores, four ways
+
+`tests/property/test_differential_fmu.py` (`CLOCKS`).  Four importers, by
+how they keep their time -- `start + k * h`, a running sum, step sizes a
+little long, points a little late -- each run with no restore, with a save
+and restore after every step, and with one rollback part-way, over the same
+four paths; the wrapper saves into one reused `fmi3FMUState`, as a rollback
+master does.  The oracle: a restore changes no reply.  Every step is
+answered, to the bit, as it is without one, a step taken again after going
+back included.  The reported time is also held to the simulated time in
+exact rational arithmetic, to the documented bound plus three ulps of the
+time (the clock's own float64 rounding; the battery is where that term was
+found).  `tests/fmi/test_a_restore_resumes_the_drift_accounting.py` runs
+the audit's own figures on the bridge alone.
+Cannot see: an archive an importer rewrites (it is taken at its word for
+its time), and a start time given after a restore, which is a new
+reference by design.
+
+#### Every FMI type at its extremes, four ways
+
+`tests/property/test_differential_fmu.py` (`TYPE_VALUES`), under x64.  One
+node with an input and an output of each of the eleven FMI numeric types,
+and the two float parameters a graph can have.  Each type's extreme values
+go in through its typed setter and come back through its typed getter, as
+an input and a step later as an output, over the TCP bridge and the
+compiled wrapper (binary and JSON frames), with the sidecar and the graph
+given the value in the type itself.  A value the float64 wire is reads back
+as itself on every path; an `Int64` / `UInt64` it is not is refused by set
+and, once the model holds it through the FMU-state archive, by get, with
+the four states still identical; a value outside the type is refused by
+every door.  Tolerance: none.
+Cannot see: the half of a fix another half masks.  Negative zero over JSON
+is repaired on both ends (the wrapper writes `-0.0`, the bridge reads
+`-0`), and reverting either alone leaves the battery green; each end has
+its own direct test, and the battery fails only with both reverted.
+
+#### Mutating the C wrapper
+
+The C harnesses (`tests/fmi/c/`) include the wrapper through the macro
+`MADDENING_FMU_C`, which `tests/fmi/test_c_unit.py` sets to
+`maddening.fmi.package.C_SOURCE`.  So a fault seeded in a scratch copy of
+`src/` and run with `PYTHONPATH=<scratch>/src` is compiled into the unit
+tests and the fuzz harness, as it is into the FMU binary; they used to
+include the tree's file by relative path, and no C mutant reached them.
+Two things to check before counting a C mutant as caught: that it built
+without a warning (the build's own no-warnings assertion fails a mutant
+that leaves a parameter unused, which says nothing about the tests), and
+whether it was caught by a `CHECK` or by the binary crashing.
+
+#### The stability filter (metamorphic)
+
+`tests/property/test_metamorphic_fmu_stability_filter.py`.  The
+description built under any assignment of {term}`stability levels <Stability level>` (every level,
+and untagged), `include_evolving` and `multi_clock` must equal the full
+export (every class {codeterm}`STABLE`) filtered by the documented rule, surface by
+surface: inputs, outputs, parameters with `fixed_parameters`' reasons, and
+clocks.  Changing one class's level then changes exactly its own
+surfaces.  Tolerance: none.  It found B1-M1 (the inputs were not filtered;
+fixed in 0.4.0).
+Cannot see: a defect in the full export itself, which the FMU oracles
+check against the graph.
+
+| Seeded fault | Oracle | Per-push tests that catch it |
+|---|---|---|
+| `fit_lm` evaluates its residual at parameters rounded to float32 under x64 | precision | `test_fit_lm_agrees_across_precisions` (both cases: the float64 answer misses the truth by float32's resolution) |
+| `windowed_loss` drops `start_step` when it rebuilds a window's step counter | replay | `test_a_replay_of_a_graphs_own_record_is_exact`, both multi-rate families, teacher-forced and multiple shooting |
+| A checkpoint load restores the state and leaves the parameters where they were | acceptance | `test_a_restore_door_takes_what_every_write_door_takes`, the refusal cases (the leaf is never cast, so nothing is refused), the rod and every sharded wrapper's restore case |
+| An open `log` / `logit` bound advertised as itself (inclusive) rather than one float inside | acceptance | `test_every_door_accepts_or_refuses_a_parameter_value_together`; every `test_a_logit_range_no_value_can_enter_is_refused_by_every_door` case |
+| The C wrapper's `fmi3DoStep` reports the step's start as `lastSuccessfulTime` | FMU four ways | `test_four_fmu_paths_agree_after_a_node_params_write`, every case that passes today |
+| `fmi3GetFMUState` allocates a new state over the one it is handed (B1 round 9, F3) | C unit; clocks | `test_c_unit_tests` (the live-allocation count and the pointer); every `every step` clock case |
+| `fmi3FreeInstance` leaves its live states allocated; a reused state's old blob is dropped; unlinking leaves a stale back-link | C unit | `test_c_unit_tests`, by the live-allocation count |
+| `set_state` starts the drift count again at the restored time (F4); the archive records a zero count, or the reported time as the start | clocks | `test_a_restore_between_steps_changes_no_reply_on_any_fmu_path`; `test_a_restore_changes_no_verdict_and_no_reported_time` |
+| A `get` converts an int64 to float64 unchecked; a JSON set stores the rounded neighbour (F5) | types | `test_every_fmi_type_carries_its_extreme_values_or_refuses_them_on_all_four_paths[int64-*]`, `[uint64-*]` |
+| `lost_as_integer` takes `max + 1`, a value below the minimum, or a fraction | exact integers | `tests/core/test_a_value_is_an_integer_of_a_type_exactly_or_not_at_all.py` |
+| `load_state` judges an integer by a cast there and back | checkpoint | `test_an_integer_of_the_other_signedness_is_refused_not_wrapped` |
+| A structural `node.params` write no longer marks the graph dirty | FMU four ways | the compiled structural cases (the graph path keeps the old model), and the pending ones (the export no longer refuses) |
+| The clocks ignore the stability filter | stability | `test_a_class_level_filters_exactly_its_own_surfaces[clocks]`, `test_changing_one_class_changes_only_its_own_variables` |
+
+One mutant of this round survives, and is recorded rather than replaced:
+the FMU value check put back on its comparison through float64
+(`_checked_value`).  On x86-64 an out-of-range float-to-integer cast wraps,
+so the old comparison and the exact one give the same verdict for every
+input, and no test here can tell them apart; they part only where the cast
+saturates.  The first attempt at that mutant looked caught, and was not: it
+left out the `np.errstate` guard the old code had, so it failed on a
+`RuntimeWarning` raised as an error.  A second "catch" was a build warning
+(an unused parameter), fixed by keeping the parameter used.  Read how a
+mutant died before counting it.
+
+Three first attempts survived and were replaced, each for a reason worth
+knowing: a float32 rounding of `fit_lm`'s *residual* (a residual near zero
+rounds with float32's relative precision, so a noiseless fit still reaches
+the truth: equivalent there), the C wrapper's `fmi3Reset` leaving its own
+clock (an importer passes the communication point itself, so only a refused
+step's `lastSuccessfulTime` reads it), and `build_model_description`
+reading the parameter tree without syncing (an earlier read in the same
+call syncs it: equivalent).
+
+### Sharding wrappers
+
+**Oracle.** For a node and a composition of sharded wrappers around it,
+the graph built with the sharded composition and the same graph built
+with the node unwrapped give the same answer on every graph surface:
+`step`, `run`, `run_scan`, `run_scan(params=)`, a `gm.params` write (a
+`node.params` write for a node on the three-argument contract) followed
+by `compile()`, a `set_node_state` write followed by `run_scan`, and the
+gradient of a loss of `run_scan`'s final state. Otherwise the sharded
+composition must be refused loudly before it produces a state: at
+construction, at `compile()`, or at the first step. (`compile()` does not
+trace the step, so every check a wrapper makes in `update` fires at the
+first step.)
+
+**Where.** `tests/cloud/multigpu/differential_sharding_support.py` holds
+the generators, the two paths and the comparisons.
+`test_differential_sharding.py` covers the synthetic nodes and the
+`property_support` examples; `test_differential_sharding_builtins.py`
+covers the built-in nodes, the refusals and the known cases.
+
+**What is generated.** Three synthetic node families, one per wrapper.
+In each, the unsharded `update` and the per-{term}`shard <Shard>` `update_padded` call one
+shared kernel, so the only thing that can make the paths differ is what
+the wrapper delivers:
+
+- *Stencil* (`ShardedStencilNode`):
+  - grid and {term}`halo <Halo>`: a 1-D or 2-D grid, halo width 1 or 2 per axis, and a
+    global fill of `edge`, `zero` or `periodic`, declared through
+    `halo_boundary()` or not;
+  - contract: the legacy three-argument contract or the params contract;
+  - domain integral in the state: none, scalar, 2-vector or per-shard;
+    named to sort before or after the grid field; listed in
+    `state_fields()` or not;
+  - `shard_info`: read or not;
+  - statics: a sharded `StaticArray` read in the interior or in the halo,
+    and a replicated one read through the offsets;
+  - boundary inputs: per-cell, scalar or mis-shaped; a gain; face inputs
+    applied on the global edges;
+  - precision: float32 or float64.
+- *Pointwise* (`ShardedPointwiseNode`):
+  - a 1-D or 2-D state, sharded along either axis;
+  - the contract;
+  - per-cell, scalar or mis-shaped inputs;
+  - a whole-domain total in the state.
+- *Unstructured* (`ShardedUnstructuredNode`):
+  - partitions: uneven (an empty shard possible), balanced in global
+    order, and balanced out of global order;
+  - the exchange: `all_to_all` or `ppermute`;
+  - the contract and the integral kinds above, the integral masked with
+    `shard_info["n_local"]`;
+  - a partitioned weight read on owned cells only, or on ghosts too;
+  - per-cell, scalar or mis-shaped inputs.
+
+Meshes: 1, 2 or 4 devices; the pencils (2, 2), (1, 4) and (4, 1),
+including their size-1 axes; slabs of a 2-D grid; and a (2, 2) mesh whose
+`axis_map` uses one axis, the node replicated along the other. Wrappings: the
+wrapper alone; nested one level (stencil and pointwise);
+`HybridNode(wrapper)`; and the pointwise wrapper around a `HybridNode`.
+
+Built-in nodes: `HeatNode` at orders 2 and 4, with rod-end temperatures
+and sources. A non-uniform rod must be refused sharded, and runs
+unsharded. `LBMNode` D2Q9 and D3Q19 channels, with walls and an obstacle,
+on slabs and pencils, with body force and pressure faces. A pressure face
+is refused on a split axis. `ShardedStencilNode(LBMPipeNode)` is refused.
+
+The non-dividing-grid refusal's advice is followed both ways: the next
+multiple, and each device count that divides. The sharded graph then
+answers as the unsharded one.
+
+**Tolerances.**
+
+- *Grid fields*: within `16 eps max(1, |field|)` per step, growing by at
+  most 1.5 per later step (`grid_atol`). The two paths run one kernel on
+  the same data, so they would agree bit for bit but for one thing:
+  XLA:CPU contracts `a*b + c` into a fused multiply-add inside a fusion,
+  and a `shard_map` is a fusion boundary the unsharded program does not
+  have. An FMA skips one rounding. Measured on jaxlib 0.11.0, every
+  float32 `a*b + c` of 10^5 matched the correctly rounded FMA, and 23%
+  differed from the split computation. The largest difference observed
+  over the generated matrix was 1/16 of the bound, one ulp of the field's
+  scale.
+- *Domain integrals*: the summation-reordering bound
+  `(n - 1) eps sum|t|`, plus the integrated grid field's own bound.
+- *Gradients*: the larger of two bounds (`gradient_bound`).
+  - *A derived base*, from a forward-mode pass of the unsharded path: the
+    absolute sum of the gradient's terms before they cancel, the tangent,
+    and the departure from the initial state. A near-equilibrium state,
+    whose gradient is a small difference of large terms, gets the looser
+    base it needs.
+  - *The gradient's measured sensitivity to reordering*: four times the
+    distance between the unsharded path's reverse-mode and forward-mode
+    gradients, in the run's own precision. The two compute one derivative
+    with every operation reordered, while sharding reorders only the
+    shard-boundary terms.
+
+  Each half was added after an oracle error, not a wrapper defect:
+
+  - The first version used a fixed allowance relative to `|g|`, and an LBM
+    channel one step from rest exceeded it.
+  - The base alone then failed in the slow lane, on an unstructured ring
+    with an empty shard, relaxed to nearly equal values. There
+    `d x / d rate` is a small difference of nearly equal numbers. The two
+    paths agree to 5e-13 in float64, while in float32 each is 1e-4 off
+    the float64 gradient, the sharded path the closer. Sharded and
+    unsharded differed by 0.5 times the forward/reverse distance in
+    float32 and 0.8 times in float64.
+
+  That case is a per-push witness. The largest well-conditioned gradient
+  difference observed was 0.05 of the base.
+- *Precision*: every bound is in units of the dtype's own `eps`, so a
+  float64 run holds the sharded path to float64. A `dt` rounded to
+  float32 under x64 (MADD-ANO-033) is a failure.
+
+**Budget.** The per-push tests draw one surface per example at the
+`EXAMPLES_COSTLY` depth, with `derandomize=True`. Gradients run on a fixed
+set per push. On a 6-core slice with CI's compilation-cache settings, the
+slowest per-push test takes 3.2 s warm and 9.4 s cold (the generated D2Q9
+test, allowlisted: one LBM compile per path per example). The rest take
+at most 2.7 s warm and 5.2 s cold. Each `@pytest.mark.slow` test is the broad
+version of a named per-push test: every surface on every example, at
+`EXAMPLES_STANDARD` depth, gradients over the whole matrix.
+
+**Harness mutants.** Each fault was seeded into a scratch copy of `src/`;
+the per-push tests catch each one.
+
+| Seeded fault | Per-push tests that catch it |
+|---|---|
+| `shard_info`'s extent read from the first state field in sorted order, a domain integral included (MADD-ANO-056) | generated 1-D stencil |
+| A sharded static's halo always edge-filled (the pre-0.4.0 rule) | generated 1-D and 2-D stencil; gradients |
+| A nested `ShardedStencilNode` not forwarding `params` | generated 1-D and 2-D stencil; generated heat rod; built-in gradients |
+| A per-cell input replicated instead of sharded: stencil wrapper | ten tests, every family the stencil wrapper serves |
+| A per-cell input replicated instead of sharded: unstructured wrapper | generated unstructured; gradients; the known balanced-partition refusal |
+| An integral summing the padding rows (`shard_info["n_local"]` set to `n_local_max`) | generated unstructured; gradients |
+| The gradient stopped at the stencil wrapper (`stop_gradient` on `params`) | gradients (synthetic and built-in) |
+| A recompile that keeps the stale compiled step (MADD-ANO-032) | generated 1-D and 2-D stencil |
+| A mis-shaped per-cell input not refused (MADD-ANO-057) | generated 1-D and 2-D stencil; generated D2Q9 |
+| The `shard_info` offset not scaled by the extent | generated 1-D and 2-D stencil; generated heat rod; gradients; the non-dividing-grid advice |
+| `dt` cast to float32 under x64 (MADD-ANO-033) | generated 1-D and 2-D stencil; gradients |
+| `ShardedPointwiseNode` not forwarding `params` | generated pointwise; gradients; the examples |
+| The halo of an unsharded axis edge-filled whatever the fill | generated 2-D stencil; generated D2Q9; D3Q19; gradients |
+| `ShardedUnstructuredNode` not forwarding `params` | generated unstructured; gradients; the examples |
+| A mis-shaped per-cell input not refused by `ShardedUnstructuredNode`, or a slab-length one let through (MADD-ANO-064) | generated unstructured (the first); the slab-length case |
+| `gather_global` reading `state_fields()` before the integrals (MADD-ANO-065) | generated unstructured, through its `gather_global` cross-check; the two listed-integral cases |
+| A nested stencil wrapper placing its inner wrapper's already-stacked integral (MADD-ANO-066) | the nested per-shard case |
+| A domain integral summed over a mesh axis the `axis_map` leaves unused (MADD-ANO-067) | generated 1-D and 2-D stencil; the unused-axis integral cases |
+| A per-shard integral stacked over such an axis | generated 1-D stencil; the unused-axis integral cases |
+
+Two more faults are caught only beside the harness: an unused axis that
+`domain_integral_axes()` names, summed over
+(`test_unused_mesh_axis_integrals.py`), and the zero-size ghost tail of
+`exchange_unstructured` put back (`test_zero_ghost_exchange.py`, on every
+jaxlib; on 0.11.2 the subprocess crash test catches it too).  All eight
+faults of that round were caught (jaxlib 0.11.0).
+
+The first run of this table caught 13 of the 14 faults, three of them only
+through the fixed gradient set, and missed the stale compiled step. Both
+causes were in the harness:
+
+- Hypothesis biases generation towards the first element of a
+  `sampled_from`, so half of a 20-example per-push run was single-device
+  on a one-cell grid. The strategies now list their richest value first.
+- The write surface wrote before the graph had ever traced, so there was
+  no stale trace to keep. It now runs, writes, recompiles and runs again.
+
+**What it cannot see.**
+
+- *Code both paths share*: `GraphManager`, its params validation, and
+  the node's own kernel. A kernel that computes the wrong physics
+  computes it on both paths.
+- *Specification errors*: where the harness node follows the wrapper's
+  documented contract (the static-halo fill rule, the `shard_info`
+  layout), a harness that agrees with a wrong document agrees with a
+  wrong wrapper.
+- *Excluded cases*: the cases excluded while a fix is pending
+  (`PENDING_*` in the support module). None is left. The last,
+  `PENDING_XLA_REPLICATED_STATIC_IN_SCAN` (an XLA miscompile inside a
+  loop, MADD-ANO-068), went when `GraphManager` began refusing such a
+  loop: the configurations are drawn again, and on every surface but
+  `step` and `run` the oracle requires the refusal where
+  `loop_refusal_expected` predicts it (naming the static and every mesh
+  axis it is copied along) instead of comparing the two paths. So the
+  harness checks that the refusal fires there and nowhere else, not
+  what XLA would have computed.
+- *Hardware*: real multi-GPU hardware and NCCL. The harness runs on
+  virtual CPU devices only.
+- *Performance*.
 
 ## Test Organization
 

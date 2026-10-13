@@ -8,7 +8,7 @@ import os
 import tarfile
 
 import pytest
-from fastapi.testclient import TestClient
+from tests._loopback_client import LoopbackTestClient as TestClient
 
 from maddening.api.server import SimulationServer
 from maddening.core.graph_manager import GraphManager
@@ -61,32 +61,58 @@ class TestSimProfile:
         resp = client.post("/sim/profile?n_steps=3")
         assert resp.status_code == 200
 
-    def test_clamps_n_steps_lower_bound(self, loaded_client):
-        client, _ = loaded_client
-        resp = client.post("/sim/profile?n_steps=0")
-        # Should be clamped to 1 and still succeed
-        assert resp.status_code == 200
+    @pytest.mark.parametrize("query, field", [
+        ("n_steps=0", "n_steps"), ("n_steps=1001", "n_steps"), ("n_steps=10000", "n_steps"),
+        ("n_steps=-1", "n_steps"), ("n_steps=2&n_warmup=-1", "n_warmup"),
+        ("n_steps=2&n_warmup=51", "n_warmup"),
+    ])
+    def test_a_count_outside_its_range_is_a_422_and_nothing_is_profiled(self, loaded_client,
+                                                                       query, field):
+        """As ``POST /sim/run`` answers one past its bound.  Both counts
+        used to be clamped into their bounds (1..1000 steps, 0..50 of
+        warm-up) without a word: 10000 steps asked, 1000 profiled, and a
+        reply that did not say so."""
+        client, server = loaded_client
+        calls = []
+        import maddening.core.simulation.profiler as profiler
+        original = profiler.profile_graph
+        profiler.profile_graph = lambda *a, **k: calls.append(k) or original(*a, **k)
+        try:
+            resp = client.post(f"/sim/profile?{query}")
+        finally:
+            profiler.profile_graph = original
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"][0]["loc"] == ["query", field]
+        assert not calls
 
-    def test_clamps_n_steps_upper_bound(self, loaded_client):
-        client, _ = loaded_client
-        # 10_000 → clamped to 1000.  Don't actually wait for 1000 steps in
-        # a test; the smaller request below proves the clamp is applied
-        # and the request returns. Skip the brute-force version for CI.
-        resp = client.post("/sim/profile?n_steps=10000")
-        # This will be slow (1000 steps) — but the assertion is just
-        # that it succeeds.
-        assert resp.status_code in (200, 408, 504) or resp.status_code < 500
+    @pytest.mark.parametrize("query, steps, warmup", [
+        ("n_steps=1&n_warmup=0", 1, 0), ("n_steps=3&n_warmup=2", 3, 2)])
+    def test_the_counts_asked_are_the_counts_profiled(self, loaded_client, query, steps,
+                                                      warmup):
+        client, _server = loaded_client
+        calls = []
+        import maddening.core.simulation.profiler as profiler
+        original = profiler.profile_graph
+        profiler.profile_graph = lambda *a, **k: calls.append(k) or original(*a, **k)
+        try:
+            resp = client.post(f"/sim/profile?{query}")
+        finally:
+            profiler.profile_graph = original
+        assert resp.status_code == 200, resp.text
+        assert calls == [{"n_steps": steps, "n_warmup": warmup}]
 
     def test_runner_running_returns_409(self, loaded_client):
         client, server = loaded_client
-        # Start the runner; profile should refuse
-        server._runner_started = True  # spoof started state
+        # Start the runner; profile should refuse.  A real one: whether the
+        # runner runs is read from its thread, not from a flag a spoof
+        # could set (a dead runner's flag used to read "started").
+        assert client.post("/sim/start").status_code == 200
         try:
             resp = client.post("/sim/profile?n_steps=3")
             assert resp.status_code == 409
             assert "runner" in resp.json()["detail"].lower()
         finally:
-            server._runner_started = False
+            assert client.post("/sim/stop").status_code == 200
 
     def test_includes_node_events(self, loaded_client):
         client, _ = loaded_client
@@ -108,6 +134,32 @@ class TestSimProfile:
 # ---------------------------------------------------------------------------
 # JAX trace endpoints
 # ---------------------------------------------------------------------------
+
+
+def test_a_graph_that_cannot_compile_is_a_400_and_the_state_is_kept():
+    """``/sim/profile`` caught a ``RuntimeError`` only: an edge between
+    fields of mismatched shapes -- which ``POST /graph/edges`` accepts --
+    makes the compile raise an ``ExceptionGroup``, and the profile answered
+    500 where ``/sim/step`` and ``/graph/compile`` answer 400."""
+    from maddening.nodes.heat import HeatNode
+    from maddening.nodes.spring import SpringDamperNode
+
+    gm = GraphManager()
+    gm.add_node(HeatNode("h", 0.01, n_cells=10, length=1.0, thermal_diffusivity=0.01))
+    gm.add_node(SpringDamperNode("s", 0.01))
+    server = SimulationServer(node_registry={}, graph_manager=gm)
+    client = TestClient(server.create_app(), raise_server_exceptions=False)
+    assert client.post("/graph/edges", json={
+        "source_node": "h", "target_node": "s", "source_field": "temperature",
+        "target_field": "anchor_position"}).status_code == 201
+    before = client.get("/graph/state").json()
+    step = client.post("/sim/step")
+    resp = client.post("/sim/profile", params={"n_steps": 2, "n_warmup": 0})
+    assert step.status_code == 400
+    assert resp.status_code == 400, resp.text
+    assert "edge validation failed" in resp.json()["detail"]
+    assert "nothing was stepped" in resp.json()["detail"]
+    assert client.get("/graph/state").json() == before
 
 
 class TestJaxTraceEndpoints:

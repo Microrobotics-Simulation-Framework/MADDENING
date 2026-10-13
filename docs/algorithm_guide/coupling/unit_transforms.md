@@ -1,11 +1,11 @@
 # Unit-Aware Edge Transforms
 
 **Module**: `maddening.core.transforms_unit`
-**Stability**: stable
+**Stability**: {term}`stable <STABLE>`
 
 ## Overview
 
-When {term}`coupling <Coupling>` nodes that use different physical unit systems (e.g. an {term}`LBM`
+When {term}`coupling <Coupling>` {term}`nodes <Node>` that use different physical unit systems (e.g. an {term}`LBM`
 fluid solver in lattice units coupled to a rigid body in SI), the {term}`edge <Edge>`
 between them must apply a unit conversion.  MADDENING supports this via:
 
@@ -16,6 +16,7 @@ between them must apply a unit conversion.  MADDENING supports this via:
 
 ### On edges
 
+<!-- snippet: no-run, reason: fragment: an edge on the fluid-body graph the guide describes -->
 ```python
 gm.add_edge(
     "fluid", "body", "drag_force", "force",
@@ -84,6 +85,7 @@ Physical conversion requires three parameters:
 
 ### Usage
 
+<!-- snippet: no-run, reason: fragment: the edges need the fluid-body graph the guide describes -->
 ```python
 from maddening.core.transforms import lbm_to_si_force, lbm_to_si_torque
 
@@ -109,12 +111,13 @@ The returned callables are:
 
 - **JAX-traceable**: work inside `jax.jit`, `jax.lax.scan`, `jax.lax.fori_loop`
 - **Differentiable**: `jax.grad` flows through them (they are scalar multiplications)
-- **vmap-compatible**: work with `jax.vmap` for parameter sweeps
+- **{term}`vmap`-compatible**: work with `jax.vmap` for parameter sweeps
 
 ### Optional registration
 
 If you need named transforms for USD serialization, register them manually:
 
+<!-- snippet: no-run, reason: fragment: registers force_transform from the block above -->
 ```python
 from maddening.core.transforms import register_transform
 

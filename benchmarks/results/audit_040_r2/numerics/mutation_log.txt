@@ -1,0 +1,41 @@
+# Mutation log — audit R2 numerics, commit 0219b82
+# Each mutation is applied to a scratch COPY of src/ and injected via PYTHONPATH;
+# neither the worktree nor the main checkout was ever edited.  See repro/mutate.sh.
+
+## Integrators (baseline: tests/verification/test_integrator_order.py 32 passed)
+M1 dispatch "rk4": rk4_step -> heun_step                     CAUGHT  test_integrate_node_dispatches_to_the_method_it_names[-2.5-rk4]  (2.4375 vs 0.97265625)
+M2 rk4 s3 offset 0.5 -> 0.4                                  CAUGHT  test_carrying_time_in_the_state_restores_each_methods_classical_order[rk4]  observed 1.007
+M3 rk4 output weight 2.0*k3 -> 2.05*k3                       CAUGHT  test_a_boundary_input_frozen_across_stages_caps_every_method_at_first_order[rk4]  observed 1.653
+M4 heun 0.5*(k1+k2) -> 0.45*k1+0.55*k2                       CAUGHT  test_carrying_time_...[heun]  observed 0.745
+M5 R(z)-preserving rk4: c=(0,1/2,1/2,2), b=(1/4,1/3,1/3,1/12) CAUGHT  test_carrying_time_...[rk4]  observed 2.013
+M5b same mutation, ALGEBRAIC gates only                      NOT CAUGHT  22 passed
+     (stability polynomial + dispatch + distinguishability + free-function equality)
+
+## Rigid-body scheme identity
+MUT-RB   pos_new = pos + vel_new*dt -> pos + vel*dt           CAUGHT  tests/nodes/test_rigid_body.py::TestFreeFall::test_free_fall_matches_analytical
+MUT-RB2D x_new/angle_new use old v/omega                      CAUGHT  tests/nodes/test_rigid_body_2d.py::TestFreeFall::test_free_fall_position
+MUT-RB-ORIENT  omega_to_quat(ang_vel_new) -> (ang_vel)        NOT CAUGHT  112 passed 4 xfailed; wider scope 103 passed
+MUT-RB2D-ANGLE angle + omega_new*dt -> angle + omega*dt       NOT CAUGHT   50 passed 4 xfailed; wider scope  97 passed
+   scopes: tests/nodes/test_rigid_body{,_2d}.py, tests/verification/test_mms_order.py,
+           tests/verification/test_mms_order_ode_nodes.py, test_builtin_nodes_verified.py,
+           tests/core/test_coupling_solver_equivalence.py
+
+## Coupling error estimate (baseline: tests/core/test_coupling_error_bound.py 30 passed 1 xfailed)
+C1 relaxation_step_scale always 1.0                           CAUGHT  test_the_estimate_is_invariant_to_the_relaxation_factor[0.5]
+C2 estimated_error loses its residual floor                   CAUGHT  test_a_growing_residual_is_rejected_rather_than_extrapolated
+C3 error_amplification drops the two-step sqrt guard          CAUGHT  test_an_alternating_sequence_is_not_flattered_by_its_good_half
+C4 error_amplification stops rejecting rho >= 1               CAUGHT  test_a_growing_residual_is_rejected_rather_than_extrapolated
+
+## sysid rank cutoff (baseline: tests/core/test_sysid_degenerate_inputs.py 55 passed)
+S1 cutoff loses its sqrt(m) term                              CAUGHT  test_a_long_residual_does_not_make_a_missing_direction_identifiable
+S2 sqrt(m) -> m                                               CAUGHT  test_a_rank_decided_at_the_float32_floor_warns_with_the_numbers
+S3 _PRECISION_WARN_FACTOR 2.0 -> 1.01                         CAUGHT  test_a_rank_decided_at_the_float32_floor_warns_with_the_numbers
+S4 _PRECISION_WARN_FACTOR 2.0 -> 8.0                          NOT CAUGHT by that file (55 passed)
+S4b same, vs tests/verification/hypothesis/test_hypothesis_sysid.py::TestPrecisionLimitedRank
+                                                              CAUGHT  test_the_threshold_still_separates_the_two_populations (109/585 <= 0.02)
+S5 _precision_limited drops the eps_floor condition           CAUGHT  test_a_raised_rank_rtol_is_a_modelling_choice_not_a_precision_limit
+
+## MMS ghost-closure mutations (monkeypatched in-process, see repro/r8_order_band.py)
+linear (2nd-order) closure, release/exp_sin/tanh profiles     CAUGHT  observed 2.000 / 2.003 / 2.001
+linear closure, pre-0.4.0 flat-ended profile                  NOT CAUGHT  observed 4.080, inside [3.75, 5.00]
+quadratic closure, all four profiles                          CAUGHT  observed ~2.99

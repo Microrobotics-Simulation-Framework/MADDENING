@@ -52,7 +52,7 @@ def _make_lbm_2d() -> LBMNode:
 
 def _make_lbm_pipe() -> LBMPipeNode:
     return LBMPipeNode(
-        name="pipe", timestep=1.0, nx=8, ny=8, nz=8, tau=0.6,
+        name="pipe", timestep=1.0, nx=8, ny=8, nz=8, tau=0.6, propeller_x=4,
         initial_velocity=0.01, propeller_strength=0.0,
     )
 

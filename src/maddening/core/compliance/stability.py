@@ -47,6 +47,44 @@ def stability(level: StabilityLevel) -> Callable[[T], T]:
     return decorator
 
 
+def register_route_stability(module: str, route: str, level: StabilityLevel) -> str:
+    """Record the stability of an HTTP or WebSocket route.
+
+    A route is a public surface with no Python name of its own -- the
+    REST server's handlers are closures built by ``create_app`` -- so the
+    decorator cannot tag it.  It is registered as ``"<module>:<route>"``
+    (``"maddening.api.server:POST /surrogate/train"``), listed in the
+    report beside the decorated surfaces, and never resolved as a Python
+    object: a route cannot be ``stable`` this way (the signature guard
+    could not check it), only ``evolving`` or below.
+
+    Parameters
+    ----------
+    module : str
+        The module that serves the route.
+    route : str
+        ``"METHOD /path"``, or ``"WS /path"`` for a WebSocket.
+    level : StabilityLevel
+        Its level.
+
+    Returns
+    -------
+    str
+        The registry key.
+
+    Raises
+    ------
+    ValueError
+        For ``StabilityLevel.STABLE``.
+    """
+    if level is StabilityLevel.STABLE:
+        raise ValueError(f"route {route!r} cannot be registered stable: the "
+                         "signature guard checks Python surfaces only")
+    key = f"{module}:{route}"
+    _STABILITY_REGISTRY[key] = level
+    return key
+
+
 def generate_stability_report() -> str:
     """Generate a Markdown stability report from the registry.
 

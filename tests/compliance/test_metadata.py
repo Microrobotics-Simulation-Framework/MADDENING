@@ -22,9 +22,10 @@ class TestStabilityLevel:
         assert StabilityLevel.DEPRECATED.value == "deprecated"
 
     def test_all_six_exist(self):
-        # v0.3.0 added EVOLVING + INTERNAL on top of the original four
-        # (EXPERIMENTAL, PROVISIONAL, STABLE, DEPRECATED).  See
-        # plans/MADDENING_v0.3.0_PLAN.md §A2.
+        # The four labels (STABLE, EVOLVING, EXPERIMENTAL, DEPRECATED) and
+        # two members deprecated in 0.4.0 that shipped before it, so they
+        # stay: PROVISIONAL (since 0.1.0) and INTERNAL (since 0.3.0).  See
+        # docs/developer_guide/deprecation_policy.md.
         assert len(StabilityLevel) == 6
 
 

@@ -1,0 +1,12 @@
+jax_enable_x64          : True
+node.dtype (cold buffer): float64
+   params_pytree['sensor_x'] = Array(0.33333334, dtype=float32)
+   params_pytree['sigma'] = Array(0.04, dtype=float32)
+   params_pytree['theta'] = Array(0.42, dtype=float32)
+self.params['sigma']    : 0.04  -> pytree value 0.03999999910593033  (relative shift 2.24e-08)
+state c dtype           : float64
+cold-start solve used sigma = 0.04 (float64 python float)
+the diagnostic evaluates at sigma = 0.03999999910593033 (float32-rounded)
+
+gm.params['nodes']['a'] dtypes: {'theta': 'float32', 'sigma': 'float32', 'sensor_x': 'float32'}
+gradient dtype returned to the user: {'sensor_x': 'float32', 'sigma': 'float32', 'theta': 'float32'}

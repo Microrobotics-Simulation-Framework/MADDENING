@@ -1,0 +1,26 @@
+DEFAULT_ORDER_SHORTFALL=0.25  DEFAULT_ORDER_EXCESS=1.0  -> band for a declared 4 is [3.75, 5.0]
+
+--- CORRECT (cubic) ghost closure: what is the largest pairwise order? ---
+  release  (sin + 0.5x + 1 + 0.4x^2)         orders=['3.760', '3.831', '3.913', '3.957']  max=3.957
+  flat-ends (sin + 0.5x + 1)  [pre-0.4.0]    orders=['3.759', '3.830', '3.913', '3.957']  max=3.957
+  exp_sin                                    orders=['3.999', '3.926', '3.946', '3.971']  max=3.999
+  tanh_bump                                  orders=['4.126', '4.025', '4.005', '4.001']  max=4.126
+  >>> largest pairwise order anywhere: 4.1261  (mms.py justifies EXCESS=1.0 with 5.02)
+
+--- MUTATION: linear (genuinely 2nd-order) ghost closure ---
+  release  (sin + 0.5x + 1 + 0.4x^2)         orders=['3.206', '2.129', '2.006', '2.000']  observed=2.000  band[3.75,5.0]=FAIL  band[3.75,4.05]=FAIL
+  flat-ends (sin + 0.5x + 1)  [pre-0.4.0]    orders=['4.357', '4.257', '4.150', '4.080']  observed=4.080  band[3.75,5.0]=PASS  band[3.75,4.05]=FAIL
+  exp_sin                                    orders=['2.166', '2.043', '2.011', '2.003']  observed=2.003  band[3.75,5.0]=FAIL  band[3.75,4.05]=FAIL
+  tanh_bump                                  orders=['2.091', '2.016', '2.003', '2.001']  observed=2.001  band[3.75,5.0]=FAIL  band[3.75,4.05]=FAIL
+
+--- MUTATION: quadratic ghost closure ---
+  release  (sin + 0.5x + 1 + 0.4x^2)         orders=['2.713', '2.910', '2.968', '2.987']  observed=2.987  band[3.75,5.0]=FAIL
+  flat-ends (sin + 0.5x + 1)  [pre-0.4.0]    orders=['2.712', '2.910', '2.968', '2.987']  observed=2.987  band[3.75,5.0]=FAIL
+  exp_sin                                    orders=['2.877', '2.947', '2.976', '2.988']  observed=2.988  band[3.75,5.0]=FAIL
+  tanh_bump                                  orders=['2.670', '2.800', '2.923', '2.967']  observed=2.967  band[3.75,5.0]=FAIL
+
+--- SHORTFALL justification: coarsest-pair order, 2nd-order stencil ---
+  release  (sin + 0.5x + 1 + 0.4x^2)         orders=['2.023', '2.006', '2.001', '2.000']  coarsest=2.023
+  flat-ends (sin + 0.5x + 1)  [pre-0.4.0]    orders=['2.022', '2.006', '2.001', '2.000']  coarsest=2.022
+  exp_sin                                    orders=['2.007', '2.002', '2.000', '2.000']  coarsest=2.007
+  tanh_bump                                  orders=['2.016', '2.004', '2.001', '2.000']  coarsest=2.016

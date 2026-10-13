@@ -1,0 +1,31 @@
+devices: 4
+
+== ShardedUnstructuredNode: sharded vs unsharded, 3 steps ==
+  dev=1 cells=12 divides=True        max err = 0.000e+00 OK
+  dev=1 cells=16 divides=True        max err = 0.000e+00 OK
+  dev=1 cells=17 divides=True        max err = 0.000e+00 OK
+  dev=2 cells=12 divides=True        max err = 0.000e+00 OK
+  dev=2 cells=16 divides=True        max err = 0.000e+00 OK
+  dev=2 cells=17 divides=False       max err = 0.000e+00 OK
+  dev=3 cells=12 divides=True        max err = 0.000e+00 OK
+  dev=3 cells=16 divides=False       max err = 0.000e+00 OK
+  dev=3 cells=17 divides=False       max err = 0.000e+00 OK
+  dev=4 cells=12 divides=True        max err = 0.000e+00 OK
+  dev=4 cells=16 divides=True        max err = 0.000e+00 OK
+  dev=4 cells=17 divides=False       max err = 0.000e+00 OK
+
+== ShardedStencilNode via the suite's own builder, 3 steps ==
+  dev=1 cells=12 divides=True        max err = 0.000e+00 OK
+  dev=1 cells=16 divides=True        max err = 0.000e+00 OK
+  dev=1 cells=18 divides=True        max err = 0.000e+00 OK
+  dev=2 cells=12 divides=True        max err = 0.000e+00 OK
+  dev=2 cells=16 divides=True        max err = 0.000e+00 OK
+  dev=2 cells=18 divides=True        max err = 0.000e+00 OK
+  dev=3 cells=12 divides=True        max err = 0.000e+00 OK
+/home/nick/MSF/msf/MADDENING-wt/audit/cloud-sharding/src/maddening/cloud/multigpu/sharded_node.py:309:19 (ShardedStencilNode.initial_state)
+  dev=3 cells=16 divides=False       RAISED IndivisibleError: One of device_put args was given the sharding NamedSharding(mesh=Mesh('devices':
+  dev=3 cells=18 divides=True        max err = 0.000e+00 OK
+  dev=4 cells=12 divides=True        max err = 0.000e+00 OK
+  dev=4 cells=16 divides=True        max err = 0.000e+00 OK
+/home/nick/MSF/msf/MADDENING-wt/audit/cloud-sharding/src/maddening/cloud/multigpu/sharded_node.py:309:19 (ShardedStencilNode.initial_state)
+  dev=4 cells=18 divides=False       RAISED IndivisibleError: One of device_put args was given the sharding NamedSharding(mesh=Mesh('devices':

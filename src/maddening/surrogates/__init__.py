@@ -25,6 +25,8 @@ Built-in architectures (requires equinox):
     FNODirect, FNODerivative
 """
 
+from typing import TYPE_CHECKING, Any
+
 from maddening.surrogates.architecture import SurrogateArchitecture
 from maddening.surrogates.node import (
     SurrogateNode,
@@ -34,8 +36,52 @@ from maddening.surrogates.node import (
 from maddening.surrogates.dataset import SurrogateDataset, DatasetGenerator
 from maddening.surrogates.replace import replace_node
 
+if TYPE_CHECKING:
+    # PEP 562: the names below are resolved lazily by the module
+    # `__getattr__`, which a type checker cannot see through -- without
+    # these re-exports it reports every one of them as missing from
+    # `__all__`, and a downstream `from maddening.surrogates import X` is an error.
+    # Nothing here runs at import time; the lazy table stays the only
+    # runtime path.
+    from maddening.surrogates.architectures.deeponet import (
+        DeepONetDerivative,
+        DeepONetDirect,
+        SDeepONetDerivative,
+        SDeepONetDirect,
+    )
+    from maddening.surrogates.architectures.fno import FNODerivative, FNODirect
+    from maddening.surrogates.architectures.mlp import MLPDerivative, MLPDirect
+    from maddening.surrogates.training.callbacks import (
+        EarlyStopping,
+        LRSchedule,
+        ModelCheckpoint,
+        TrainingCallback,
+    )
+    from maddening.surrogates.training.physics_losses import (
+        composite_loss,
+        energy_conservation_loss,
+        momentum_conservation_loss,
+        residual_loss,
+        smoothness_loss,
+    )
+    from maddening.surrogates.training.trainer import (
+        SurrogateTrainer,
+        TrainResult,
+        mse_loss,
+    )
+    from maddening.surrogates.validator import (
+        SurrogateValidator,
+        ValidationReport,
+    )
+    from maddening.surrogates.weights.checkpoint import (
+        load_train_result,
+        load_weights,
+        save_weights,
+    )
 
-def __getattr__(name: str):
+
+
+def __getattr__(name: str) -> Any:
     """Lazy imports for components that need equinox/optax."""
     _lazy = {
         # Trainer & validation

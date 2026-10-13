@@ -1,0 +1,165 @@
+{
+ "platform": "cpu",
+ "x64": true,
+ "jax": "0.11.0",
+ "default_backend": "cpu",
+ "devices": [
+  "cpu:0"
+ ],
+ "eigvals_eager_2": {
+  "ok": true,
+  "value": 0.12508688923006284,
+  "seconds": 0.251
+ },
+ "eigvals_jit_2": {
+  "ok": true,
+  "value": 0.12508688923006284,
+  "seconds": 0.042
+ },
+ "eigvals_eager_5": {
+  "ok": true,
+  "value": 0.7798302084302585,
+  "seconds": 0.096
+ },
+ "eigvals_jit_5": {
+  "ok": true,
+  "value": 0.7798302084302585,
+  "seconds": 0.042
+ },
+ "eigvals_eager_9": {
+  "ok": true,
+  "value": 1.2581206637447568,
+  "seconds": 0.121
+ },
+ "eigvals_jit_9": {
+  "ok": true,
+  "value": 1.2581206637447568,
+  "seconds": 0.068
+ },
+ "eigvals_eager_hess9": {
+  "ok": true,
+  "value": 0.5837984972178895,
+  "seconds": 0.0
+ },
+ "eigvals_jit_hess9": {
+  "ok": true,
+  "value": 0.5837984972178895,
+  "seconds": 0.0
+ },
+ "numpy_float64_reference": {
+  "2": 0.12508688923006284,
+  "5": 0.7798302084302585,
+  "9": 1.2581206637447568,
+  "hess9": 0.5837984972178895
+ },
+ "eigvals_in_scan": {
+  "ok": true,
+  "value": [
+   0.29189924860894473,
+   0.5837984972178895,
+   0.8756977458268352
+  ],
+  "seconds": 0.136
+ },
+ "eigvals_in_vmap": {
+  "ok": true,
+  "value": [
+   0.29189924860894473,
+   0.5837984972178895,
+   0.8756977458268352
+  ],
+  "seconds": 0.149
+ },
+ "eigvals_in_cond": {
+  "ok": true,
+  "value": 0.5837984972178895,
+  "seconds": 0.078
+ },
+ "estimator_spectral_radius": {
+  "ok": true,
+  "value": 0.5837984972178895,
+  "seconds": 0.11
+ },
+ "estimator_squaring_fallback": {
+  "ok": true,
+  "value": 0.5837985476527052,
+  "seconds": 0.128
+ },
+ "pair_diagnostics_off": {
+  "ok": true,
+  "value": {
+   "first_step_s": 0.341,
+   "per_step_ms": 0.086,
+   "state": {
+    "left": {
+     "position": 2.2816641889740357,
+     "velocity": 8.54036092626129
+    },
+    "right": {
+     "position": 3.2162056478290686,
+     "velocity": 9.014346578747606
+    }
+   },
+   "report": {}
+  },
+  "seconds": 0.383
+ },
+ "pair_diagnostics_on": {
+  "ok": true,
+  "value": {
+   "first_step_s": 5.569,
+   "per_step_ms": 0.201,
+   "state": {
+    "left": {
+     "position": 2.2816641889740357,
+     "velocity": 8.54036092626129
+    },
+    "right": {
+     "position": 3.2162056478290686,
+     "velocity": 9.014346578747606
+    }
+   },
+   "report": {
+    "left+right": {
+     "iterations": 2,
+     "total_iterations": 2,
+     "residual": 2.8518300604636335e-08,
+     "amplification": 1.0006420029605732,
+     "error_estimate": 2.8536609438055027e-08,
+     "ratio_usable": true,
+     "gradient_error_estimate": 2.8536609438055027e-08,
+     "converged": true,
+     "rho_spectral": 8.999999947148507e-06,
+     "spectral_error_bound": 3.0168976714134447e-08,
+     "spectral_usable": true,
+     "gradient_relative_error_bound": 5.226361320304525e-12,
+     "gradient_bound_usable": true,
+     "precision_limited": false
+    }
+   }
+  },
+  "seconds": 6.602
+ },
+ "pair_diagnostics_on_run_scan": {
+  "ok": true,
+  "value": {
+   "left+right": {
+    "iterations": 2,
+    "total_iterations": 2,
+    "residual": 5.809858401802299e-07,
+    "amplification": 1.0010642761087856,
+    "error_estimate": 5.816041695294764e-07,
+    "ratio_usable": true,
+    "gradient_error_estimate": 5.816041695294764e-07,
+    "converged": true,
+    "rho_spectral": 8.999998349523697e-06,
+    "spectral_error_bound": 8.589090417530644e-07,
+    "spectral_usable": true,
+    "gradient_relative_error_bound": 1.4343104899068651e-11,
+    "gradient_bound_usable": true,
+    "precision_limited": false
+   }
+  },
+  "seconds": 5.529
+ }
+}

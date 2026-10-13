@@ -2,13 +2,19 @@
 """Launch a MADDENING job on RunPod, stream logs, then tear down.
 
 Usage:
-    python 02_runpod_launch.py
-    python 02_runpod_launch.py --job job_config.example.yaml
-    python 02_runpod_launch.py --dry-run
+    python -m maddening.examples.cloud.launch.02_runpod_launch
+    python -m maddening.examples.cloud.launch.02_runpod_launch --job job_config.example.yaml
+    python -m maddening.examples.cloud.launch.02_runpod_launch --dry-run
 
 Requires:
     - ~/.maddening/cloud_credentials.yaml with your RunPod API key
     - pip install "skypilot[runpod]"
+
+``--job`` defaults to ``job_config.example.yaml`` in the current
+directory.  The template ships with MADDENING; print the directory that
+holds it (and the credentials template) with::
+
+    python -c "import maddening.examples.cloud.config as c; print(c.__path__[0])"
 """
 
 import argparse

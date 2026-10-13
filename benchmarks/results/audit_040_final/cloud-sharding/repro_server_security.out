@@ -1,0 +1,42 @@
+== 1. Authentication on state-changing endpoints (no credentials sent) ==
+   GET    /graph                   -> 200
+   GET    /graph/state             -> 200
+   POST   /sim/step                -> 200
+   POST   /graph/compile           -> 200
+   DELETE /graph/nodes/relax       -> 200
+
+== 2. /checkpoint/{save,load} filesystem containment ==
+   save path='ok.npz'                               -> 200 {'status': 'ok', 'path': '/tmp/audit_ckpt_zgo7lqsd/ok.npz'}
+   save path='../audit_escape.npz'                  -> 400 {'detail': "checkpoint path must stay under /tmp/audit_ckpt_zgo7lqsd (
+   save path='../../../../tmp/audit_escape.npz'     -> 400 {'detail': "checkpoint path must stay under /tmp/audit_ckpt_zgo7lqsd (
+   save path='/tmp/audit_escape.npz'                -> 400 {'detail': "checkpoint path must stay under /tmp/audit_ckpt_zgo7lqsd (
+   save path='sub/dir/ok.npz'                       -> 200 {'status': 'ok', 'path': '/tmp/audit_ckpt_zgo7lqsd/sub/dir/ok.npz'}
+   save path='..%2Faudit_escape.npz'                -> 200 {'status': 'ok', 'path': '/tmp/audit_ckpt_zgo7lqsd/..%2Faudit_escape.n
+   save path='....//audit_escape.npz'               -> 200 {'status': 'ok', 'path': '/tmp/audit_ckpt_zgo7lqsd/..../audit_escape.n
+
+   symlink escape attempt:
+   save path='link/audit_escape.npz' -> 400 {'detail': "checkpoint path must stay under /tmp/audit_ckpt_zgo7lqsd (
+
+   /checkpoint/load as a file-existence oracle:
+   load path='/etc/passwd'                  -> 400 {'detail': "checkpoint path must stay under /tmp/audit_ckpt_zgo7lqsd (
+   load path='../../../../etc/passwd'       -> 400 {'detail': "checkpoint path must stay under /tmp/audit_ckpt_zgo7lqsd (
+   load path='nope.npz'                     -> 404 {'detail': "no checkpoint 'nope.npz'"}
+
+== 3. Unbounded resource consumption ==
+   /sim/run?n_steps=-5            -> 200 {}
+   add node with n=1e9            -> 201 {'status': 'ok', 'node': {'type': 'Relax', 'name': 'big', 'timestep': 0.1, 'params': {'rat
+   /surrogate/train huge budget   -> 404 {'detail': "No node 'relax'."}
+
+   n_steps upper bound check (is there one?):
+     n_steps        any explicit bound in create_app: True
+     n_data_steps   any explicit bound in create_app: True
+     n_epochs       any explicit bound in create_app: True
+     hidden_sizes   any explicit bound in create_app: True
+
+== 4. Docs / OpenAPI exposure ==
+   /docs            -> 200
+   /openapi.json    -> 200
+   /redoc           -> 200
+
+== 5. What was written outside the checkpoint root? ==
+   files matching /tmp/audit_escape*: []

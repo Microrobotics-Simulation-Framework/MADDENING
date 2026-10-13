@@ -23,16 +23,42 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests/ -v --tb=short --ignore=
 
 ### 2. Compliance CI Scripts Pass
 
-Run all three compliance validation scripts:
+Run every compliance gate.  The gates are whatever `scripts/check_*.py`
+holds -- **discover them with the glob, never copy a list**: the set grew
+three times during 0.4.0, and a copied list (this section's own, which said
+"six" and left out `check_doctests.py`) silently verified less than it
+claimed.
 
 ```bash
-python scripts/check_anomalies.py
-python scripts/check_impl_mapping.py
-python scripts/check_citations.py
-python scripts/check_transforms.py
+for gate in scripts/check_*.py; do
+  args=""
+  [ "$gate" = scripts/check_anomalies.py ] && args="--prefix MADD-ANO-"  # as CI runs it
+  python "$gate" $args || echo "GATE FAILED ($?): $gate"
+done
+python scripts/generate_soup_tables.py --check
 ```
 
-**Gate**: All four must exit 0. Fix any errors before continuing.
+What to expect from the gates whose behaviour is not simply "exit 0 or 1":
+
+- `check_doctests.py` executes every `>>>` example in `src/maddening/` under
+  pytest (about two minutes).  It fails if an example fails or is skipped,
+  or if fewer examples run than its committed floor (`MIN_EXAMPLES`).  Adding
+  examples?  Raise the floor in the same commit.
+- `check_transforms.py` exits **2** ("could not be trusted") when a module it
+  must import needs an optional extra that is not installed -- in practice
+  the `usd` extra (`usd-core`).  Install `.[ci,usd]`, as CI's compliance job
+  does, or pass `--allow-missing-optional` to accept a partial check that
+  names every reference it could not confirm.
+- `check_stable_signatures.py` exits **2** if a module holding a `STABLE`
+  surface cannot be imported; a missing extra is tolerated only while no
+  `STABLE` surface lives in that module.  An intended signature change is
+  accepted with `--update` in the same commit (section 9).
+- `check_doctests.py` also exits **2** if pytest cannot run or no longer
+  exposes the example count it reads.
+
+**Gate**: every gate, and the SOUP `--check`, must exit 0.  Exit 2 is not a
+pass: it means the gate could not see what it verifies.  Fix any errors
+before continuing.
 
 ### 3. Commit Message Convention
 
@@ -66,13 +92,18 @@ Check if the changes affect user-visible functionality. If yes, update `CHANGELO
 - **Security** — security-relevant changes (required by MDCG 2019-16)
 - **Known Anomalies** — changes to `known_anomalies.yaml` (required for IEC 62304 SOUP)
 
-**When to skip**: Pure internal refactors, CI config changes, and developer tooling changes that don't affect the package's external behavior don't need changelog entries.
+**How to write the entry**: add exactly **one contiguous block, at most three lines**, at the **top** of the relevant subsection. Never edit or reorder existing lines — branches merge in parallel and appending at the top of a subsection is what keeps the conflicts trivial.
+
+Say only what changed and what a user has to do about it. Measurements, file inventories, rationale, test counts and "why" paragraphs belong in the pull request description and in the release notes under `docs/release_notes/`, not in the changelog. If three lines are not enough, the extra detail is release-notes material.
+
+**When to skip**: Pure internal refactors, CI config changes, and developer tooling changes that don't affect the package's external behavior don't need changelog entries. Internal test infrastructure (fuzz harnesses, Hypothesis profiles, property-test packages, CI gating) is contributor-facing, not user-facing: put it in the release notes' engineering section, or give it a single line here at most.
 
 ### 5. New Node Checks (if applicable)
 
 If the commit adds or modifies a `SimulationNode` subclass, verify:
 
 - [ ] `meta` ClassVar has `NodeMeta` with: `algorithm_id`, `stability`, `description`, `assumptions`, `limitations`, `hazard_hints`
+- [ ] `algorithm_id` is a new, unused ID written as a string literal, and the algorithm guide's `**Algorithm ID**` line states the same one (`check_impl_mapping.py` refuses a duplicate or a mismatch)
 - [ ] `@stability(StabilityLevel.X)` decorator applied
 - [ ] NumPy-style docstring present
 - [ ] `update()` is JAX-traceable (uses `jnp` ops, no Python side effects)
@@ -117,12 +148,26 @@ If the commit adds or modifies edge transforms used in production examples or sc
 
 ### 9. API Stability Checks (if applicable)
 
-If the commit changes a public API surface:
+If the commit changes a public API surface, follow
+`docs/developer_guide/deprecation_policy.md` (this is its short form):
 
-- [ ] `@stability` decorator level is appropriate
-- [ ] If `STABLE`: change is backward-compatible (or this is a major version bump)
-- [ ] If `PROVISIONAL`: deprecation warning added for the old API
+- [ ] `@stability` decorator level is appropriate, and every newly public
+      surface has one (an untagged export is a decision nobody has made)
+- [ ] `python scripts/check_stable_signatures.py` passes.  If it flags a
+      change, either the change is compatible and
+      `python scripts/check_stable_signatures.py --update` runs in *this*
+      commit with the reason in the message, or the change does not belong
+      on a `STABLE` surface outside a major release
+- [ ] If `STABLE`: change is backward-compatible (or this is a major version
+      bump).  Lowering a surface's level is itself a breaking change
+- [ ] If `EVOLVING`: an incompatible change ships the
+      replacement first and gives one minor release of `DeprecationWarning`
+      at `stacklevel=2`; `STABLE` gives two
+- [ ] Deprecations retag to `DEPRECATED`, name the replacement and the removal
+      release in the warning text, and have a `pytest.warns` test
 - [ ] If removing a `DEPRECATED` API: verify it's a major version bump
+- [ ] CHANGELOG `### Deprecated` / `### Removed` entry added
+- [ ] `python scripts/generate_stability_report.py` re-run if any tag changed
 
 ## Execution Steps
 

@@ -1,0 +1,310 @@
+"""``converged=True`` means *every* field arrived, whatever its magnitude.
+
+``tests/property/test_coupling_error_bound.py`` already states "a group
+that reports ``converged=True`` is near its fixed point" over generated
+graphs.  It could not see this defect, for two reasons that are worth
+writing down because they are the reasons a property test passes a bug:
+
+* its reference is *the same recipe solved again* with a tighter
+  threshold, and :func:`_tightened` deliberately does not move ``atol``
+  -- so the dead band applied identically to the reference, and the
+  reference was wrong in exactly the same way as the answer;
+* its fixtures are O(1).  A dead band is an *absolute* number, so it is
+  invisible until the physics is written in units small enough to fall
+  inside it.
+
+So this module fixes both.  The fixed point is known in closed form --
+each field runs its own scalar cycle ``a = g*b + bias``, ``b = g*a``,
+whose fixed point is ``bias / (1 - g**2)`` -- and the field magnitudes
+are drawn from 1e-12 to 1e3, independently for the two fields of every
+node, plus one value at 1e-36: a field so small that a change of a
+fraction of itself is subnormal, which a flush-to-zero backend (XLA's
+CPU backend is one) reads as no change at all unless the norm rescales
+the pair before subtracting.  A group that says it converged is then
+checked field by field against arithmetic, not against itself.
+
+The property is one sentence:
+
+    If ``coupling_diagnostics()`` reports ``converged=True``, then every
+    float field of every node in the group is at its fixed point to
+    within the criterion the group was given -- at every scale, and
+    whichever of the three norms measured it.
+
+Its counter-example, before the fix, was the audit's: an O(1) field and
+an O(1e-9) field in one group under the default ``atol=1e-8``, reported
+``{'iterations': 1, 'residual': 0.0, 'converged': True}`` with the small
+field 50% away.
+"""
+
+from __future__ import annotations
+
+import functools
+
+import jax.numpy as jnp
+import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
+from maddening.core.graph_manager import GraphManager
+from maddening.core.node import BoundaryInputSpec, SimulationNode
+from tests.conftest import EXAMPLES_COSTLY
+
+
+#: How far past its own threshold a converged group is allowed to be.
+#:
+#: The threshold is a statement about a *norm* over fields; this module
+#: asserts per field, the reference is float32 (~1e-7 of relative noise
+#: a field), and the bound extrapolates a rate read off two residuals.
+#: Twenty decades of slack over the tightest threshold drawn here is
+#: 2e-4 of relative error, which every one of those three can hide
+#: inside and which is three orders below the 50% the dead band was
+#: measured producing.  A slack that had to be widened to keep this
+#: green would itself be the finding.
+_SLACK = 20.0
+
+#: Floor under the budget: below ~1e-6 relative, float32 state is noise.
+_FLOAT32_FLOOR = 1e-5
+
+
+class _TwoScale(SimulationNode):
+    """Two independent scalar fields in one node, at unrelated magnitudes.
+
+    ``big`` and ``small`` never interact, so the group is a direct
+    product of two scalar cycles and each field's fixed point is
+    arithmetic rather than a second solve.  That is the whole point:
+    the reference cannot inherit the defect under test.
+    """
+
+    def __init__(self, name, gain, bias_big, bias_small):
+        super().__init__(name=name, timestep=1.0, gain=gain,
+                         bias_big=bias_big, bias_small=bias_small)
+
+    def initial_state(self):
+        return {"big": jnp.asarray(0.0, jnp.float32),
+                "small": jnp.asarray(0.0, jnp.float32)}
+
+    def state_fields(self):
+        return ["big", "small"]
+
+    def boundary_input_spec(self):
+        z = jnp.float32(0.0)
+        return {"ub": BoundaryInputSpec(shape=(), dtype=jnp.float32, default=z),
+                "us": BoundaryInputSpec(shape=(), dtype=jnp.float32, default=z)}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        g = jnp.asarray(p["gain"])
+        return {"big": g * boundary_inputs["ub"] + jnp.asarray(p["bias_big"]),
+                "small": g * boundary_inputs["us"] + jnp.asarray(p["bias_small"])}
+
+
+def _graph(*, big, small, gain, norm, solver, acceleration, threshold):
+    """The two-field cycle, with only the knobs ``norm`` actually reads.
+
+    Setting a knob a norm ignores raises a ``UserWarning``, which
+    ``filterwarnings = ["error"]`` makes fatal, so the live threshold is
+    ``tolerance`` under ``"l2"`` and ``rtol`` under the other two.
+    """
+    gm = GraphManager()
+    gm.add_node(_TwoScale("a", gain=gain, bias_big=big, bias_small=small))
+    gm.add_node(_TwoScale("b", gain=gain, bias_big=0.0, bias_small=0.0))
+    for src, dst in (("a", "b"), ("b", "a")):
+        gm.add_edge(source=src, target=dst,
+                    source_field="big", target_field="ub")
+        gm.add_edge(source=src, target=dst,
+                    source_field="small", target_field="us")
+    live = ({"tolerance": threshold} if norm == "l2" else {"rtol": threshold})
+    gm.add_coupling_group(
+        ["a", "b"], convergence_norm=norm, solver=solver,
+        acceleration=acceleration, max_iterations=60, diagnostics=True,
+        **live,
+    )
+    gm.compile()
+    return gm
+
+
+@functools.lru_cache(maxsize=None)
+def _compiled_graph(*, norm, solver, acceleration, threshold):
+    """One compiled :func:`_graph` per static configuration.
+
+    ``gain`` and the two biases are node parameters, so they are
+    arguments of the compiled step rather than part of it; only the
+    group's knobs decide the program.  See :func:`_solve`.
+    """
+    return _graph(big=1.0, small=1.0, gain=0.5, norm=norm, solver=solver,
+                  acceleration=acceleration, threshold=threshold)
+
+
+def _solve(*, big, small, gain, **config):
+    """One step of the cached graph for *config*, the big field at its fixed point.
+
+    The same step a graph built with these constants would take:
+    ``_TwoScale`` reads ``gain`` and the biases from ``params`` either
+    way, and ``reset_state`` restores the state and every coupling seed
+    ``compile()`` set (``test_reset_state_restores_the_meta_compile_seeds``
+    in ``tests/core/test_coupling_error_bound.py``).  Building a graph per
+    example instead spent 18-22 s on the CI runner compiling copies of
+    three programs.
+
+    ``big`` starts *at* its fixed point and ``small`` at zero, so the
+    small field is the only thing left to converge and the only thing
+    that can hold the group in the loop.  Both starting at zero, the two
+    fields contracted together at the same rate: a group that dropped
+    the small field still iterated until the big one arrived, and by
+    then the small one had arrived too -- so this property passed with
+    the pre-0.4.0 ``atol=1e-8`` default put back.
+    """
+    gm = _compiled_graph(**config)
+    f32 = jnp.float32
+    gm.reset_state()
+    fixed = big / (1.0 - gain ** 2)
+    gm.set_node_state("a", {"big": f32(fixed), "small": f32(0.0)})
+    gm.set_node_state("b", {"big": f32(gain * fixed), "small": f32(0.0)})
+    gm.step(params={"nodes": {
+        "a": {"gain": f32(gain), "bias_big": f32(big), "bias_small": f32(small)},
+        "b": {"gain": f32(gain), "bias_big": f32(0.0), "bias_small": f32(0.0)},
+    }})
+    return gm
+
+
+#: Fifteen decades, which is where an absolute dead band becomes
+#: visible (the shipped default was 1e-8, in the middle of this range),
+#: and one value at the change-underflow end.  At 1e-36 a float32 field
+#: resolves changes down to ~1e-43, but a change below ``tiny`` (1.2e-38),
+#: i.e. below ~1% of the field, is subnormal: flushed to zero by the
+#: subtraction unless the norm rescales the pair first (MADD-ANO-019).
+#: Not 1e-38 itself: a field whose magnitude is subnormal is below what
+#: the dtype resolves and leaves the norm like a field at zero.
+_UNDERFLOW_END = 1e-36
+_MAGNITUDES = st.sampled_from(
+    [1e-12, 1e-9, 1e-8, 1e-7, 1e-5, 1e-3, 1.0, 1e3, _UNDERFLOW_END]
+)
+
+
+# Slow-marked (still run by slow-tests.yml): the draw spans 36 static group
+# configurations (norm x solver x acceleration x threshold), so nearly every
+# example compiles its own step -- 19-21 s on the CI runner.  The mechanism
+# is held on every push by the property below, which draws values only, and
+# by ``test_a_small_field_far_from_its_fixed_point_is_not_reported_converged``
+# in ``tests/core/test_coupling_error_bound.py``.
+# Per push: tests/property/test_coupling_convergence_at_every_field_scale.py::test_a_small_field_is_not_dropped_merely_for_being_small
+# and tests/core/test_coupling_error_bound.py::test_a_small_field_far_from_its_fixed_point_is_not_reported_converged
+@pytest.mark.slow
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+@given(
+    big=_MAGNITUDES,
+    small=_MAGNITUDES,
+    gain=st.sampled_from([0.2, 0.5, 0.7]),
+    norm=st.sampled_from(["l2", "mixed", "interface"]),
+    solver=st.sampled_from(["ift", "fori"]),
+    acceleration=st.sampled_from(["none", "aitken", "fixed"]),
+    threshold=st.sampled_from([1e-3, 1e-5]),
+)
+def test_a_converged_group_is_at_its_fixed_point_in_every_field_at_every_scale(
+    big, small, gain, norm, solver, acceleration, threshold,
+):
+    """The invariant, over magnitudes rather than over one fixture.
+
+    A verdict about a group is a verdict about all of it.  Reporting
+    ``converged=True`` while one field is nowhere near its fixed point
+    is worse than reporting ``converged=False``, because the second is
+    a number the caller can act on and the first is one they will
+    trust -- and ``strict_convergence`` raises on the second and stays
+    silent on the first.
+
+    What it does not see on its own: both fields start at zero and
+    contract at the same rate, so a norm that ignores one of them keeps
+    iterating on the other, and the ignored one arrives anyway.  Seeded
+    faults of that kind -- the pre-0.4.0 ``atol`` default, a norm that
+    flushes a subnormal change to zero -- fail here only on the rarer
+    draws where *both* fields sit inside the fault (both at
+    ``_UNDERFLOW_END``, say).  The sibling below starts the big field at
+    its fixed point and fails on both faults every run, and
+    ``test_the_verdict_does_not_change_below_the_change_underflow`` in
+    ``tests/core/test_coupling_non_finite_state.py`` pins the underflow
+    end bit for bit against a power-of-two-scaled control.
+    """
+    gm = _graph(big=big, small=small, gain=gain, norm=norm, solver=solver,
+                acceleration=acceleration, threshold=threshold)
+    gm.step()
+    diag = gm.coupling_diagnostics()["a+b"]
+    if not diag["converged"]:
+        return          # the honest answer; this property says nothing of it
+    budget = max(_SLACK * threshold, _FLOAT32_FLOOR)
+    exact = {
+        "a": {"big": big / (1.0 - gain ** 2),
+              "small": small / (1.0 - gain ** 2)},
+        "b": {"big": gain * big / (1.0 - gain ** 2),
+              "small": gain * small / (1.0 - gain ** 2)},
+    }
+    for node in ("a", "b"):
+        state = gm.get_node_state(node)
+        for field, want in exact[node].items():
+            got = float(state[field])
+            if want == 0.0:
+                assert got == 0.0, (node, field, got)
+                continue
+            rel = abs(got - want) / abs(want)
+            assert rel <= budget, (
+                f"{node}.{field} is {rel:.3g} from its fixed point "
+                f"({got!r} against {want!r}) while the group reports "
+                f"{diag}; budget {budget:.3g}"
+            )
+
+
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+@given(
+    small=st.sampled_from([1e-12, 1e-9, 1e-7, _UNDERFLOW_END]),
+    gain=st.sampled_from([0.5, 0.7]),
+    norm=st.sampled_from(["l2", "mixed", "interface"]),
+)
+def test_a_small_field_is_not_dropped_merely_for_being_small(
+    small, gain, norm,
+):
+    """The mechanism, stated separately from its consequence.
+
+    The consequence above -- a wrong answer called converged -- needs
+    the small field to be the *only* thing unconverged, which not every
+    draw arranges.  This arranges it: the big field starts at its fixed
+    point (see :func:`_solve`), so a group carrying a field six or more
+    decades below its largest one must still measure that field, and
+    its residual has to move when the field does.  Under the shipped
+    default the residual was exactly ``0.0`` and the group exited after
+    one pass, whatever the small field was doing.
+
+    Two faults, each seen here: the pre-0.4.0 ``atol=1e-8`` default
+    (the 1e-9 and 1e-12 draws fall inside it and are dropped: one pass,
+    the small field 25-49% short), and a norm that subtracts before
+    rescaling (at ``_UNDERFLOW_END`` the last changes are subnormal,
+    flushed to zero, and the group stops 0.4-0.7% short, twenty times
+    the budget).
+    """
+    # Asserted, not assumed: every value ``small`` is drawn from is already
+    # below the 1e-6 the property needs, so this rejected 0.0% of draws even
+    # as an ``assume`` -- measured.  Stated as an assertion it keeps saying
+    # what the strategy owes the property, and fails loudly if a value is
+    # ever added to that ``sampled_from`` that does not.
+    assert small < 1e-6, (
+        f"the small-field scale {small} is not six decades below the O(1) "
+        f"field this property is about"
+    )
+    threshold = 1e-5
+    gm = _solve(big=1.0, small=small, gain=gain, norm=norm, solver="ift",
+                acceleration="none", threshold=threshold)
+    diag = gm.coupling_diagnostics()["a+b"]
+    got = float(gm.get_node_state("a")["small"])
+    want = small / (1.0 - gain ** 2)
+    # Relative, spelled out.  ``pytest.approx(want, rel=...)`` also
+    # accepts anything within its default ``abs=1e-12``, which for a
+    # field at 1e-12 or below is every value at all: the check this line
+    # replaces passed a small field left 25% short, and a 1e-36 one
+    # stopped 0.4% short by a norm that subtracted before rescaling.
+    budget = max(_SLACK * threshold, _FLOAT32_FLOOR)
+    rel = abs(got - want) / abs(want)
+    assert rel <= budget, (
+        f"the small field stopped {rel:.3g} from its fixed point "
+        f"({got!r} against {want!r}); budget {budget:.3g}; {diag}"
+    )
+    assert diag["iterations"] > 1, (
+        f"one pass cannot converge a contraction of {gain ** 2}; {diag}"
+    )

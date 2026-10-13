@@ -1,0 +1,32 @@
+=== (a) mask_safe on a matrix operand ===
+   A =
+ [[ 0.  1.  2.  3.]
+ [ 4.  5.  6.  7.]
+ [ 8.  9. 10. 11.]
+ [12. 13. 14. 15.]]
+   mask_safe(mask, A) =
+ [[ 0.  1.  2.  1.]
+ [ 4.  1.  6.  1.]
+ [ 8.  1. 10.  1.]
+ [12.  1. 14.  1.]]
+   -> broadcast over the LAST axis: columns are filled, rows are not.
+      A subclass sanitising a masked operator row-wise gets the wrong axis,
+      silently, with no error.  Docstring says only 'Operand to sanitise'.
+   mask.reshape(-1,1) variant =
+ [[ 0.  1.  2.  3.]
+ [ 1.  1.  1.  1.]
+ [ 8.  9. 10. 11.]
+ [ 1.  1.  1.  1.]]
+
+=== (b) vmap over theta with genuinely different active sets ===
+   theta=  0.05  active idx vmap=[ 0  5  8 17 20 21]  loop=[ 0  5  8 17 20 21]  max|dc|=0.00e+00
+   theta=  0.30  active idx vmap=[ 5  8 12 14 20 23]  loop=[ 5  8 12 14 20 23]  max|dc|=0.00e+00
+   theta=  3.00  active idx vmap=[ 2  5  8 12 14 23]  loop=[ 2  5  8 12 14 23]  max|dc|=0.00e+00
+   theta= 30.00  active idx vmap=[ 2 12 14 15 17 23]  loop=[ 2 12 14 15 17 23]  max|dc|=0.00e+00
+   masks all match the per-element loop: True
+   distinct active sets across the batch: 4
+
+=== (c) vmap of the gradient with different active sets ===
+   vmap(grad) = [-0.02953022  0.00386497  0.00440333  0.00025748]
+   loop grad  = [-0.02953022  0.00386497  0.00440333  0.00025748]
+   max abs diff = 0.0

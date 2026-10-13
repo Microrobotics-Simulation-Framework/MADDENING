@@ -1,0 +1,10 @@
+AdaptiveNodeBlindnessError raised by initial_state():
+
+CoefficientThresholdNode 'wave': gradient-capture ratio 0.000 is below the threshold 0.700 at the constructor parameters.  is_trapped_at() confirms a Palais fixed point of the problem's symmetry: the frozen-set gradient has no component in the escape direction, and no selection rule can supply one.  Remedies: cold_start() (one symmetry_break along the full-basis gradient) and seed gm.params with the pytree it returns, or perturb the parameters yourself.  Pass on_blind='ignore' (or blindness_gate=False) to proceed anyway.
+
+--- ground truth about the point ---
+n_active           = 0
+gradient_capture_ratio = 0.0
+is_trapped_at      = True
+dJ/dtheta (frozen) = 0.0
+the problem has no symmetry at all: the operator is diag(1..16)*theta

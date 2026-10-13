@@ -147,6 +147,8 @@ def test_fmpy_drives_the_compiled_fmu_against_the_graph(tmp_path):
             output=["ball.position", "spring.position", "spring.params.stiffness"],
         )
     assert bridge.requests_served > 30
+    # the wrapper negotiated protocol 2: get replies and set requests were binary frames
+    assert bridge.binary_frames_served > 20 and bridge.binary_frames_received > 0
 
     ref = _graph()
     p = ref.params
@@ -190,19 +192,22 @@ def test_low_level_fmi3_api_two_instances_state_and_reset(tmp_path):
         vr = {v.name: v.valueReference for v in insts[0][1].modelVariables}
         k, pos, anchor = vr["spring.params.stiffness"], vr["spring.position"], vr["spring.anchor_position"]
         (ia, _), (ib, _) = insts
-        ia.setFloat64([k], [45.0])                          # before initialisation
-        ib.setFloat64([k], [30.0])
+        # all three are Float32 variables, so they are set and read with the
+        # Float32 functions: FMI 3.0 accesses a variable only through the
+        # getter / setter of its own type, and the bridge refuses any other
+        ia.setFloat32([k], [45.0])                          # before initialisation
+        ib.setFloat32([k], [30.0])
         for inst in (ia, ib):
             inst.enterInitializationMode(startTime=0.0)
             inst.exitInitializationMode()
-        ia.setFloat64([anchor], [0.25])
+        ia.setFloat32([anchor], [0.25])
         t = 0.0
         for _ in range(5):
             ia.doStep(currentCommunicationPoint=t, communicationStepSize=DT)
             ib.doStep(currentCommunicationPoint=t, communicationStepSize=DT)
             t += DT
-        assert ia.getFloat64([k])[0] == 45.0 and ib.getFloat64([k])[0] == 30.0
-        pa, pb = ia.getFloat64([pos])[0], ib.getFloat64([pos])[0]
+        assert ia.getFloat32([k])[0] == 45.0 and ib.getFloat32([k])[0] == 30.0
+        pa, pb = ia.getFloat32([pos])[0], ib.getFloat32([pos])[0]
         assert pa != pb                                     # instances are independent
         # state round trip, both in memory and serialized
         st = ia.getFMUState()
@@ -210,17 +215,20 @@ def test_low_level_fmi3_api_two_instances_state_and_reset(tmp_path):
         for _ in range(5):
             ia.doStep(currentCommunicationPoint=t, communicationStepSize=DT)
             t += DT
-        assert ia.getFloat64([pos])[0] != pa
+        assert ia.getFloat32([pos])[0] != pa
         ia.setFMUState(st)
-        assert ia.getFloat64([pos])[0] == pa
+        assert ia.getFloat32([pos])[0] == pa
         st2 = ia.deserializeFMUState(blob)
         ia.setFMUState(st2)
-        assert ia.getFloat64([pos])[0] == pa
+        assert ia.getFloat32([pos])[0] == pa
         ia.freeFMUState(st)
         ia.freeFMUState(st2)
-        # reset returns to the initial state and constructor params
+        # reset returns to the initial state and constructor params, and to
+        # the Instantiated state, where FMI 3.0 allows no read: initialize
         ia.reset()
-        assert ia.getFloat64([pos])[0] == 0.5 and ia.getFloat64([k])[0] == 30.0
+        ia.enterInitializationMode(startTime=0.0)
+        assert ia.getFloat32([pos])[0] == 0.5 and ia.getFloat32([k])[0] == 30.0
+        ia.exitInitializationMode()
         for inst in (ia, ib):
             inst.terminate()
             inst.freeInstance()
@@ -243,3 +251,56 @@ def test_fmpy_validate_fmu_reports_no_problems(tmp_path):
     fmu = write_fmu(md, tmp_path / "plant.fmu", binary=build_fmu_binary(tmp_path),
                     endpoint="127.0.0.1:1")
     assert validate_fmu(str(fmu)) == []
+
+
+def _rod_graph():
+    """An array state field and an array external input."""
+    from maddening.nodes.heat import HeatNode
+
+    gm = GraphManager()
+    gm.add_node(HeatNode("rod", DT, n_cells=5, thermal_diffusivity=0.01,
+                         initial_temperature=[1.0, 1.25, 1.5, 1.75, 2.0]))
+    gm.add_external_input("rod", "heat_source", shape=(5,))
+    gm.compile()
+    return gm
+
+
+@needs_cc
+def test_an_array_variable_is_read_with_its_full_count(tmp_path):
+    """Neighbouring case of the exact-count rule (``fmi3Get*`` refuses a
+    reply whose length is not ``nValues``): an array variable is read by
+    the number of values it holds.  FMPy's recorder passes that count, so
+    ``simulate_fmu`` records the array; a ``getFloat64`` that passes the
+    number of value references instead -- one for a five-cell rod -- is
+    ``fmi3Error``, where it used to return the first cell with ``fmi3OK``."""
+    fmpy = pytest.importorskip("fmpy")
+    from fmpy.fmi1 import FMICallException
+    from fmpy.fmi3 import FMU3Slave
+
+    gm = _rod_graph()
+    md = build_model_description(gm, model_name="Rod", model_identifier=MODEL_IDENTIFIER)
+    sc = FmuSidecar(SidecarConfig(
+        schema_token=md.instantiation_token, step_fn=gm._compiled_step,
+        initial_state=gm._state, params=gm.params, param_specs=gm.param_specs()))
+    so = build_fmu_binary(tmp_path)
+    with FmuTcpBridge(sc, md, master_dt=DT) as bridge:
+        fmu = write_fmu(md, tmp_path / "rod.fmu", binary=so, endpoint=bridge.endpoint)
+        res = fmpy.simulate_fmu(str(fmu), start_time=0.0, stop_time=5 * DT, step_size=DT,
+                                output_interval=DT, output=["rod.temperature"])
+        unz = fmpy.extract(str(fmu))
+        desc = fmpy.read_model_description(unz)
+        inst = FMU3Slave(guid=desc.guid, unzipDirectory=unz,
+                         modelIdentifier=desc.coSimulation.modelIdentifier, instanceName="i")
+        inst.instantiate()
+        try:
+            inst.enterInitializationMode(startTime=0.0)       # reads start here (FMI 3.0)
+            inst.exitInitializationMode()
+            vr = _vr(md, "rod.temperature")
+            assert inst.getFloat32([vr], nValues=5) == pytest.approx([1.0, 1.25, 1.5, 1.75, 2.0])
+            with pytest.raises(FMICallException):
+                inst.getFloat32([vr])                        # nValues = 1: not what it holds
+            inst.terminate()
+        finally:
+            inst.freeInstance()
+    ref = np.asarray(_rod_graph().run_scan(5)["rod"]["temperature"])
+    np.testing.assert_allclose(res["rod.temperature"][-1], ref, rtol=1e-6)

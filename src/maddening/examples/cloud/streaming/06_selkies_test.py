@@ -2,14 +2,33 @@
 """Test SelkiesSession GStreamer/WebRTC on a cloud GPU.
 
 Provisions a VM, installs GStreamer system packages + PyGObject,
-verifies that SelkiesSession can be constructed and a GStreamer
-pipeline can be built. Does NOT test full WebRTC streaming (that
-requires a browser client), but validates the GStreamer layer.
+and checks on it that SelkiesSession can be constructed, started and
+stopped (``start()`` builds a viewer's pipeline once, to fail early on a
+missing GStreamer element), and that frames can be pushed.  It does NOT
+connect a viewer, so it checks neither the WebRTC negotiation nor the
+stream.  Those are tested on CPU, with no cloud, by
+``tests/cloud/test_webrtc_loopback.py`` (a GStreamer WebRTC peer in a
+network-less container: no browser, no NAT traversal).  The stream is
+encoded in software (``x264enc``) on every host, a GPU VM included:
+there is no GPU encoder.
+
+Interpreter note (read before running).  On ``runpod/base`` the system
+``python3`` is 3.10 and carries the apt ``python3-gi`` bindings, but
+MADDENING requires Python >= 3.12 and the ``jax>=0.10,<0.13`` range
+reaches 0.11, which requires >= 3.12 too: nothing in the install
+command below resolves under 3.10 or 3.11.  The example therefore runs
+everything under ``PYTHON`` (3.12, the interpreter the pod's ``pip``
+targets) and builds PyGObject
+for it with pip against the apt ``libgirepository1.0-dev`` headers
+(``PyGObject < 3.51``; 3.51+ needs girepository-2.0, absent on the
+22.04-based image).  The apt ``python3-gi`` package stays installed only
+for the GIR typelibs it pulls in; its C extension is 3.10-only and is not
+used.
 
 Usage:
-    python 06_selkies_test.py
-    python 06_selkies_test.py --gpu RTX4090
-    python 06_selkies_test.py --keep
+    python -m maddening.examples.cloud.streaming.06_selkies_test
+    python -m maddening.examples.cloud.streaming.06_selkies_test --gpu RTX4090
+    python -m maddening.examples.cloud.streaming.06_selkies_test --keep
 """
 
 import argparse
@@ -26,11 +45,17 @@ from maddening.cloud.launcher import (
 )
 
 
-# System packages needed for GStreamer + PyGObject
+# The interpreter that runs JAX + MADDENING + SelkiesSession on the VM
+# (see the module docstring: 3.10 and 3.11 cannot install either).
+PYTHON = "python3.12"
+
+# System packages needed for GStreamer + PyGObject (incl. the headers and
+# compiler that a pip build of PyGObject for ``PYTHON`` needs)
 GSTREAMER_INSTALL = (
     "export DEBIAN_FRONTEND=noninteractive"
     " && apt-get update -qq"
     " && apt-get install -y -qq"
+    f" {PYTHON}-dev build-essential pkg-config libcairo2-dev"
     " gstreamer1.0-plugins-base"
     " gstreamer1.0-plugins-good"
     " gstreamer1.0-plugins-bad"
@@ -46,10 +71,19 @@ GSTREAMER_INSTALL = (
     " && echo GST_INSTALL_DONE"
 )
 
-# Python deps (PyGObject for python3.12, plus websockets for signaling)
+# Base Python deps: JAX (pyproject ``cuda12`` range) + MADDENING, into PYTHON
+BASE_INSTALL = (
+    f"{PYTHON} -m pip install -q --root-user-action=ignore"
+    ' "jax[cuda12]>=0.10,<0.13" "fastapi>=0.100" "uvicorn>=0.20"'
+    ' "websockets>=11.0" "numpy>=1.24" "pyyaml>=6.0"'
+    f" && [ -d ~/sky_workdir/src ] && {PYTHON} -m pip install -q --root-user-action=ignore -e ~/sky_workdir"
+    " ; echo BASE_INSTALL_DONE"
+)
+
+# PyGObject built for PYTHON (3.12) from source, plus websockets for signaling
 PYGOBJECT_INSTALL = (
-    "pip install -q --root-user-action=ignore"
-    " PyGObject>=3.42 websockets>=11.0"
+    f"{PYTHON} -m pip install -q --root-user-action=ignore"
+    ' "pycairo>=1.20" "PyGObject>=3.42,<3.51" "websockets>=11.0"'
     " && echo PYGOBJECT_INSTALL_DONE"
 )
 
@@ -128,7 +162,8 @@ try:
         def teardown(self):
             pass
         def read_framebuffer_cpu(self):
-            return b"\xFF" * (64 * 32 * 4), 64, 32, "RGBA"
+            # The PREVIEW preset's size: a frame of another size is refused.
+            return b"\xFF" * (854 * 480 * 4), 854, 480, "RGBA"
 
     inner = DummyRenderer()
     session2 = SelkiesSession(secret="test2", signaling_port=18444)
@@ -201,18 +236,11 @@ def main():
     print(f"  VM IP: {job.vm_ip}:{job.ssh_port}")
 
     # --- Install base Python deps ---
-    # Use python3.10 (system default) for SelkiesSession because it needs
-    # the system python3-gi package which only has C extensions for 3.10.
-    # python3.12 has pip but not gi bindings.
-    print("\nInstalling Python deps via SSH (targeting python3.10)...")
-    result = job.ssh_run(
-        "python3 -m pip install -q --root-user-action=ignore"
-        ' "jax[cuda12]>=0.4,<0.6" "fastapi>=0.100" "uvicorn>=0.20"'
-        ' "websockets>=11.0" "numpy>=1.24" "pyyaml>=6.0"'
-        " && [ -d ~/sky_workdir/src ] && python3 -m pip install -q --root-user-action=ignore -e ~/sky_workdir"
-        " ; echo BASE_INSTALL_DONE",
-        timeout=300, capture=True,
-    )
+    # Everything runs under PYTHON (3.12): JAX >= 0.10 and MADDENING do
+    # not install under the system python3 (3.10); the gi bindings are
+    # built for PYTHON below instead of borrowing the 3.10-only apt ones.
+    print(f"\nInstalling Python deps via SSH (targeting {PYTHON})...")
+    result = job.ssh_run(BASE_INSTALL, timeout=300, capture=True)
     print(f"  {(result.stdout or '').strip().split(chr(10))[-1]}")
 
     # --- Install GStreamer system packages ---
@@ -224,14 +252,9 @@ def main():
         print(f"  WARNING: GStreamer install may have failed")
         print(f"  stderr: {(result.stderr or '')[-300:]}")
 
-    # --- Install PyGObject for python3.10 (system python) ---
-    print("\nInstalling PyGObject...")
-    # PyGObject via pip for 3.10 — the system python3-gi may already work
-    result = job.ssh_run(
-        "python3 -m pip install -q --root-user-action=ignore PyGObject>=3.42 websockets>=11.0"
-        " ; echo PYGOBJECT_INSTALL_DONE",
-        timeout=120, capture=True,
-    )
+    # --- Build PyGObject for PYTHON (3.12) ---
+    print(f"\nInstalling PyGObject for {PYTHON} (pip build against libgirepository1.0)...")
+    result = job.ssh_run(PYGOBJECT_INSTALL, timeout=300, capture=True)
     last_line = (result.stdout or "").strip().split("\n")[-1]
     print(f"  {last_line}")
 
@@ -243,7 +266,7 @@ def main():
     )
     try:
         result = job.ssh_run(
-            "python3 /tmp/selkies_test.py",
+            f"{PYTHON} /tmp/selkies_test.py",
             timeout=60, capture=True, check=False,
         )
         print(result.stdout or "")

@@ -1,10 +1,11 @@
 # Interface mapping
 
-When two coupled nodes discretise their shared interface differently
-(a coarse and a fine rod, a surface mesh and a point cloud), an edge
+When two coupled {term}`nodes <Node>` discretise their shared interface differently
+(a coarse and a fine rod, a surface mesh and a point cloud), an {term}`edge <Edge>`
 needs a **mapping** that turns a field on the source interface into a
 field on the target interface before the node consumes it.
 
+<!-- snippet: no-run, reason: fragment: an edge on a fluid-solid graph; gm and the point sets are the reader's -->
 ```python
 from maddening.core.coupling.mapping import rbf_mapping
 
@@ -18,6 +19,7 @@ conversion, sign), then `additive` accumulation, exactly as before.
 
 ## The `Mapping` protocol
 
+<!-- snippet: no-run, reason: fragment: a summary of the Mapping protocol in maddening.core.coupling.mapping, not its definition -->
 ```python
 class Mapping(Protocol):
     kind: str; mode: str
@@ -29,9 +31,11 @@ class Mapping(Protocol):
 
 `apply` maps a source field (`(n_source,)` or `(n_source, C)`) to the
 target; `apply_T` is the transpose.  `weights` is the mapping's entry of
-the graph parameter pytree and `geom` is reserved for mappings that
-depend on a moving interface (planned for 0.5.0; static mappings ignore
-it).
+the graph parameter {term}`pytree <Pytree>` and `geom` is the geometry of a mapping that
+depends on a moving interface ({term}`experimental <EXPERIMENTAL>`, see
+*{term}`Geometry-dependent mappings <Geometry-dependent mapping>`* below; static mappings ignore it).  A mapping whose weights are applied through a structure the
+parameter tree does not hold may also define `structure_digest()`; see
+[Sparse mappings](#sparse-mappings).
 
 ## Weights live in `params["mappings"]`
 
@@ -44,11 +48,58 @@ receives them as a traced input, exactly like node constants (see
 * `jax.grad` of a trajectory loss reaches the mapping weights (learned
   edges, sensitivity of a coupled result to the interface operator);
 * a replaced matrix takes effect on the next step without recompiling;
-* the IFT rule of a coupling group carries the dependence, so a mapped
+* the {term}`IFT` rule of a {term}`coupling group <Coupling group>` carries the dependence, so a mapped
   edge inside a coupling group is differentiable end-to-end.
 
 `gm.params["mappings"]` is validated like the node entries: an unknown
 edge key is a `ValueError` at trace time.
+
+## A mapped edge inside a coupling group: what `convergence_norm="interface"` reads
+
+A coupling group under `convergence_norm="interface"` is judged on what
+crosses its internal edges, every entry pooled into one RMS.  **A mapped
+edge is read on its compact side:**
+
+| The edge's static mapping | The norm reads |
+|---|---|
+| delivers **more** entries than its source field holds (a scatter: a few values spread onto a grid) | the **source field** itself, before the mapping and before the edge's transform |
+| delivers fewer entries (a gather) | the delivered value: mapping, then transform |
+| delivers as many entries as it reads (**a tie**) | the delivered value |
+| no mapping | the delivered value (the field, through the transform if there is one) |
+
+The two sizes are the ones the mapping declares (`n_source` and
+`n_target`, or `field_shapes()` where it has one), which `add_edge`
+holds the edge's two ends to; a dense matrix, a sparse mapping in either
+layout and a registered kind of your own are treated alike.  The target
+still receives the mapped value and the weights are still parameters of
+the step: only the criterion changes side.
+
+Why: read as delivered, 30 marker forces scattered onto `N` cells put
+`N` entries into the norm of which a few dozen change, and the criterion
+loosens as the grid grows.  On a two-way marker and grid pair
+(`rtol=1e-4`, {term}`Gauss-Seidel`) the marker forces at a `converged=True` exit
+were 23, 39, 134 and 459 tolerances from their {term}`fixed point <Fixed point>` at `N` = 1e3,
+1e4, 1e5 and 1e6; read on the compact side they are 3.3 to 3.6 at every
+`N` (the table is in the
+[coupling algorithm guide](../../developer_guide/coupling_algorithm_guide.md)).
+With the mixed norm, which reads every field of the group whole, the
+same pair stops as early as the diluted criterion did: prefer the
+{term}`interface norm <Interface norm>` where a small field drives a large one.
+
+**This needs the transfer to be on the edge.**  The figures above are of
+a pair whose grid field comes back to the markers through a gather
+*mapping*.  A member that is handed the whole grid through a plain edge
+and samples it inside its own `update` is read at the grid's `N`
+entries, as any plain edge is, and the dilution returns: on the same
+pair the markers were 4.6 tolerances off at `N` = 300, 27 to 74 at 3e3,
+56 to 104 at 3e4 and 179 at 3e5 with `converged=True`, against 1.8 to
+6.2 with the gather on the edge.  Put the sampling on the edge: a static
+gather (a dense or sparse matrix), or `multilinear_grid` with
+`geometry=` where the sample points move.
+
+A geometry-dependent mapping inside a group is read by the same rule,
+with its positions (see "What the interface norm reads on a geometry
+edge" below).
 
 ## `StaticLinearMapping` and its factories
 
@@ -60,7 +111,23 @@ The first implementation is a dense matrix `H` (`n_target × n_source`),
 | `rbf_mapping(src_pts, tgt_pts, kernel=, epsilon=, polynomial=True, ridge=1e-8, mode=)` | radial-basis interpolation; kernels `gaussian`, `multiquadric`, `inverse_multiquadric`, `thin_plate_spline` |
 | `nearest_neighbor_mapping(src_pts, tgt_pts, mode=)` | 0/1 selection matrix |
 | `projection_1d_mapping(src_boundaries, tgt_boundaries)` | cell-average projection between 1D grids (conservative) |
-| `matrix_mapping(H, mode=)` | bring your own weights (e.g. supermesh weights precomputed offline) |
+| `matrix_mapping(H, mode=)` | bring your own weights (e.g. supermesh weights precomputed offline); `mode` is a label here, `H` is applied as given |
+
+**The dtype of the weights** is each factory's own, and only one follows
+`jax_enable_x64`:
+
+| factory | weights |
+|---------|---------|
+| `nearest_neighbor_mapping`, `projection_1d_mapping` | float32 under either setting, whatever dtype the points or boundaries have: a config written under one setting rebuilds the same weights under the other, and a float32 field stays float32 through the mapping in an x64 process |
+| `rbf_mapping` | float64 where a point array was passed as float64 under `jax_enable_x64` (NumPy's default, and a plain list); float32 otherwise |
+| `matrix_mapping` | the dtype of `H` as given |
+
+So in a float64 graph the projection's identities hold to float32 rounding:
+a row sums to one, and the integral is preserved, to about 3e-8 relative,
+not to 1e-16.  The weights are the float64 overlap formula rounded once.
+Where that matters, evaluate `P[i, j] = |target_i ∩ source_j| / |target_i|`
+in float64 yourself and pass it to `matrix_mapping` (or its rows to
+`sparse_matrix_mapping`), which keeps float64 under `jax_enable_x64`.
 
 ### Polynomial augmentation and the patch test
 
@@ -110,15 +177,1373 @@ and, when the target declares a `boundary_input_spec` shape,
 `mapping.n_target` against it — a mismatch is a `ValueError` at graph
 construction, not a broadcast surprise inside the jit.
 
+The factories check the coordinates they are given, and refuse what their
+formula does not cover with a `ValueError` naming the argument and the first
+offending index (a `MappingRebuildError` when the mapping is rebuilt from a
+config or a USD stage):
+
+* cell boundaries (`projection_1d_mapping`) must be one-dimensional, hold at
+  least two values, be finite and be **strictly increasing**.  They are never
+  sorted or reversed for you: the field keeps its cell order.  The two grids
+  need not cover the same interval — a cell outside the other grid is
+  treated as empty, so the integral is preserved when the target grid covers
+  the source grid, a constant is reproduced on target cells the source grid
+  covers, and two grids that share no interval give a matrix of zeros;
+* point sets (`rbf_mapping`, `nearest_neighbor_mapping`) must be finite
+  `(n,)` or `(n, d)` arrays of one `d`, and the set the operator
+  interpolates from (the source in consistent mode, the target in
+  conservative mode) must hold a point.  Coincident points are accepted:
+  nearest neighbour takes the lowest index, and the RBF ridge shares the
+  weight between them;
+* a matrix (`matrix_mapping`) must be finite.
+
+An accepted input gives the same operator as before the checks, bit for bit
+(MADD-ANO-192 has the inputs that used to give a wrong one).
+
 ## Serialisation
 
-`gm.to_dict()` records `mapping.describe()` (kind, mode, shape,
-hyper-parameters — never the weights); `from_dict` and `save_graph_to_usd`
-refuse a mapped edge for now.  Registry serialisation of a `MappingSpec`
-(kind + hyper-parameters + point-source references, rebuilt on load) is
-planned with the USD read path in 0.5.0, together with matrix-free
-mappings for moving interfaces (`geom`), Wendland / partition-of-unity
-sparsity, and scaled-consistent / nearest-projection variants.
+A mapping is written to a config (`gm.to_dict()`, JSON / YAML) or a USD
+stage (`save_graph_to_usd`, attribute `maddening:mappingSpecJson`) as its
+**`MappingSpec`** — the recipe, never the weights:
+
+```json
+"mapping": {"kind": "rbf", "mode": "conservative", "shape": [12, 6],
+            "kernel": "thin_plate_spline", "epsilon": 2.0,
+            "polynomial": true, "ridge": 1e-8,
+            "points": {"source_points": {"node": "fluid", "field": "grid_x",
+                                         "sha256": "8b6cb7ec8637..."},
+                       "target_points": {"asset": "solid_points.npy",
+                                         "sha256": "ba24aeb27cac..."}}}
+```
+
+`kind` names the factory -- one of the four above, one of the three
+[sparse kinds](#sparse-mappings), or a kind you
+[registered yourself](#registering-your-own-mapping-kind) -- the flat keys
+are its hyper-parameters (`shape` is informational and checked on reload),
+and `points` maps each array argument of the factory (`source_points` /
+`target_points`, `source_boundaries` / `target_boundaries`, `H`) to a
+**point reference**.
+Hyper-parameters are type-checked on the way in and out: `epsilon` and
+`ridge` must be finite reals (a config must stay valid JSON — no
+`Infinity` — and an integer too large to be a float64 is refused the same
+way), `polynomial` a bool, `kernel` / `mode` / `label` strings.
+Every factory attaches the spec to the mapping it returns
+(`mapping.spec`, `mapping.describe()`); `GraphManager.from_dict` and
+`load_graph_from_usd` rebuild the mapping by calling the same factory on
+the resolved points (`MappingSpec.build(resolve_points)`), so the rebuilt
+`H` is bitwise equal to the original, and register it in
+`params["mappings"]` exactly as `add_edge(mapping=)` does.  `add_edge`
+also accepts a `MappingSpec` (or its dict) directly.  Anything that goes
+wrong while rebuilding one edge — a malformed spec, a reference that does
+not resolve, an unreadable asset, a hyper-parameter of the wrong type, a
+singular solve, a package a factory cannot import — is a
+`MappingRebuildError` (a `ValueError`) naming that edge, with the original
+exception chained as `__cause__`.
+
+`describe()["kind"]` is the mapping's **user-facing** kind: for
+`matrix_mapping(H, kind="supermesh")` it stays `"supermesh"` (that is
+what `GET /graph` and dashboards key on), while the spec underneath
+keeps `kind: "matrix"` — the factory to call — and carries the label as
+the `label` hyper-parameter.  Reading `describe()` back with
+`MappingSpec.from_dict` restores both.
+
+### Point references
+
+| reference | resolves to |
+|-----------|-------------|
+| `{"node": "<name>", "field": "<key>"}` | the node's `static_data[key]` (a `StaticArray` is unwrapped) or, failing that, an array-valued constructor parameter `node.params[key]` — e.g. `{"node": "rod", "field": "grid_x"}` for a `HeatNode` |
+| `{"asset": "<path>.npy"}`, `{"asset": "<path>.npz", "key": "<member>"}` | a NumPy file, **relative to the directory the config / stage lives in** (`from_dict(..., base_dir=)`; `load_graph_from_usd` defaults to the stage file's directory).  Absolute paths and `..` are refused; the path is then `resolve()`d and the *resolved* file must still lie under the resolved `base_dir`, so a symlink (to a file or to a directory) that leaves it is refused too.  `key` selects an `.npz` member and is an error on a `.npy`. |
+| `{"inline": [...], "dtype": "float64"}` (or a plain list) | the points themselves — at most `INLINE_POINT_LIMIT` (64) points and `INLINE_ELEMENT_LIMIT` (1024) numbers in total, finite, of an accepted dtype (below) |
+
+A node reference is resolved **once**, when the mapping is built. If the
+static it names is derived from a trainable parameter, such as a uniform
+`HeatNode`'s `grid_x`, which is built from `length`, then calibrating
+that parameter -- a fit, or any `params=` pytree -- leaves the weights at
+the constructor's geometry. Nothing refuses it or warns. This is
+**MADD-ANO-022**. A value *written* into the running graph is refused
+(**MADD-ANO-063**): `gm.params` at the next run, `to_dict()` and
+`save_state()`, `PUT /graph/params` with a 400, a {term}`checkpoint <Checkpoint>` at
+`POST /checkpoint/load`, and an exported {term}`FMU` leaves the parameter fixed,
+because the node would use it while the mapping kept the old points and a
+saved config would not load. See
+[Calibrating a parameter that a mapped edge's grid derives from](../../user_guide/parameters.md#calibrating-a-parameter-that-a-mapped-edges-grid-derives-from)
+for what it does to a fit and for the workarounds.
+
+#### Accepted dtypes
+
+Whatever the reference form, a point set must be a bool, integer or float
+array of **at most 8 bytes per element**: `bool`, `int8`…`int64`,
+`uint8`…`uint64`, `float16`, `float32`, `float64`.  Complex, string,
+object and datetime arrays are refused, and so is **extended precision** —
+`numpy.longdouble`, spelled `float96` on 32-bit x86 and `float128` on
+x86-64 and aarch64.
+
+An extended-precision point set is **refused with an error, not narrowed
+to `float64`**.  It fails both halves of what a reference has to do:
+`arr.tolist()` yields `numpy.longdouble` objects that `json.dumps` cannot
+write, so the config could not be saved; and `point_array_digest` is not
+stable for it, because the padding bytes of an 80-bit value in its
+16-byte slot are not zeroed, so two arrays that compare equal can hash
+differently and a reference to them is rejected at random.  Downcasting
+quietly would hide a precision loss you did not ask for — a well-known
+source of numerical bugs that are very hard to trace back to their cause
+— so the error names the dtype and the fix:
+
+<!-- snippet: no-run, reason: fragment: fluid_pts and solid_pts are the reader's point sets -->
+```python
+mapping = rbf_mapping(np.asarray(fluid_pts, dtype=np.float64),
+                      np.asarray(solid_pts, dtype=np.float64))
+```
+
+The same applies to the *values* of an inline reference that names no
+`"dtype"`. Such a payload is read as `float64`. `numpy.longdouble` arrays
+and the `numpy.longdouble` scalars their `tolist()` returns used to be
+rounded to `float64` without a word. They are now refused, and the error
+says what you can do instead. No reference form keeps the extra
+precision, so the points can be at most `float64` whichever route you take:
+
+- convert them first: `np.asarray(points, dtype=np.float64).tolist()`
+  gives plain Python floats;
+- or add `"dtype": "float64"` to the reference to accept the rounding
+  explicitly;
+- or, for a set too large to inline, save the `float64` array with
+  `numpy.save` and pass `{"asset": "<file>.npy"}`.
+
+Three more kinds of value were changed by the same coercion and are
+refused the same way, each with a message saying what to do instead:
+
+- **integers `float64` cannot represent** (magnitude above `2**53` and
+  not a float64 value, as a Python `int` or an 8-byte NumPy integer):
+  `2**53 + 1` used to become `2**53`.  Add `"dtype": "int64"` (or
+  `"uint64"`) to keep integer points exact, or `"dtype": "float64"` to
+  accept the rounding;
+- **`decimal.Decimal` values `float64` cannot represent**: they went
+  through `float()`.  No reference keeps decimal digits; convert first or
+  add `"dtype": "float64"`;
+- **complex values, at any width** (`numpy.clongdouble` included) —
+  refused **with or without** a `"dtype"`, because the coercion to a real
+  dtype drops the imaginary part (with only a NumPy `ComplexWarning`)
+  rather than rounding it.  Pass `np.real(points)` if the imaginary parts
+  are zero, or the two parts as two real columns.
+
+Values `float64` holds exactly (`2**53`, powers of two beyond it,
+`Decimal("0.5")`) and every other input are coerced as before.
+
+This is a limit of the *serialised* form, not a judgement about extended
+precision, and it is not a closed door.  If a real interface ever needs
+it, extended precision can be supported later behind the same API — a
+composite inline representation (the value bytes, or a mantissa /
+exponent pair, written as JSON-safe integers) together with a canonical
+digest, or an FFI path that formats and hashes the value itself.  Nothing
+in the current format assumes 8 bytes is the last word; the constraint is
+explicit today so that you can trust what a saved config holds.
+
+Asset files are read defensively, because a config is untrusted input:
+the `.npy` header (or the `.npz` directory entry) is read first and the
+array is refused before anything is allocated when it would exceed
+`MAX_ASSET_BYTES` (256 MiB — a module constant you can raise for a
+genuinely large interface), when the header claims more data than the
+file holds, or when its dtype is not an accepted one — including
+extended precision, which is caught from the header before any read.
+
+The resolved path is opened exactly once, with `O_NOFOLLOW`, and the
+size check (`fstat` on that descriptor), the header and the data all
+come from it — re-opening the name would let a writer in the config
+directory swap the checked file for a symlink in between.  A reference
+that *names* a symlink is unaffected: the link is followed by the
+resolution, and it is the target that is opened.
+
+A `{"node": ...}` reference resolves through `gm.get_node(name)`: the
+node's `static_data[key]` first (a `StaticArray` is unwrapped), then an
+array-valued constructor parameter `node.params[key]`; a scalar (0-d) or
+non-numeric field is a `PointReferenceError`.  Wrapper nodes classify
+their inner node's static data at build time and expose none of their
+own — `ShardedStencilNode` and `ShardedUnstructuredNode` included — so a
+node reference cannot reach through them; save those points as an asset
+instead.
+
+Tell the factory where its points came from with `source_ref=` /
+`target_ref=` (and `matrix_mapping(H, asset="H.npy")` for an explicit
+matrix, which is never inlined — save it yourself with `numpy.save` next
+to the config):
+
+<!-- snippet: no-run, reason: fragment: an edge on a fluid-solid graph the guide does not build -->
+```python
+gm.add_edge("fluid", "solid", "traction", "force",
+            mapping=rbf_mapping(fluid_pts, solid_pts, mode="conservative",
+                                source_ref={"node": "fluid", "field": "grid_x"},
+                                target_ref={"asset": "solid_points.npy"}))
+```
+
+Without a reference, a set of at most 64 points is inlined automatically;
+a larger one leaves the mapping usable but **not serialisable**:
+`gm.to_dict()` and `save_graph_to_usd` refuse with a message naming the
+argument to pass (`gm.to_dict(strict_mappings=False)` still describes it,
+for display — the REST `GET /graph` uses that).  A hand-built
+`StaticLinearMapping` or a custom `Mapping` object that carries no spec
+is refused the same way; to make a mapping of your own serialisable,
+[register its kind](#registering-your-own-mapping-kind).
+
+### References are checked against the points they describe
+
+Each reference records `sha256`, the content hash
+(`point_array_digest`: dtype, shape and C-order bytes) of the array the
+factory was actually given.  A reference that resolves to something else
+— a typo naming the wrong node field, a node field or asset file that
+moved since the config was written — is refused instead of silently
+rebuilding a different operator:
+
+* `gm.to_dict()` and `save_graph_to_usd` resolve every **node**
+  reference as they write and refuse one that no longer resolves (a
+  removed node) or no longer matches the hash, naming the edge;
+* `MappingSpec.build` / `from_dict` / `load_graph_from_usd` check every
+  reference again — node, asset and inline — as they rebuild.
+
+A hand-written reference may omit `sha256`; then nothing is checked and
+the hash is recorded on the first rebuild.
+
+`python -m maddening.examples.coupling.interface_mapping_demo` builds a
+mapped edge between an 8-cell and a 24-cell rod from node references,
+saves it with `to_dict()`, reloads it with `from_dict()` (the rebuilt
+`H` is bitwise equal and the two graphs step identically), and shows the
+MADD-ANO-063 refusal of a `length` write that would move the mapped
+points.
+
+### Weights: config vs checkpoint
+
+The config carries the recipe; a checkpoint (`save_state`) carries the
+actual `params["mappings"]` weights, which may have been trained by
+{codeterm}`sysid` or edited.  Loading a config rebuilds the geometric weights; a
+checkpoint loaded afterwards overwrites them — **the checkpoint wins**
+(`tests/core/test_mapping_spec_serialisation.py`).  Because the config
+cannot carry them, `gm.to_dict()` emits a `UserWarning` naming the edge
+when the live `params["mappings"]` weights are no longer the ones the
+recipe rebuilds, so trained weights are not lost silently; save a
+checkpoint and load it after the config.  Which weights an optimiser may
+move is metadata, not data, so it *is* in the config:
+`gm.set_param_spec(edge.key, "H", ParamSpec())` round-trips through both
+JSON and USD.  The {term}`FMI` exporter never exposes mapping weights, so the
+exported `modelDescription.xml` is identical with and without a mapping
+on an edge.
+
+Still planned for 0.5.0: further kinds for moving interfaces (0.4.0 has
+one, experimental: *Geometry-dependent mappings* below), Wendland /
+partition-of-unity sparsity, and
+scaled-consistent / nearest-projection variants.
+
+## Registering your own mapping kind
+
+*Experimental in 0.4.0: `register_mapping` may change in a minor release.*
+
+The four kinds above are entries of one registry
+(`maddening.core.coupling.mapping_registry`), and `register_mapping` adds
+yours to it.  A mapping of a registered kind is written by `to_dict()`
+and `save_graph_to_usd` and rebuilt by `from_dict()` and
+`load_graph_from_usd` exactly as a built-in one is: the recipe travels,
+the weights are recomputed bit for bit by your factory.
+
+```python
+import json
+
+import jax.numpy as jnp
+import numpy as np
+
+from maddening.core.coupling.mapping import StaticLinearMapping, register_mapping
+from maddening.core.coupling.mapping_spec import MappingSpec, reference_for_array
+from maddening.core.graph_manager import GraphManager
+from maddening.nodes.heat import HeatNode
+
+
+@register_mapping(
+    "inverse_distance",
+    arrays=("source_points", "target_points"),
+    hyperparameters={"power": float, "normalise": bool},
+    references={"source_points": "source_ref", "target_points": "target_ref"},
+)
+def inverse_distance_mapping(source_points, target_points, *, power=2.0,
+                             normalise=True, source_ref=None, target_ref=None):
+    """Each target value is a distance-weighted mean of the source values."""
+    src = np.asarray(source_points, dtype=np.float64).reshape(-1, 1)
+    tgt = np.asarray(target_points, dtype=np.float64).reshape(-1, 1)
+    weights = 1.0 / (1.0 + np.abs(tgt - src.T) ** power)
+    if normalise:
+        weights = weights / weights.sum(axis=1, keepdims=True)
+    spec = MappingSpec(
+        "inverse_distance",
+        {"power": float(power), "normalise": bool(normalise)},
+        {"source_points": reference_for_array(source_points, source_ref,
+                                              name="source_points"),
+         "target_points": reference_for_array(target_points, target_ref,
+                                              name="target_points")},
+    )
+    return StaticLinearMapping(jnp.asarray(weights, dtype=jnp.float32),
+                               kind="inverse_distance", spec=spec)
+
+
+gm = GraphManager()
+gm.add_node(HeatNode("coarse", 1e-4, n_cells=6, thermal_diffusivity=0.1))
+gm.add_node(HeatNode("fine", 1e-4, n_cells=12, thermal_diffusivity=0.1))
+x_coarse = gm.get_node("coarse").static_data["grid_x"].value
+x_fine = gm.get_node("fine").static_data["grid_x"].value
+gm.add_edge("coarse", "fine", "temperature", "heat_source",
+            mapping=inverse_distance_mapping(
+                x_coarse, x_fine, power=3.0,
+                source_ref={"node": "coarse", "field": "grid_x"},
+                target_ref={"node": "fine", "field": "grid_x"}))
+gm.compile()
+
+config = json.loads(json.dumps(gm.to_dict()))
+stored = config["edges"][0]["mapping"]
+assert stored["kind"] == "inverse_distance" and stored["power"] == 3.0
+assert "H" not in stored                      # the recipe, never the weights
+
+reloaded = GraphManager.from_dict(config, {"HeatNode": HeatNode})
+reloaded.compile()
+key = "coarse.temperature->fine.heat_source"
+assert np.array_equal(np.asarray(reloaded.params["mappings"][key]["H"]),
+                      np.asarray(gm.params["mappings"][key]["H"]))
+```
+
+What the declaration says:
+
+* **`arrays`** -- the factory's array arguments, the point sets or
+  matrices a spec refers to by [reference](#point-references).
+* **`hyperparameters`** -- every other argument a spec may carry, with
+  its type: `str`, `bool`, `int` or `float`.  `float` is a real number: a
+  finite `int` or `float` that is not a `bool`, handed to the factory as a
+  `float`.  `int` is an integer (a count, a size): an `int` that is not a
+  `bool`, of a magnitude a float64 can hold, handed to the factory as an
+  `int`; a float is refused for it, whatever its value.  A spec's
+  hyper-parameters are checked against these declarations **before** your
+  factory is called, as the built-in ones are, and an unknown one is
+  refused.  The names `kind`, `points`, `shape` and `label` are reserved.
+* **`references`** -- for each array, the factory keyword that carries
+  its reference (`"<array>_ref"` when omitted).
+
+The rebuild calls `factory(**arrays, **hyperparameters, **references)`.
+The declaration is checked against the factory's signature when it is
+registered, so a misspelt name fails at the decorator rather than while
+someone loads a config.  A required argument must be one a keyword can
+supply: a factory that requires a positional-only argument is refused.
+A kind name is any non-empty string but the three
+a config reserves for non-finite numbers (`NaN`, `Infinity`,
+`-Infinity`); registering a name that is taken -- a built-in kind, or
+another factory's -- is a `ValueError`, registering the same factory
+again with the same declaration is a no-op, and nothing removes a kind.
+
+**What the factory returns** is checked when a spec is rebuilt:
+
+* a `Mapping` whose `kind` is the registered kind;
+* carrying, as `.spec`, a `MappingSpec` of that kind which records the
+  references and the hyper-parameters it was given.  Build each reference
+  with `reference_for_array(array, reference, name=...)`, passing the
+  array **as you received it** (its content hash covers the dtype, so
+  hash it before any conversion) and the reference keyword through;
+* whose `params_pytree()` meets the contract below.
+
+The short way is to return a `StaticLinearMapping`, as above: a dense
+matrix whose one weight is `H`.  Pass `kind=` (left at its default, the
+mapping would be written as a `matrix`; `to_dict()` refuses that).  A
+class of your own needs the members of the `Mapping` protocol and a
+`spec` attribute, and no `describe()` method: the edge writes the spec
+for you.
+
+Check a kind of your own with `maddening.testing.mapping.verify_mapping`
+(experimental): linearity, the consistency or conservation it claims, the
+adjoint identity between `apply` and `apply_T`, and the save/load round
+trip of a registered kind; see [Verifying a coupled model in three
+levels](../../developer_guide/verification.md#verifying-a-coupled-model-in-three-levels).
+
+### What `params_pytree()` may contain
+
+The graph snapshots `mapping.params_pytree()` into
+`gm.params["mappings"][edge.key]`, and checkpoints, `POST
+/checkpoint/load`, {term}`system identification <System identification>`, the FMU's state archive and
+`to_dict()`'s "live weights differ" warning all read that entry as a flat
+table of arrays.  For a mapping of any class other than
+`StaticLinearMapping`, `add_edge` therefore refuses, with a `ValueError`
+naming the edge, a `params_pytree()` that is not
+
+* a plain `dict` -- empty for a mapping without weights;
+* keyed by Python identifiers (a key is a member name in a checkpoint
+  archive and a key of a config's `param_specs`);
+* holding under each key one concrete {term}`JAX` array of a floating-point
+  dtype, of any shape, all finite -- not a nested container, not a NumPy
+  array or a Python number (`jnp.asarray(value)` gives it a dtype that no
+  longer depends on `jax_enable_x64`), not an integer or complex array.
+  Indices and other structure stay attributes of the mapping, outside the
+  parameter tree;
+* the same on every call: it is what `reset_params()` restores and what
+  `to_dict()` compares the live weights with.
+
+Every weight is frozen by default and opts in to a fit by name
+(`gm.set_param_spec(edge.key, "<weight>", ParamSpec())`), is carried by a
+checkpoint under its own name, and is fixed in an exported FMU, like `H`.
+
+### A file can only name a kind
+
+A config, a USD stage and a checkpoint are untrusted input.  All one of
+them can say about a mapping is the name of its kind, which is looked up
+in the registry and nowhere else: nothing imports a module, follows a
+dotted path or discovers an entry point because of what a file contains.
+A kind exists only because the running program imported the code that
+registered it.  A file naming a kind this process has not registered is
+a `MappingRebuildError` listing the registered kinds; import the module
+that registers it, then load.
+
+The limits on [point references](#point-references) -- the asset size
+cap, the inline limits, the accepted dtypes, the containment of asset
+paths in the config directory, the content hash -- are enforced by the
+reference resolver before a factory runs, so they hold for a registered
+kind exactly as for a built-in one.  The coordinate checks of
+[Shapes and validation](#shapes-and-validation) do not: each built-in
+factory makes them itself, so your factory is handed whatever its
+references resolve to, and geometry its formula does not cover -- an
+unsorted grid, a NaN coordinate -- is its own to refuse, with a
+`ValueError`.  Whatever a registered factory
+raises, `from_dict` and `load_graph_from_usd` report as a
+`MappingRebuildError` naming the edge and the kind, with the factory's
+exception chained as `__cause__` -- an `ImportError` included, for a
+factory that needs a package the loading environment lacks.
+
+## Sparse mappings
+
+*Experimental in 0.4.0: everything in
+`maddening.core.coupling.sparse_mapping` may change in a minor release.*
+
+A `StaticLinearMapping` stores the whole `n_target × n_source` matrix.
+Between two interfaces of 100 000 points each that is 40 GB of float32,
+of which a nearest-neighbour selection uses one entry per row.  A
+`StaticSparseMapping` stores only the entries a row uses:
+
+* an integer **index** of shape `(n_rows, k)`, kept on the mapping as a
+  read-only host array -- structure, not a parameter;
+* one floating-point weight array **`W`** of the same shape, which is the
+  mapping's whole entry of the parameter tree:
+  `params_pytree() == {"W": W}`.
+
+Use a sparse mapping when the dense matrix does not fit in memory or is
+mostly zeros: a nearest-neighbour transfer, a cell-average projection, a
+{term}`stencil <Stencil>` or supermesh operator computed offline.  Keep the dense kinds for
+small interfaces and for RBF interpolation, whose matrix is full.
+
+### The three kinds
+
+| factory | what it builds |
+|---------|----------------|
+| `sparse_nearest_neighbor_mapping(src_pts, tgt_pts, mode=, transpose=)` | the matrix of `nearest_neighbor_mapping`, found with a k-d tree instead of an `n_target × n_source` distance table |
+| `sparse_projection_1d_mapping(src_boundaries, tgt_boundaries)` | the matrix of `projection_1d_mapping`, found with a sorted sweep instead of a double loop |
+| `sparse_matrix_mapping(indices, values, n_source=, mode=, name=)` | bring your own rows: `target[i] = sum_j values[i, j] * source[indices[i, j]]`; `mode` is a label here, the rows are applied as given |
+
+The first two hold float32 weights under either setting of
+`jax_enable_x64`, as the dense kinds they reproduce do (see the table of
+dtypes above); `sparse_matrix_mapping` keeps the dtype of `values`.
+
+A sparse mapping goes on an edge like any other, and its kind is
+registered, so `to_dict()` / `from_dict()` and the USD writer and reader
+carry it:
+
+```python
+import json
+
+import numpy as np
+
+from maddening.core.coupling.sparse_mapping import sparse_nearest_neighbor_mapping
+from maddening.core.graph_manager import GraphManager
+from maddening.nodes.heat import HeatNode
+
+gm = GraphManager()
+gm.add_node(HeatNode("coarse", 1e-4, n_cells=6, thermal_diffusivity=0.1))
+gm.add_node(HeatNode("fine", 1e-4, n_cells=12, thermal_diffusivity=0.1))
+x_coarse = gm.get_node("coarse").static_data["grid_x"].value
+x_fine = gm.get_node("fine").static_data["grid_x"].value
+mapping = sparse_nearest_neighbor_mapping(
+    x_coarse, x_fine,
+    source_ref={"node": "coarse", "field": "grid_x"},
+    target_ref={"node": "fine", "field": "grid_x"})
+gm.add_edge("coarse", "fine", "temperature", "heat_source", mapping=mapping)
+gm.compile()
+
+key = "coarse.temperature->fine.heat_source"
+assert mapping.indices.shape == (12, 1)                    # one source per target
+assert gm.params["mappings"][key]["W"].shape == (12, 1)    # one weight per slot
+
+config = json.loads(json.dumps(gm.to_dict()))
+stored = config["edges"][0]["mapping"]
+assert stored["kind"] == "sparse_nearest_neighbor"
+assert "W" not in stored and "indices" not in stored       # the recipe, nothing else
+
+reloaded = GraphManager.from_dict(config, {"HeatNode": HeatNode})
+rebuilt = reloaded.edges[0].mapping
+assert np.array_equal(rebuilt.indices, mapping.indices)
+assert rebuilt.structure_digest() == mapping.structure_digest()
+```
+
+**The same matrix as the dense kind.**  Scattering the rows of
+`sparse_nearest_neighbor_mapping` or `sparse_projection_1d_mapping` into a
+zero matrix gives the dense factory's `H` bit for bit, in both modes.  For
+the nearest neighbour that includes ties: they go where the dense kind
+sends them, to the **lowest index** among the points at the minimal
+float64 squared distance.  The k-d tree only proposes candidates; wherever
+two candidates are closer to one another than rounding can tell apart, the
+dense expression decides, so the result does not depend on the tree or on
+the scipy version.  The equality holds for coordinates up to `1e150` in
+magnitude (a larger one is refused: its squared distance overflows).
+
+`sparse_projection_1d_mapping` requires **strictly increasing** boundaries
+on both sides and refuses anything else.  It does not sort or reverse them
+for you, because the field keeps its cell order.  The sparse builders ask
+of their coordinates what the dense factories ask (*Shapes and validation*
+above), through the same checks and in the same words, and three things
+more: both point sets must hold a point (a sparse mapping has at least one
+row and one column), a complex, text or object array is refused by name,
+and so is a coordinate past `1e150`.
+
+`sparse_matrix_mapping` takes an integer `indices` array and a
+floating-point `values` array, both `(n_target, k)`, and `n_source`, which
+cannot be inferred.  `-1` in `indices` marks an unused slot (a row with
+fewer than `k` entries), and the value there must be exactly 0: a weight
+that would be dropped is refused rather than dropped.  The same index may
+appear twice in a row; its values add.  Like an explicit dense matrix, the
+two arrays are never inlined into a config: save them with `numpy.save`
+(or as two members of one `.npz`) next to the config and name the files
+with `indices_asset=` and `values_asset=`.  `name=` is a free label for
+display; the mapping's `kind` stays `"sparse_matrix"`.
+
+### The index is structure, the weights are parameters
+
+Only `W` is in `gm.params["mappings"]`.  It is a traced input like any
+other weight: a gradient reaches it, a replaced `W` takes effect on the
+next step without recompiling, it is frozen by default and opts in to a
+fit by name, a checkpoint carries it, and an exported FMU fixes it.
+
+The index is **baked into the compiled step as a constant**.  A weight
+write can therefore never change the sparsity pattern: a new pattern is a
+new mapping, a new edge and a recompile.  The mapping object is immutable
+(the index array is read-only, and a copy of the object is the object).
+
+A config carries a sparse mapping's recipe -- kind, hyper-parameters and
+references -- and never its index or its weights; `from_dict` calls the
+same builder on the same arrays, so the reloaded index is the one that was
+saved, bit for bit.
+
+A checkpoint carries `W` and nothing of the index, and `W` means
+something only against the index it was built for.  So `save_state` writes
+the SHA-256 of the pattern (`mapping.structure_digest()`: layout, sizes,
+index and row counts) beside the weights, and `load_state` -- and `POST
+/checkpoint/load` -- refuses weights whose digest is not the live
+mapping's, before anything is loaded: weights saved for other points or
+another index of the same shape, for the same index in the other layout,
+or for a dense mapping (and a dense mapping refuses a sparse one's).  The
+digest is judged whatever the weights are called -- a stock sparse
+mapping's weights are `W` and a stock dense one's are `H`, and neither
+checkpoint loads into the other -- and a checkpoint that carries mapping
+weights this graph has no leaf for (another leaf name on the edge, or an
+edge that has no mapping weights here) is refused too: a saved mapping
+weight is installed or the load fails, never dropped.  A
+mapping class of your own that applies its weights through a structure
+gets the same check by defining `structure_digest()`.
+
+### The conservative nearest neighbour: two forms
+
+The conservative nearest neighbour is the transpose of the reverse
+selection: each source adds its value to the target nearest to it.  A
+target's row is as long as the number of sources that share it, and
+`transpose=` chooses how those rows are held:
+
+* `transpose="gather"` (the default): for each target, the sources that
+  add to it, **padded to the longest row**, summed along the row.  Each
+  output is reduced on its own, so one compiled program gives one result
+  -- measured on the CPU and on a GPU.  The cost is the padding: a
+  pattern in which many sources share one target has one long row and
+  pads every other row to it.  Past `MAX_SPARSE_STRUCTURE_BYTES` the
+  builder refuses, before allocating, with an error that names
+  `transpose="scatter"`.
+* `transpose="scatter"`: one entry **per source**, applied as a
+  scatter-add.  Compact whatever the pattern.  Measured on the CPU it is
+  the in-order sum, one result on every call.  Measured on a GPU the same
+  program gave **a different result on every run** (twenty results in
+  twenty runs, hundreds to tens of thousands of ulp apart).  Choose it
+  when the gather form is refused and run-to-run reproducibility on a GPU
+  is not needed.
+
+That is what was measured (jax / jaxlib 0.11.0, 2026-10-05) and nothing
+more is claimed: not bit-equality between the CPU and a GPU for either
+form, and not GPU behaviour on another driver or jaxlib.  The GPU
+statements are one attended measurement that no test runs (GPU is not a
+verified configuration, MADD-ANO-001); the CPU statements are tests, and
+held on the three jaxlib versions they were run on (0.10.2, 0.11.0,
+0.11.2).  The choice is
+recorded in the spec, so a reloaded mapping is applied the way it was
+built.  The two forms hold the same matrix, and agree with one another
+and with the dense conservative kind to rounding.
+
+**The order of the sum and a {term}`coupling <Coupling>` report's float floor**
+(MADD-ANO-257, open).  "To rounding" is `(k + 2) eps` of a row of `k`
+entries, and an in-order sum of `k` terms of one sign reaches a good
+part of it where the terms are nearly equal: the rounding is then
+systematic and grows like `k`.  The float floor of
+`coupling_diagnostics()` counts a fixed number of `eps` per evaluation
+and does not count a row's own sum.  So a group stalled at its float
+floor behind a long row is further from its fixed point than
+`spectral_error_bound` says.  Measured on a pair of relays (one value fed
+by a row of `k` values that each read it back; gains 0.9 and 0.99, both
+schedules, uniform, ramp and random fields; the smallest bound over the
+true distance among the reports with `spectral_usable` set; the same
+digits on jax 0.10.2, 0.11.0 and 0.11.2):
+
+| row `k`, scatter layout | 3 | 10 | 30 | 100 | 300 | 1000 | 3000 | 1e4 | 3e4 |
+|---|---|---|---|---|---|---|---|---|---|
+| float32, `"interface"` | 6.2 | 3.9 | 2.07 | 0.68 | 0.24 | 0.069 | 0.023 | 0.0068 | 0.0022 |
+| float32, `"mixed"` | 6.3 | 4.9 | 2.09 | 0.66 | 0.22 | 0.069 | 0.023 | 0.0067 | 0.0022 |
+| float64 floor, `"interface"` | 8.0 | 5.0 | 2.08 | 0.63 | 0.22 | 0.068 | 0.023 | 0.0065 | 0.0022 |
+
+The gather layout and the dense kinds carry the same rounding: {term}`XLA`
+reduces a row in an order of its own, which depends on the jax version,
+the dtype and the shape.  Rows of up to 100 entries held by 2.2x or more
+in both forms (one, three and sixteen rows; float32; the three versions
+alike), and one row behind a uniform field held by 1.8x at 300 entries,
+1.2x at 1000 and 1.09x at 3000, and by 3.7x or more at 1e4 and 3e4; but
+jax 0.10.2 sums the gather layout's float32 rows of 1e4 entries and
+more in order (0.0068 and 0.0022, as the scatter layout), and a dense
+matrix of three rows of 3000 entries read 0.18 of the distance in
+float32 on the three versions (0.09 at the float64 floor), all with the
+flags set.
+
+In 0.4.0 the report therefore withdraws `spectral_usable` and
+`gradient_bound_usable`, with a reason, where an internal edge carries a
+static mapping of any kind with a row longer than 10 entries and the
+residual is not above the float floor times the row's length; the
+numbers are reported as computed, and the floor itself is corrected in
+0.5.0 (a row's own `(k - 1) / 2` `eps`, which holds for any order of the
+sum, counted with the evaluations).  A row is the entries one delivered
+value adds up, whatever the weights are (they are a parameter a step may
+be handed): the valid slots of a sparse row in either layout, and the
+**width** of a dense matrix, so a dense selection matrix is counted at
+its width although its sums are exact.  The limit is the scatter
+layout's (30 entries hold by 2.07x, 100 do not hold): which rows the
+other forms sum in order is XLA's to choose, so they are not given a
+limit of their own.  A wider dtype at the same tolerance takes the
+report off its float floor in every kind: the scatter pair in float64 at
+`rtol=1e-7` kept its flags on a bound at 0.9995 of the distance or more.
+
+A geometry-dependent mapping is not counted.  A `multilinear_grid`
+gather adds up at most `2^d` entries; its conservative form is a
+scatter-add with as many entries on a grid node as there are markers in
+its support, a number decided in the step: with 8, 300 and 3000 markers
+in one cell behind a uniform field the bound read 13.8, 3.8 and 1.3
+times the distance under `"mixed"`.  That group solves the markers'
+positions and has no usable flag in 0.4.0 (MADD-ANO-252); a group whose
+positions are constants of the pass keeps its flags behind the same
+uncounted rows, which was not measured.
+
+The reverse-mode derivative of a gather with respect to the *field* is
+itself a scatter-add.  On a GPU a gradient with respect to the source
+field through either form may therefore differ in its last bits between
+runs even where the forward result does not.
+
+### What "equal to the dense mapping" means
+
+The sparse and the dense mapping are two float evaluations of the same
+sums.  Each output entry is within `(k + 2) · eps · Σ|w|·|f|` of the exact
+sum over its row's `k` entries (`eps` of the result dtype), so the two
+agree to rounding, entry by entry -- not bit for bit.  The row sum is
+deterministic for one compiled program; like `H @ field`, it is not
+bit-stable between a `jax.vmap` of a step and the step alone.
+
+With one entry per row the two are the same number when the mapping is
+applied on its own.  Inside a compiled step not even that carries over,
+whatever the weights: a graph with sparse edges and the same graph with
+dense ones are two programs, and the compiler evaluates the arithmetic
+around a mapping differently in each (it may fuse a product with an
+addition next to it -- an additive edge, a transform -- in one and not in
+the other).  A graph with sparse edges and its dense twin therefore step
+to within rounding of one another, not to the same bits.  Under a
+constant iterator the two were at most 7.5 `eps` of the largest state
+entry apart, over every structure, layout and domain the coupling
+topology harness compares them in; the harness allows 256.  The harness
+runs over sparse edges as it does over dense ones: a graph with sparse
+edges satisfies the same monolithic reference the dense graph is held to,
+and its gradients are the dense graph's.  In bfloat16 and float16, where
+a rounding is a percent of the state, the twin is not compared; a renamed
+or reordered sparse graph returns the original's states bit for bit.
+
+One difference is deliberate.  A row reads only its own entries, so an
+infinity or a NaN in the source field reaches only the targets that list
+it; `H @ field` multiplies it by the zeros of every other row and returns
+NaN everywhere.
+
+### Limits
+
+| what | bound |
+|------|-------|
+| each referenced array | `MAX_ASSET_BYTES` (256 MiB), read from the file's header before anything is allocated -- the reference resolver's, as for every kind |
+| the row structure (index plus weights) | `sparse_mapping.MAX_SPARSE_STRUCTURE_BYTES`, by default the same 256 MiB: 33.5 million float32 slots, say 4.2 million targets with eight entries each.  Checked from the row counts **before** the padded arrays are allocated; the refusal names the row count, the longest and the median row and the number of entries |
+| a nearest-neighbour search over a degenerate point set | `TIE_CANDIDATES_PER_POINT` (8) candidates per searched point plus `TIE_CANDIDATES_FLOOR` (a million) in total.  Very many points at one distance from very many others (points on a sphere around the ones they are searched from) are refused, not resolved.  The search runs 4096 points at a time and counts a chunk's candidates before it collects any, so the refusal comes after the chunk that passes the bound, not after every point has been measured against every other |
+| index values | `0 <= index < n_source <= 2**31 - 1` (the index is `int32`) |
+
+Each refusal is a `SparseMappingLimitError`, a `ValueError`; from
+`from_dict` or `load_graph_from_usd` it is a `MappingRebuildError` naming
+the edge.  `n_source` sizes nothing, so a config cannot allocate through
+it.  In a process capped at 6 GiB of address space, a pattern whose padded
+gather would need 160 GB, a tie set of 9e8 candidates and a projection row
+of five million slots among fifty thousand rows are each a
+`SparseMappingLimitError`, not a `MemoryError`.  scipy, which the nearest-neighbour builder imports for its k-d tree,
+is a declared dependency; it is imported by that builder, not by
+`import maddening`.
+
+### The scale it has been measured at
+
+One process, capped at 8 GiB of address space, jax 0.11.0 on three CPU
+cores of a shared machine (2026-10-05); the times are indicative.
+
+| a million points (or cells, or rows) a side | build | first call (compile and apply) | a later call |
+|---|---|---|---|
+| nearest neighbour in 3-D, consistent (`k = 1`) | 5.6 s | 0.06 s | 2 ms |
+| nearest neighbour, conservative, gather (`k = 11`) | 5.4 s | 1.0 s | 44 ms |
+| nearest neighbour, conservative, scatter | 5.0 s | 0.06 s | 4 ms |
+| projection onto 700 000 cells (`k = 23`) | 0.34 s | | |
+| your own rows, `k = 8` | 0.10 s | 0.6 s | 25 ms |
+
+The whole run peaked at 1.4 GiB of resident memory with all five mappings
+alive.  The index is embedded in every compiled program that applies the
+mapping (the step, each cached scan length, a sweep): four bytes per slot
+per program, 32 MB at a million rows of eight.  The same script runs at a
+hundred thousand points on every push
+(`tests/core/test_sparse_mapping_builders.py`).
+
+Not in 0.4.0: a sparse mapping on a moving interface (`geom` is ignored),
+{term}`sharded <Sharded>` graphs, and sparse RBF kinds.
+
+## Geometry-dependent mappings
+
+*Experimental in 0.4.0: `add_edge(..., geometry=...)`, the registry flag
+`needs_geometry` and everything in `maddening.core.coupling.grid_mapping`
+may change in a minor release.  The user guide page
+[Geometry-dependent mappings](../../user_guide/geometry_dependent_mappings.md)
+has a runnable example, the refusals and the limits of this release.*
+
+Every mapping above is **static**: its operator is fixed when the graph is
+built.  A **geometry-dependent** mapping also reads a *geometry*, a state
+field of the edge's own source or target node that moves during the run
+(marker positions, a deforming interface), and builds its operator from it
+at every call:
+
+```
+value_at_target = mapping.apply(value_at_source, weights, geom)
+```
+
+The edge names the field, `add_edge(..., mapping=m, geometry=(anchor,
+field))` with `anchor` `"source"` or `"target"`, and the graph resolves it
+as it resolves the value.  The geometry is ordinary node state: it is
+integrated by its node, batched by `run_sweep`, differentiated by
+`jax.grad`, and saved by a checkpoint.  The mapping declares
+`needs_geometry = True` and a static `geometry_shape` (see the `Mapping`
+protocol's optional attributes), and must be a {term}`pure function <Pure function>` of its three
+arguments.
+
+### The time level a geometry is read at
+
+Two rules cover every call site.
+
+* **Source-anchored** (`geometry=("source", g)`): the geometry is read
+  exactly as an ordinary edge `source.g -> target` would be read there,
+  from the same state the edge's value is read from.  Where the value is
+  interpolated between two snapshots (a {term}`sub-cycled <Sub-cycled>` member of a coupling
+  group), the geometry is interpolated between the same two snapshots
+  with the same weight, componentwise, and the mapping is applied to the
+  interpolated value at the interpolated geometry.  Those two snapshots
+  are two *iterates* of the same end-of-step value -- the pass's incoming
+  iterate and the in-pass state -- not the source at two times: see the
+  note under the table.
+* **Target-anchored** (`geometry=("target", g)`): the geometry is field
+  `g` of the `state` argument of the hook the {term}`boundary inputs <Boundary inputs>` are being
+  resolved for, `update` or `compute_boundary_fluxes`.
+
+| Call site | Value | Source-anchored geometry | Target-anchored geometry |
+|---|---|---|---|
+| Plain step, forward edge | the source's value from this step | the source's `g` from this step | the target's pre-step `g` (the state `update` receives) |
+| Plain step, back edge | the previous step | the source's `g` of the previous step | the target's pre-step `g` |
+| Plain step, the target's flux hook | as for its `update` | as for its `update` | the target's **post-update** `g`: the edges are resolved again for the hook |
+| {term}`Multi-rate`, slow source | the state the source holds between its steps | the same held state | the target's current state |
+| Multi-rate, a slow node's flux hook | as for its `update` at this base step | as for its `update` | the `g` the node holds after this base step: post-update when it fires, the held `g` when it does not |
+| Group member's `update`, Gauss-Seidel | the in-pass state | the in-pass `g` | the member's pre-step `g`, at every pass |
+| Group member's `update`, {term}`Jacobi` | the incoming iterate | the incoming iterate's `g` | the member's pre-step `g` |
+| Group member's flux, seeded before a pass | the incoming iterate | the incoming iterate's `g` | the incoming iterate's `g` of the member |
+| Group member's flux after its update | the in-pass state | the in-pass `g` | the member's in-pass, post-update `g` |
+| Sub-cycled member, `boundary_interpolation="linear"`, sub-step `k` of `d` | `v_prev + a (v_cur - v_prev)`, `a = (k + 1) / d`: `v_prev` the pass's incoming iterate, `v_cur` the in-pass state | `g_prev + a (g_cur - g_prev)` of the same two iterates, then the mapping | the member's state before this sub-step |
+| Sub-cycled member, `"constant"` | the in-pass state (an end-of-step estimate) | the in-pass `g` | the member's state before this sub-step |
+| An edge from outside the group | not interpolated | read with the value | by the hook, as above |
+| `resolve_boundary_inputs` (inspection) | the current state | the current state's `g` | the node's current `g` |
+
+A target-anchored geometry is therefore the same at every pass of a
+coupling solve, because members integrate from the pre-step state; a
+source-anchored one is part of the iterate.
+
+**What "linear" interpolates between.**  Both ends are estimates of the
+source's *end*-of-step value: the iterate the pass was handed and the
+state the pass has built so far.  It is not an interpolation in time
+across the sub-steps (MADD-ANO-027), so "linear" and "constant" read the
+same value and the same geometry wherever the two iterates coincide:
+under `iteration_mode="jacobi"`, for a source scheduled after the
+sub-cycled member, and, to the solve's tolerance, at a converged solve
+(a sub-cycled float64 pair with the source scheduled first: the two modes
+1.2e-4 apart, relative, at `tolerance=1e-4` and 1.7e-13 apart at
+`tolerance=1e-13`; with the source scheduled second, identical).
+See `boundary_interpolation` in the
+[coupling guide](../../developer_guide/coupling_algorithm_guide.md).
+
+**A slow node's flux on a multi-rate graph.**  A node whose rate divider
+is above one holds its state between the base steps it fires on, and its
+flux hook is called on every base step with the state the node holds
+after that step and the boundary inputs resolved at that step.  A reader
+of the flux therefore sees the flux of the held state, as a reader of a
+state field sees the held state, and a target-anchored geometry of that
+node is the held `g` on the base steps the node does not fire on.  (The
+hook used to be called on the result of `update` before the step decided
+whether to keep it: MADD-ANO-235.)
+
+The interpolation of a geometry is **componentwise**.  A geometry whose
+components are not affine coordinates (a unit quaternion, an angle across
+its wrap) should use `boundary_interpolation="constant"`.
+
+### `multilinear_grid`: gather and scatter on a uniform grid
+
+The reference kind, `multilinear_grid_mapping(origin, spacing, shape, *,
+n_points, mode, layout="flat")`, transfers between a uniform grid of one
+to three axes and `n_points` moving points whose positions, shape
+`(n_points, d)`, are the geometry.
+
+**Grid.**  The grid is the lattice of sample points: value
+$(i_0, \dots, i_{d-1})$ sits at $x_a = o_a + i_a h_a$,
+$0 \le i_a \le n_a - 1$.  The flat index is C order,
+$I = \sum_a s_a i_a$ with strides $s_a = \prod_{b > a} n_b$.
+
+**Index arithmetic.**  For point $p$ and axis $a$, in the geometry's
+dtype:
+
+$$
+u = \frac{x_{p,a} - o_a}{h_a}, \qquad
+\bar u = \min(\max(u, 0),\, n_a - 1), \qquad
+i^0 = \min(\lfloor \bar u \rfloor,\, n_a - 2), \qquad
+t = \bar u - i^0, \qquad
+i^1 = \min(i^0 + 1,\, n_a - 1).
+$$
+
+$u$ is computed in a static power-of-two frame of $h_a$ (the position, the
+origin and the spacing are multiplied by the same power of two, which
+changes no bit of the quotient and keeps every intermediate a normal
+number), so a spacing far below one is resolved.  On an axis with a single
+point $i^0 = i^1 = 0$ and $t = 0$.
+
+**Stencil and weights.**  Each point reads the $2^d$ corners
+$c \in \{0, 1\}^d$ of its cell:
+
+$$
+I_{p,c} = \sum_a s_a\, i^{c_a}_{p,a}, \qquad
+W_{p,c} = \prod_a \bigl(c_a\, t_{p,a} + (1 - c_a)(1 - t_{p,a})\bigr),
+\qquad \sum_c W_{p,c} = 1 .
+$$
+
+**Gather and scatter are one operator and its transpose.**
+
+$$
+\text{consistent (gather):}\quad y_p = \sum_c W_{p,c}\, f_{I_{p,c}},
+\qquad
+\text{conservative (scatter):}\quad g_j = \sum_{p,c\,:\,I_{p,c} = j} W_{p,c}\, y_p .
+$$
+
+Gather reproduces any field that is multilinear in the coordinates, at
+every point inside the hull of the lattice.  Scatter preserves the plain
+sum, $\sum_j g_j = \sum_p y_p$, to the rounding of the geometry's dtype:
+it deposits *amounts*, and the weights of a point, computed in the
+geometry's dtype, sum to one only to that rounding (a float64 field
+scattered at a float32 geometry: 1.5e-11 relative over 20,000 points,
+where a float64 geometry gives 1e-16).  It divides by no
+cell volume and applies no quadrature weight; turning the result into a
+density belongs to a node or to the edge's `transform`.  `apply_T` of one
+mode is `apply` of the other at the same positions.
+
+**Outside the grid.**  A point outside the hull is clamped to it,
+coordinate by coordinate ($\bar u$ above): gather extrapolates constantly,
+scatter deposits on the boundary, and the weights still sum to one.  A
+non-finite coordinate is not clamped: every weight of that point is NaN,
+on the $2^d$ corners of the grid's first cell (index 0 or 1 on each axis;
+index 0 alone on an axis of one point), so gather returns NaN for that
+point only and scatter puts NaN in those corner cells and no other.
+
+**Derivative with respect to a position.**  Inside a cell,
+$\partial y_p / \partial x_{p,a}$ is the slope of the multilinear
+interpolant along axis $a$, $\tfrac{1}{h_a}\sum_c \pm W^{(a)}_{p,c} f_{I_{p,c}}$
+with $W^{(a)}$ the product over the other axes.  The interpolant has a
+kink at every lattice plane; there the derivative is that of the cell
+above the plane (of the last cell at the top of the hull), so on the two
+faces of the hull it is the interior one-sided derivative, and strictly
+outside the hull it is zero.
+
+**Precision.**  Indices and weights are computed in the geometry's dtype
+and the weights are cast to the field's dtype, so the result has the
+field's dtype: a float32 field with a float64 geometry gives a float32
+input computed from float64 positions.  A position $x$ resolves
+$\varepsilon |x|$, so on axis $a$ a point is located to
+
+$$
+\varepsilon\, \frac{\max(|o_a|,\, |o_a + (n_a - 1) h_a|)}{h_a}
+$$
+
+cells.  When that is 1/16 of a cell or more for the dtype the geometry
+field has, `compile()` refuses the graph; at 1/1024 or more, `validate()`
+reports a warning.  Hold the geometry in float64 or move the origin of the
+coordinates closer to the grid.  That figure is the grid's own, at its
+farther end from the coordinates' zero.  A point's own figure is its
+**lattice coordinate**: the stencil forms $(x - o_a)/h_a$ in the
+geometry's dtype, so its weights on axis $a$ are resolved to
+$\varepsilon\,|x - o_a|/h_a$ of a cell, the point's distance from the
+grid's first point, whatever $|x|$ is.  On a grid of 16001 points
+centred on the coordinates' zero a float32 marker beside that zero has
+weights resolved to $\varepsilon \cdot 8000 = 9.5 \times 10^{-4}$ of a
+cell, which is the grid's figure and under this warning.  The float
+floor of the interface norm counts that per point (below), and it is
+the tolerance asked long before 1/1024 of a cell.  The refusal is not
+only `compile()`'s: a
+geometry compiled as float64 and later written as float32
+(`set_node_state` is not a recompile) changes the dtype of the program,
+which is then traced again, and the same rule is asked at that trace --
+`step()` and the run methods raise `ValueError` naming the edge instead
+of sampling a grid the positions cannot resolve; the kernel asks it of a
+direct `apply` call as well.  (So is the float32-or-float64 rule, with a
+`TypeError`.)
+
+**Determinism.**  Gather is a fixed left fold over the $2^d$ corners.
+Scatter is a scatter-add with repeated indices: on CPU it accumulates in
+update order (points, then corners), so the result is a deterministic
+function of the inputs including the order of the points, and a
+permutation of the points changes it by rounding only.  On an accelerator
+a cell that receives several contributions may differ by rounding from
+run to run.
+
+### What reads a geometry in 0.4.0, and what does not
+
+The step reads it: the plain step, a coupling group's passes under every
+solver and acceleration, sub-cycled members, multi-rate graphs, and the
+gradients through all of them.  IQN's automatic interface set includes a
+source-anchored geometry that is internal to the group, since it is part
+of the iterate.
+
+**The interface norm reads it** for the `multilinear_grid` kind, in a
+group that does not sub-cycle (next section).
+
+The **diagnostics read it in one case**: a coupling group that does not
+sub-cycle, under `convergence_norm="l2"` or `"mixed"`, every
+geometry-dependent mapping of whose pass is a `multilinear_grid`.  The
+spectral estimate and the gradient bound are built from Jacobian-vector
+products of the group's pass, taken with respect to the members' whole
+floating state and to the constants of the pass.  A source-anchored
+geometry inside the group is part of that state and is read by the pass
+from the iterate, so the products carry the pass's dependence on the
+iterate through the positions; a target-anchored geometry is the
+member's pre-step state, a constant of the pass that the gradient bound
+probes like any other.  Such a group reports every bound and flag as any
+other group does.
+
+With `diagnostics=True` the step checks that claim on itself.  It moves
+every position the pass reads by `sqrt(eps)` of the lattice spacing
+towards the middle of its cell (no point crosses a lattice plane, so the
+stencil is one polynomial along the step), once where the positions are
+in the iterate and once where they are constants of the pass, and
+compares the product along that step with the difference of two
+evaluations of the pass, field by field:
+
+$$
+\mathrm{gap} = \max_f
+\frac{\lVert D\,(F(x+t) - F(x) - J t)\rVert_f}
+     {\max(\lVert D\,(F(x+t) - F(x))\rVert_f,\ \lVert D\,J t\rVert_f) + 32\,\lVert \mathrm{res}\rVert_f}
+$$
+
+with $D$ the norm's weights and $\mathrm{res}$ the residual's float
+resolution.  A product that does not see the geometry reads 1 on every
+field the positions move by much more than 32 resolutions, and less on a
+field they move by about that (the allowance is in the denominator: a
+term that moves a field by $G$ reads $G / (G + 32\,\mathrm{res})$, under
+the tolerance below about 11 resolutions).  An honest pass reads the finite
+difference's own error.  Measured on jaxlib 0.10.2, 0.11.0 and 0.11.2:
+
+| the pass | draws | gap |
+|---|---|---|
+| honest, six cells of the geometry search | 350 | float32: median 6e-4, at most 5.7e-3; float64: at most 4.3e-6 |
+| honest, the search's hunts away from a lattice plane | 3,200 | at most 9.5e-3 |
+| every read of a geometry under `stop_gradient`, the six cells | 353 | float32: 0.305 to 0.98; float64: 1.0 |
+| the source-anchored reads under `stop_gradient`, a deposit that moves the grid's field by nine resolutions | 1 | 0.22, under the tolerance: the radius reported was 0.003 against 0.025 |
+| honest float32, a position built and read in one Gauss-Seidel sweep, placed 1e-6 to 1e-2 of a spacing from a lattice plane (1489 within 2e-5) | 2829 | 47 over 0.05, 13 over 0.1, 2 over 0.2, one 0.59 (MADD-ANO-246) |
+| honest, an audit's hunts with the fixed point at every distance from a lattice plane, float32 and float64 | 65,714 | 180 withheld, each with a position the pass reads within the check's step of a plane (`sqrt(eps)` of a spacing: up to 2.9e-4 in float32, 6.8e-9 in float64); 45 float32, 135 float64, two under Jacobi (MADD-ANO-246) |
+| honest float32, Gauss-Seidel behind a gather of a field alternating $\pm A$ around a sample of order one | 126 | under 0.09 up to $A = 1020$; 0.25 to 0.75 beyond, but 0.14 at $A$ = 2200 to 2700 (MADD-ANO-212) |
+
+The separation is therefore measured and not clean.  The step of the
+positions in the iterate moves a position that another member builds in
+the same sweep through that member's mapped input, in a direction the
+step does not choose; beside a lattice plane it crosses, and the
+difference straddles two polynomials.  A gather that cancels digits
+hands a small field the rounding of a large one, which the allowance,
+taken in the small field's resolution, does not cover.  At a tolerance
+of 0.05 the check would catch the weak deposit and withhold 7 to 9 of
+the 4,450 honest examples of the hunts, all beside a plane, where 0.25
+withholds none or one; the reason of a withheld report names both
+readings of a gap.  The step is `sqrt(eps)` of the
+spacing at the coarsest floating dtype the pass evaluates in (a step
+sized for float64 positions is below what float32 fields resolve), and a
+point on the last lattice point of an axis steps inwards, as one on the
+first does: outside the hull the kernel clamps.  A member's pre-step
+position steps towards the middle of the cell of whichever of it and the
+position the pass builds from it is nearer to a lattice plane (a
+Gauss-Seidel sweep reads the second after the holder's update).  Where the gap is above
+`GEOMETRY_GAP_TOLERANCE` (0.25) or cannot be evaluated, the report
+withholds the bounds, and says which of the two it was.  A gap above the
+tolerance is reported as either a derivative that is not the value's or
+a finite difference that could not be formed: the check does not tell
+those apart.  The check costs
+one product and one evaluation of the pass per direction, and exists
+only in the step of such a group with diagnostics on.
+
+**Across a lattice plane.**  The stencil is piecewise polynomial in the
+positions, so the pass $F$ is piecewise smooth in the iterate wherever it
+reads positions from the iterate, and its Jacobian jumps where one of
+them crosses a lattice plane (the faces of the hull included).  Every
+number of the report is the linearisation at the returned iterate $x_k$:
+it describes the polynomial $p$ that $F$ is in the lattice cells of
+$x_k$'s positions.  `spectral_error_bound` is the distance to the fixed
+point $x_p$ of $p$, and $x_p$ is a fixed point of $F$ only where it lies
+in those cells.  Past a plane $F$ is another polynomial, with another
+fixed point or none nearby, and the bound is then to a point the pass
+does not have.
+
+**The rule of 0.4.0.**  A group whose pass reads a position from the
+iterate, or builds one and reads it in the same pass (a member's
+source-anchored geometry; the target-anchored geometry of a member that
+computes fluxes: `InterfacePlan.geometry_iterate_reads`), has **neither
+flag**: `spectral_usable` and `gradient_bound_usable` are `False` on
+every step, whatever its numbers read, the numbers are kept as computed,
+and `not_usable_reason` names the positions and says so.  A group whose
+positions are all constants of the pass (a target-anchored geometry read
+by `update`, positions held by a node outside the group) has a smooth
+group's flags: no plane can come between its iterate and its fixed
+point.  One function decides (`_group_layout._geometry_flags`), from what
+`compile()` committed; it sets a flag for constant positions only where
+the step's two stored numbers below both read $\infty$, so a state that
+this build's step did not write sets none.  The two numbers are defined
+next, and then why no flag stands on them.
+
+**The margin of the Newton-Kantorovich ball (a stored number,
+`geometry_plane_margin`).**  The step stores,
+with `diagnostics=True` and $\eta = \lVert D\delta \rVert_2$ the Newton
+step in the group's norm,
+
+$$
+\mathrm{margin} = \min_j \frac{D_j\,(d_j - w_j)_+}{D_j\lvert\delta_j\rvert + \eta + 2f} ,
+$$
+
+over the entries $j$ of every position field the pass reads from the
+iterate or from the state the same pass has built: $d_j$ the distance
+from $x_{k,j}$ to the nearest lattice plane of the mapping that reads it
+(to the face it is clamped to, outside the hull), $w_j$ eight float
+resolutions of the position (below), $f$ the residual's float resolution
+through the resolvent, $D_j$ the **norm's** weight (zero for a field in
+the norm's dead band, which then counts as on a plane), and $d_j$ taken
+as zero where the position the pass *builds* at $x_k$ or at the Newton
+point $x_N = x_k + \delta$ (what a Gauss-Seidel sweep reads after its
+holder's update) is not strictly inside the cell of $x_{k,j}$.  A pass
+that reads no position from the iterate has $\mathrm{margin} = \infty$.
+What a margin over one says, under five assumptions:
+
+1. *the kernel*: between two positions with no lattice plane and no face
+   of the hull between them the mapping is one polynomial of the
+   positions;
+2. *the members*: away from those planes the pass is smooth (no member's
+   `update` has a kink of its own inside the ball);
+3. *the smooth theory*: for the polynomial piece $p$ that the pass is at
+   $x_k$, taken as a map of the whole space, Newton-Kantorovich holds
+   with some $h \le 1/2$, so $p$ has a fixed point $x_p$ with
+   $\lVert D(x_p - x_N) \rVert_2 \le t^* - \eta \le \eta$, whatever $h$ is
+   under one half: the radius does not use the measured value.  That the
+   true $h$ is under one half is assumed, not proved (the step measures
+   it on one secant; see the limit below);
+4. *the floats*: the measured residual is the exact pass's to within its
+   float resolution, which the resolvent carries into the Newton point
+   and into $\eta$ ($2f$), and a position within eight float resolutions
+   of a plane is on it;
+5. *the norm*: $\lVert Dv \rVert_2 \le R$ bounds entry $j$ by $R/D_j$
+   where $D_j > 0$, and an entry the norm does not read ($D_j = 0$)
+   counts as on a plane.
+
+Where $\mathrm{margin} > 1$, entry $j$ of $x_N$ is $\lvert\delta_j\rvert$
+from $x_{k,j}$ and entry $j$ of $x_p$ within $(\eta + 2f)/D_j$ of that, so
+every position of $x_N$ and of $x_p$ is in the cell $x_k$'s is in; the
+positions the pass builds at $x_k$ and at $x_N$ are in it by the two
+evaluations, and at $x_p$ they are $x_p$'s own.  The pass is therefore $p$
+at the three points and **$x_p$ is a fixed point of the pass**, within
+$t^* \le 2\eta$ of $x_k$: what `spectral_error_bound` is a bound to.
+Both Jacobians the gradient bound takes and the one it bounds are $p$'s,
+so that bound is the smooth one too.  No point is sampled to speak for a
+plane it is not at.
+
+*Why a check at two points is not enough.*  The gradient bound's
+Newton-Kantorovich check takes the Jacobian at $x_k$ and at $x_N$, and
+two Jacobians say nothing of a plane neither point is beyond.  Inside a
+cell the pass is not affine (the kernel's own $t_x t_y$ term; a scatter
+times a field), so the Newton step misses $x_p$ at second order.  With
+$x_p$ a distance $s$ past a plane and $s$ under that miss, $x_k$ and
+$x_N$ are in one cell, $h$ reads near zero, and the pass has no fixed
+point in that cell.  The flags stood there: on a gradient bound 15 to
+70,000 times under the error, and, where the next cell expands and the
+pass's fixed point is two cells on, on a `spectral_error_bound` 17 to
+1,294 times under the distance (MADD-ANO-252).
+
+**Why no flag stands on the margin in 0.4.0.**  The argument needs
+assumption 3, the Newton-Kantorovich condition for the smooth piece $p$,
+and the step does not prove it: it measures $h$ on one secant, and the
+radius of the ball does not use the measured value.  An audit built a
+cell whose polynomial has **no fixed point**: one marker on a
+one-dimensional lattice, affine members, the only nonlinearity the
+scatter's own, the pass a saddle-node with a gap of $10^{-5}$ to
+$10^{-8}$.  The iterate creeps towards the bottleneck, the solve reports
+`converged`, and the pass's only fixed point is one cell on.  The step's
+own check had failed there (`gradient_relative_error_bound` was `inf`),
+the margin read 2.8 to 186 and the bound was under the limit below, so
+both rules kept `spectral_usable`, on a bound 34 to 1,874 times under
+the distance.  It was the third audit in a row to find a flag set beside
+a wrong number near a lattice plane, each on the rule that closed the
+one before, so 0.4.0 certifies nothing for a group that solves
+positions, and a rule that does is left to a later release (it has to
+establish assumption 3, not take it).  The margin stays a stored number:
+it equals its definition (in float64; within 5% in float32 for a
+position nine to three hundred float resolutions from a plane), a marker
+*on* a lattice plane or a hull face has $\mathrm{margin} = 0$ on every
+step, and so has a position field of zero weight in the norm.
+
+**The limit (a stored number, `geometry_plane_limit`).**  The step also
+stores
+
+$$
+\mathrm{limit} = \frac{u}{2}\,\min_j D_j\, d_j
+$$
+
+over the same entries (zero where the pass itself moves the position
+further than $d_j$), here with $D_j$ the **spectrum's** weight (a field
+in the norm's dead band keeps its own magnitude's) and $u$ the norm's
+constant (1 under `"l2"`, $1/(\mathrm{rtol}\sqrt{n})$ under `"mixed"`),
+so that the limit is in the units of `spectral_error_bound`.  Where the
+bound $B > \mathrm{limit}$ a plane is within $2B$ of a position.  As a
+rule for the flags it came before the margin: alone (a bound 0.13 times
+the distance, MADD-ANO-242), then with the gradient bound's
+Newton-Kantorovich check required where $B > \mathrm{limit}$, then
+beside the margin.  It does not put the ball clear of the planes,
+because $B$ is not proved to be at least $\eta$ (the Krylov compression
+behind it can fall short), and with the plane beyond $2B$ it does not
+look at a failed check, which is where the case above sat.  A position
+that is a constant of the pass is in neither minimum, and both numbers
+read $\infty$ where every position is one.
+
+**Every cause is reported.**  A group that solves positions has one
+reason, the rule's.  Where a flag of a group whose positions are
+constants of the pass is `False` and the step computed the estimate,
+`not_usable_reason` gives each cause: the float floor with members that
+do not declare their evaluations, an estimate that did not settle (more
+independent interface scalars than its eight Krylov steps: no flag is
+set for such a group at all, with or without a geometry), a bound that
+is not finite, a gradient bound that was not computed (NaN) told from
+one that did not certify (`inf`), and a record of the pass's positions
+that this build's step did not write.  None of them names a lattice
+plane.
+
+**On a plane.**  A position within eight float resolutions of a lattice
+plane has distance zero in both numbers: `eps` of its dtype times the
+largest coordinate of the lattice's axis, or the position's own
+magnitude (or its offset's from the lattice origin) where that is
+larger.  The kernel decides the cell from the rounded quotient of that
+offset by the spacing, and a position a member builds is the rounding of
+the terms it was built from: one moved to 2e-9 from a face at zero, from
+0.1, is in float32 the rounding of a sum of order 0.1, and the float64
+reference has it 1e-8 on the other side.  So the scale is the lattice's.
+The margin is zero there: `rho_spectral` is
+then the radius of the cell the float pass evaluated, which may not be
+exact arithmetic's (MADD-ANO-239), and it carries no flag.  The
+Newton-Kantorovich check's own outcome is rounding's on a plane.  A
+marker at rest at coordinate 0.0, the lower face of a lattice whose
+origin is 0.0, has a Newton step of about 1e-20 of either sign in its
+position (rounding of the resolvent, which nothing absorbs at exactly
+zero); on the steps where it is negative the Newton point is outside the
+hull, in the clamped kernel, and `gradient_relative_error_bound` reads
+`inf` (59 of 60 such steps measured, none of 53 with the other sign).
+The flags and the reason of a group that solves positions do not follow
+that reading: the report of such a state is the same on every step.
+
+**Everywhere else they do not.**  A coupling group whose pass resolves a
+geometry-dependent mapping (on an edge into a member, from inside the
+group or from outside) of another kind, or that sub-cycles, or that uses
+the interface norm, or whose step failed the check above, reports its
+solve, `iterations`, `total_iterations`, `residual` and `converged`, and
+withholds everything built on the float floor or on the contraction
+estimates: the bounds and estimates are NaN (`gradient_error_estimate`
+is `inf`), `ratio_usable`, `spectral_usable`, `gradient_bound_usable`
+and `precision_limited` are `False`, and the entry has a
+`not_usable_reason` string that says so.  One of these keeps the float
+floor itself: a group withheld on account of the interface norm reports
+`precision_limited` by the rule of every group and the floor it is
+taken from, `residual_precision_floor` (below).
+`convergence_norm="interface"` is refused at `compile()` for a group with
+a geometry-dependent mapping on an internal edge where the mapping is of
+another kind than `multilinear_grid` (a position is measured in the
+kind's own length scale, and only that kind declares one) or the group
+sub-cycles (the reading is one value per pass, which is not what a member
+that takes several sub-steps per pass was handed); use `"l2"` or
+`"mixed"`.  The adaptive steppers and edges with a sharded end are
+refused too.
+
+### What the interface norm reads on a geometry edge
+
+The compact-side rule of a static mapping, with the geometry in it.  For
+an internal edge $S.f \to T$ through a `multilinear_grid` mapping $m$
+with positions $g$:
+
+| The mapping, between $M$ points and a grid of $N$ entries | Parts of the reading | Each part is measured against |
+|---|---|---|
+| does not deliver more entries than it reads: a gather onto $M \le N$ points, a scatter of $M \ge N$ points | the delivered value $t(m(S.f;\,g))$, $g$ at the time level the step uses: $S.g$ of the same iterate for a source anchor, the *pre-step* $T.g$ for a target anchor | its own largest magnitude |
+| delivers more entries, source anchor: a scatter of $M < N$ points (the markers hold $g$), a gather onto $M > N$ points (the grid node holds $g$) | the source value $S.f$ as stored; **and** the positions $S.g$, coordinate $a$ divided by the grid spacing $h_a$ | $S.f$: its own largest magnitude.  The positions: **one spacing** |
+| delivers more entries, target anchor | the source value $S.f$ as stored | its own largest magnitude |
+
+The rows are by the entry counts the mapping declares, never by its
+mode: with more markers than grid entries the gather is the edge read at
+its source and the scatter the one read as delivered.
+
+The residual pools every entry of every part into one root mean square:
+a value's change over `rtol` times its magnitude, a position's change
+over `rtol` spacings.  A transform comes after the mapping, so a reading
+at the source carries none.
+
+* **Why a length scale and not the positions' magnitude.**  A position's
+  magnitude is the distance from the origin of the coordinates.  Divided
+  by it, the tolerance of a marker a thousand spacings from the origin
+  is a thousand times looser, in cells, than that of the same marker at
+  the origin, and it loosens as a grid is refined under fixed markers.
+  What a position does to the transfer is move a deposit by cells, so a
+  cell is the unit; the mapping kind declares it
+  (`geometry_length_scale()`), and a length of your own is not offered in
+  0.4.0.  `atol` is a statement about a magnitude and does not apply to
+  a position: positions are always read.
+* **A target-anchored geometry is a constant of the solve.**  It is the
+  target's pre-step state at every pass, so it has no residual and is
+  not a reading of a scatter anchored there.
+* **What a solve returns.**  A field a part holds entry for entry is
+  measured whole and returned as the accepted iterate holds it: the
+  source value of an edge that delivers more entries than it reads and,
+  for a source anchor, its positions.  Every other floating field is
+  recomputed by one plain pass.
+* **The float floor.**  A position is **rounded at** the larger of two
+  magnitudes, per coordinate, in spacings: its distance from the
+  coordinates' zero, $|u|$ (it is stored to `eps |u|`), and its lattice
+  coordinate, $|u - o/h|$, its distance from the grid's first point
+  (the kernel forms it in the positions' dtype and resolves its weights
+  to `eps` of that: the kernel paragraph above), wherever the kernel
+  reads the coordinate.  Call the larger $r$; where several edges read
+  one position field on different lattices, the largest over them.  A
+  value counts at the `eps` of the coarsest dtype it was computed from,
+  the positions' among them for a delivered one, and at least `eps r`
+  for the positions it depends on (their rounding moves a kernel weight
+  by as much); a position counts at `eps r` of one spacing.  A value's
+  `eps` is taken no finer than the group's coarsest floating dtype's;
+  the `eps` of `eps r` is always that of the positions' own dtype, so
+  float64 positions beside float32 fields put only float64's `eps r`
+  into the floor.  Counted from the coordinates' zero alone (`eps |u|`),
+  float32 markers within 4 spacings of zero on grids of 16001 and 1e5
+  points centred there read a floor of 0.26 to 0.50 and
+  `converged=True` with the state 2 to 20 and 34 tolerances from the
+  float64 fixed point, and one physical problem read 623 with the zero
+  at the grid's first point and 0.26 with it at the markers: **no choice
+  of the coordinates' origin changes a lattice coordinate**, so the
+  larger of the two does not depend on it once the lattice coordinate
+  is the larger.  For a
+  delivered value `eps r` **assumes a field that varies across one
+  cell by about the size of the value delivered**: it is early for a
+  smoother field and it does not see a value far smaller than the
+  field's variation across a cell (a field sampled near its zero), which
+  the positions' rounding moves by `eps r` times that ratio
+  (MADD-ANO-247; the user guide's limits have the measured figures).
+  The coordinates a delivered value does not depend on are not counted:
+  one on an axis of one lattice point, and one of a point clamped to the
+  hull from further out than its rounding can cross
+  (`geometry_coordinates_read`).  Positions that are a part of the
+  reading are counted coordinate for coordinate, as the criterion reads
+  them.  The floor of a delivered value anchored at its target needs the
+  pre-step positions, which the returned state does not hold: the step
+  records it (`reading_floor`), and a state no step wrote has none.
+* **The advisory and the run-time reading.**  `compile()` warns of each
+  edge for which the positions' term alone, `4 E eps max r / rtol`, is
+  one or more on the state it sees: a part that is positions, or a value
+  delivered at them, where the floor counts that part (not one the dead
+  band drops, and not a coordinate the mapping does not read).  It is
+  asked once, and it is **one part's number**.  The report of such a
+  group reads the floor at every step: `residual_precision_floor` is the
+  floor of the state the step returned, **pooled** as the residual is
+  over every entry the norm reads, and `precision_limited` is `True`
+  where the residual is at or below it, the rule of every group's
+  report, so markers that drift, a state write and a loaded checkpoint
+  are read where they are.  With finer entries beside the part the
+  pooled floor is the smaller of the two, by up to the root of the
+  part's share of the entries (four markers a thousand spacings out
+  beside two plain edges of 1e5 entries: 95.7 quoted at `compile()`,
+  0.61 reported): compare the advisory's number with one for the part,
+  and the report's floor with its residual and with one for the group.
+  `E` is the pass's structural evaluation count in both, **with
+  `diagnostics=True` as without**: the count a step measures with
+  diagnostics weights a read of positions by their distance from the
+  coordinates' zero, which this floor already counts (multiplied in, the
+  floor of one state read 0.078 without diagnostics and 18 to 1189 with
+  them), and no other number of such a group reads it in 0.4.0.  (The
+  user guide's limits have the rule, the measured cases and the
+  remedies.)
+* **The claim.**  A group that reports `converged=True` is within $K$
+  tolerances of its fixed point in these readings, $K = \lVert D (I -
+  A)^{-1} (I - L) D^{-1} \rVert_2$ on the compact readings as for a
+  static mapping, to first order in the distance (the pass is nonlinear
+  in the positions), above the residual's float floor.  $K$ does not
+  see the size of the grid.  Nor the place of the coordinates' origin;
+  the floor sees a point's lattice coordinate (the measured figures are
+  in MAP-050 of the mapping claims).
+* **The verdict is a local statement.**  `converged=True` reads the
+  contraction the last passes showed (a residual under the threshold
+  after a step that shrank).  $K$ is the linearisation at the fixed
+  point.  The two describe the same thing **where the pass keeps that
+  rate from the accepted iterate to its fixed point**, and the claim
+  holds there to first order.  Two ways to lose it, each constructed
+  and pinned with its numbers (MAP-050):
+  - *a lattice plane.*  The pass is another polynomial of the positions
+    in each lattice cell.  An iterate thrown across a plane into a cell
+    where the pass contracts at 0.999 read `converged=True` 250
+    tolerances from a fixed point in the cell it came from ($K = 0.95$
+    there);
+  - *inside one cell, on two or three axes.*  Within a cell the kernel
+    is multilinear of degree $d$ in the positions (and a scatter is
+    bilinear in a value and its weight on any number of axes), so the
+    pass's rate varies inside the cell too.  One point in a lattice of
+    ONE cell on three axes, its position $(v, v, v)$ for the value $v$
+    it gathers, has a cubic pass with a single fixed point (contraction
+    0.05 there, $K = 0.95$) that creeps at 0.9999 elsewhere in the
+    cell: it read `converged=True` after one counted pass 14,000
+    tolerances from that fixed point, with no plane or face crossed.
+    "No marker crosses a lattice plane" is therefore **not** the
+    condition.  (A pass whose only nonlinearity is a gather on one axis
+    is linear in the position within a cell, and for that pass a plane
+    is the only place the rate changes.)
+* **Not in 0.4.0.**  The bounds of such a group (`rho_spectral`,
+  `spectral_error_bound`, the gradient bound, the estimates and their
+  flags) are not reported under this norm in 0.4.0 (the paragraph
+  above); a diagnostic run of the same group under `"mixed"` or `"l2"`
+  reports them.  Another mapping kind and a sub-cycled group are
+  refused.
+
+A graph without a geometry edge is not affected by any of this: it
+compiles to the same programs as before the feature existed
+(`tests/core/test_step_program_digests.py` compares the lowered program
+text of 24 graphs with a capture taken before it).
 
 ## Legacy closures
 

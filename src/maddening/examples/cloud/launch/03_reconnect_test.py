@@ -6,7 +6,7 @@ from just the name (simulating a script restart), verifies status()
 still works, then tears down.
 
 Usage:
-    python 03_reconnect_test.py
+    python -m maddening.examples.cloud.launch.03_reconnect_test
 """
 
 import sys

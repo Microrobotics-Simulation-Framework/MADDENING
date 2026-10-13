@@ -1,13 +1,13 @@
-"""Hypothesis verification test configuration.
+"""Local configuration for the numerics property suite.
 
-JAX JIT compilation causes the first execution of any test to take
-hundreds of milliseconds. We disable Hypothesis's deadline globally
-for these tests rather than annotating each one.
+Nothing is configured here any more.  The Hypothesis profiles this suite
+used to register for itself (``deadline=None``, ``print_blob=True``) now
+live in the ROOT ``tests/conftest.py``, so that property tests elsewhere
+in the tree -- ``tests/fmi/``, ``tests/core/`` -- get the same settings
+and the same example database instead of hand-rolling them per module.
+Select a profile with ``MADDENING_HYPOTHESIS_PROFILE``; see
+``docs/developer_guide/testing_standards.md``.
+
+This file is kept as a signpost: it is the first place anyone adding a
+property test under this directory looks for the settings.
 """
-
-from hypothesis import settings
-
-settings.register_profile(
-    "jax", deadline=None, print_blob=True,
-)
-settings.load_profile("jax")

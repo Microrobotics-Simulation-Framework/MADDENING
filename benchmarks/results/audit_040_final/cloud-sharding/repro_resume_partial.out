@@ -1,0 +1,9 @@
+saved  state x = [ 7.  8.  9. 10.]
+saved  gainvec = [2. 2. 2.]
+
+target graph BEFORE resume: x = [0. 0. 0. 0.], gainvec = [1. 1. 1. 1.]
+resume FAILED as expected: ValueError: Checkpoint params nodes['relax']['gainvec'] has shape (3,), graph has (4,)
+target graph AFTER  resume: x = [ 7.  8.  9. 10.], gainvec = [1. 1. 1. 1.]
+
+*** STATE WAS MUTATED BY THE FAILED RESUME ***
+    x went [0. 0. 0. 0.] -> [ 7.  8.  9. 10.] despite 'starting fresh'

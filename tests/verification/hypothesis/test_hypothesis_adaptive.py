@@ -1,14 +1,21 @@
 """Property-based tests for adaptive timestepping arithmetic.
 
-Tests the PI step-size controller logic extracted from
-:func:`maddening.core.simulation.adaptive.build_adaptive_step`.
+Tests :func:`maddening.core.simulation.adaptive.step_decision` -- the one
+acceptance rule and PI controller ``run_adaptive``, ``run_adaptive_scan``
+and ``build_adaptive_step`` all call -- rather than a copy of it: until
+0.4.0's round-4 audit this module checked an extract of the controller
+while the two steppers each carried their own, and they disagreed near
+``dt_min``.
 """
 
 
 import numpy as np
 import jax.numpy as jnp
-from hypothesis import given, settings, assume
+from hypothesis import given, settings
 from hypothesis import strategies as st
+
+from maddening.core.simulation.adaptive import step_decision
+from tests.conftest import EXAMPLES_CHEAP
 
 
 DT_MIN = 1e-8
@@ -19,16 +26,11 @@ MIN_FACTOR = 0.2
 ORDER = 1
 
 
-def step_size_controller(dt, error_norm):
-    """Extract of the PI controller logic from adaptive.py."""
-    factor = SAFETY * jnp.where(
-        error_norm > 0,
-        jnp.power(1.0 / error_norm, 1.0 / (ORDER + 1)),
-        MAX_FACTOR,
-    )
-    factor = jnp.clip(factor, MIN_FACTOR, MAX_FACTOR)
-    dt_next = jnp.clip(dt * factor, DT_MIN, DT_MAX)
-    accepted = error_norm <= 1.0
+def step_size_controller(dt, error_norm, xp=jnp):
+    """``(dt_next, factor, accepted)`` from the library's own rule."""
+    accepted, _forced, dt_next, factor = step_decision(
+        error_norm, dt, DT_MIN, DT_MAX, safety=SAFETY, order=ORDER,
+        min_factor=MIN_FACTOR, max_factor=MAX_FACTOR, xp=xp)
     return dt_next, factor, accepted
 
 
@@ -45,7 +47,7 @@ class TestDtBoundsProperty:
     """dt_next is always in [dt_min, dt_max] for any valid inputs."""
 
     @given(dt=dt_st, error_norm=error_st)
-    @settings(max_examples=1000)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_dt_next_in_bounds(self, dt, error_norm):
         dt_j = jnp.asarray(dt)
         err_j = jnp.asarray(error_norm)
@@ -61,7 +63,7 @@ class TestFactorBoundsProperty:
     """Growth factor is always in [min_factor, max_factor]."""
 
     @given(dt=dt_st, error_norm=error_st)
-    @settings(max_examples=1000)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_factor_in_bounds(self, dt, error_norm):
         dt_j = jnp.asarray(dt)
         err_j = jnp.asarray(error_norm)
@@ -75,18 +77,31 @@ class TestFactorBoundsProperty:
         )
 
 
+#: An ordered pair of error norms, ``(smaller, larger)``.  The property below
+#: is about a pair in order, so the pair is drawn in order: an unordered draw
+#: plus ``assume(error_a <= error_b)`` threw away 32.7% of every draw here,
+#: measured, and this rejects 0.0%.  Sorting the pair rather than drawing a
+#: delta keeps the distribution of each endpoint unchanged, so the nasty
+#: values Hypothesis likes to try at 0.0 and 1.0 still appear at both ends.
+ordered_error_pairs = st.lists(
+    st.floats(min_value=0.0, max_value=1.0,
+              allow_nan=False, allow_infinity=False),
+    min_size=2, max_size=2,
+).map(sorted).map(tuple)
+
+
 class TestAcceptanceMonotone:
     """If error_a < error_b and error_b is accepted, then error_a is
     also accepted. (Monotonicity of the acceptance predicate.)"""
 
-    @given(dt=dt_st,
-           error_a=st.floats(min_value=0.0, max_value=1.0,
-                             allow_nan=False, allow_infinity=False),
-           error_b=st.floats(min_value=0.0, max_value=1.0,
-                             allow_nan=False, allow_infinity=False))
-    @settings(max_examples=500)
-    def test_lower_error_also_accepted(self, dt, error_a, error_b):
-        assume(error_a <= error_b)
+    @given(dt=dt_st, errors=ordered_error_pairs)
+    @settings(max_examples=EXAMPLES_CHEAP)
+    def test_lower_error_also_accepted(self, dt, errors):
+        error_a, error_b = errors
+        # Asserted, not assumed: if the strategy ever stops ordering the
+        # pair this must fail loudly rather than go back to quietly
+        # discarding a third of the search.
+        assert error_a <= error_b, "ordered_error_pairs must draw in order"
         dt_j = jnp.asarray(dt)
         _, _, accepted_a = step_size_controller(dt_j, jnp.asarray(error_a))
         _, _, accepted_b = step_size_controller(dt_j, jnp.asarray(error_b))
@@ -100,7 +115,7 @@ class TestZeroErrorMaxGrowth:
     """When error_norm = 0, factor should be max_factor (maximum growth)."""
 
     @given(dt=dt_st)
-    @settings(max_examples=100)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_zero_error_max_factor(self, dt):
         dt_j = jnp.asarray(dt)
         _, factor, accepted = step_size_controller(dt_j, jnp.asarray(0.0))
@@ -108,3 +123,25 @@ class TestZeroErrorMaxGrowth:
         assert val >= float(np.float32(MIN_FACTOR))
         assert val <= float(np.float32(MAX_FACTOR)) + 1e-7
         assert bool(accepted)
+
+
+class TestOneRuleOnBothBackends:
+    """The host stepper (NumPy) and the traced one (jax.numpy) decide alike."""
+
+    @given(dt=dt_st, error_norm=error_st)
+    @settings(max_examples=EXAMPLES_CHEAP)
+    def test_accepted_is_within_tolerance_or_at_dt_min(self, dt, error_norm):
+        dt32, err32 = np.float32(dt), np.float32(error_norm)
+        for xp in (np, jnp):
+            _, _, accepted = step_size_controller(xp.asarray(dt32), xp.asarray(err32), xp=xp)
+            assert bool(accepted) == bool(err32 <= 1.0 or dt32 <= np.float32(DT_MIN)), (
+                xp.__name__, dt, error_norm)
+
+    @given(dt=dt_st, error_norm=error_st)
+    @settings(max_examples=EXAMPLES_CHEAP)
+    def test_the_numpy_and_jax_rules_choose_the_same_next_dt(self, dt, error_norm):
+        dt32, err32 = np.float32(dt), np.float32(error_norm)
+        n_next, _, n_acc = step_size_controller(np.asarray(dt32), np.asarray(err32), xp=np)
+        j_next, _, j_acc = step_size_controller(jnp.asarray(dt32), jnp.asarray(err32), xp=jnp)
+        assert bool(n_acc) == bool(j_acc)
+        np.testing.assert_allclose(float(j_next), float(n_next), rtol=1e-6)

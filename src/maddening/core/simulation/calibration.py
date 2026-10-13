@@ -9,15 +9,21 @@ Provides:
 - ``calibrate``: differentiable parameter recovery using inline
   physics with JAX-traced parameters.  Uses ``jax.grad`` to
   minimise a loss function over node/physics parameters.
+
+Both are deprecated in favour of :func:`maddening.sysid.fit` and are
+removed in 0.5.0.
 """
 
 from __future__ import annotations
 
-from copy import deepcopy
+import warnings
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Optional
 
 import jax.numpy as jnp
+
+from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.stability import stability
 
 
 @dataclass
@@ -52,6 +58,7 @@ def _make_param_grid(param_grid: dict[str, list]) -> list[dict]:
     return [dict(zip(keys, vals)) for vals in combos]
 
 
+@stability(StabilityLevel.DEPRECATED)
 def tune_coupling_params(
     build_graph_fn: Callable[..., Any],
     param_grid: dict[str, list],
@@ -62,6 +69,9 @@ def tune_coupling_params(
     external_inputs: Optional[dict] = None,
 ) -> TuneResult:
     """Try different coupling parameters and return the best.
+
+    .. deprecated::
+        Use :func:`maddening.sysid.fit` instead.  Removed in 0.5.0.
 
     Builds the graph multiple times with different coupling
     parameters, runs each for *n_steps*, and compares accuracy
@@ -103,9 +113,20 @@ def tune_coupling_params(
     TuneResult
         The best configuration and all trial results.
     """
+    warnings.warn(
+        "maddening.core.simulation.calibration.tune_coupling_params is "
+        "deprecated; use maddening.sysid.fit, which optimises the graph "
+        "params pytree under ParamSpec bounds and a trainable mask.  "
+        "Removed in 0.5.0.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
     # Default metric: sum of all state values
     if state_metric is None:
-        def state_metric(state):
+        # Bound to the parameter afterwards rather than defined under its
+        # name: a nested `def` that shadows a parameter is a redeclaration.
+        def _default_state_metric(state):
             total = 0.0
             for nn in state:
                 if nn.startswith("_"):
@@ -113,6 +134,8 @@ def tune_coupling_params(
                 for field in state[nn]:
                     total = total + float(jnp.sum(state[nn][field]))
             return total
+
+        state_metric = _default_state_metric
 
     # Generate parameter combinations
     configs = _make_param_grid(param_grid)
@@ -157,7 +180,10 @@ def tune_coupling_params(
                 trajectory.append(state_metric(state))
                 diag = gm.coupling_diagnostics()
                 for group_key, group_diag in diag.items():
-                    total_iters += group_diag["iterations"]
+                    # The passes the step ran, over every waveform sweep;
+                    # ``iterations`` is the largest sweep's (the cap
+                    # check) and the same number with one sweep.
+                    total_iters += group_diag["total_iterations"]
 
             # Compute max error
             max_error = max(
@@ -221,6 +247,7 @@ class CalibrateResult:
     converged: bool
 
 
+@stability(StabilityLevel.DEPRECATED)
 def calibrate(
     forward_fn: Callable,
     initial_params: dict[str, jnp.ndarray],
@@ -232,6 +259,9 @@ def calibrate(
     verbose: bool = False,
 ) -> CalibrateResult:
     """Differentiable parameter recovery using JAX gradient descent.
+
+    .. deprecated::
+        Use :func:`maddening.sysid.fit` instead.  Removed in 0.5.0.
 
     Optimises physics parameters by minimising a loss function that
     measures deviation from reference data.  The ``forward_fn`` must
@@ -265,8 +295,8 @@ def calibrate(
     CalibrateResult
         Calibrated parameters, loss history, and convergence flag.
 
-    Example
-    -------
+    Examples
+    --------
     >>> import jax.numpy as jnp
     >>> def forward(params):
     ...     g = params["gravity"]
@@ -275,18 +305,56 @@ def calibrate(
     ...     forward_fn=forward,
     ...     initial_params={"gravity": jnp.array(-5.0)},
     ...     reference_trajectory=jnp.array(-4.905),  # true g=-9.81
+    ...     n_iters=400,
+    ...     learning_rate=0.1,
     ... )
+    >>> result.converged
+    True
+    >>> round(float(result.params["gravity"]), 2)
+    -9.81
+
+    The two non-default arguments are the point.  This is plain gradient
+    descent with a fixed step and no line search, and exhausting
+    ``n_iters`` is not an error: it returns the last iterate with
+    ``converged=False``.  On this problem the defaults
+    (``n_iters=200``, ``learning_rate=0.01``) stop well short of the
+    true value, and nothing but the flag says so.
+
+    >>> default_budget = calibrate(
+    ...     forward_fn=forward,
+    ...     initial_params={"gravity": jnp.array(-5.0)},
+    ...     reference_trajectory=jnp.array(-4.905),
+    ... )
+    >>> default_budget.converged
+    False
+    >>> round(float(default_budget.params["gravity"]), 1)
+    -8.0
+
+    So branch on ``converged`` rather than reading ``params`` straight
+    out.  :func:`maddening.sysid.fit`, the replacement, draws the same
+    distinction without a hand-tuned step size.
     """
+    warnings.warn(
+        "maddening.core.simulation.calibration.calibrate is deprecated; "
+        "use maddening.sysid.fit, which optimises the graph params pytree "
+        "under ParamSpec bounds and a trainable mask.  Removed in 0.5.0.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
     import jax
 
     if loss_fn is None:
-        def loss_fn(predicted, reference):
+        # See the note in `tune_coupling_params`: bound, not shadowed.
+        def _default_loss_fn(predicted, reference):
             leaves_pred = jax.tree.leaves(predicted)
             leaves_ref = jax.tree.leaves(reference)
             total = jnp.array(0.0)
             for p, r in zip(leaves_pred, leaves_ref):
                 total = total + jnp.mean((p - r) ** 2)
             return total
+
+        loss_fn = _default_loss_fn
 
     params = {k: jnp.asarray(v) for k, v in initial_params.items()}
     loss_history = []
@@ -317,6 +385,12 @@ def calibrate(
             for k in params
         }
 
+    # Always False: the loop returns early on the first loss below
+    # ``tolerance``, so the last recorded loss is one that failed that
+    # same test (and an empty history means ``n_iters <= 0``).  Left as
+    # written -- reporting the loss *after* the final update would need
+    # an extra objective evaluation and would change both the returned
+    # flag and the length of ``loss_history``.
     return CalibrateResult(
         params=params,
         loss_history=loss_history,

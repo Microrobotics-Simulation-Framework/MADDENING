@@ -13,15 +13,38 @@ Install extras for optional features::
     pip install maddening[client]    # viz-only (no JAX needed)
 """
 
-from importlib.metadata import PackageNotFoundError, version as _pkg_version
+from typing import TYPE_CHECKING, Any
 
-try:
-    __version__ = _pkg_version("maddening")
-except PackageNotFoundError:  # source tree without install metadata
-    __version__ = "0.3.1"
+if TYPE_CHECKING:
+    # PEP 562: the names below are resolved lazily by the module
+    # `__getattr__`, which a type checker cannot see through -- without
+    # these re-exports it reports every one of them as missing from
+    # `__all__`, and a downstream `from maddening import X` is an error.
+    # Nothing here runs at import time; the lazy table stays the only
+    # runtime path.
+    from maddening.cloud.session import CloudConfig, CloudSession
+    from maddening.core.coupling import CouplingGroup
+    from maddening.core.edge import EdgeSpec
+    from maddening.core.graph_manager import GraphManager
+    from maddening.core.node import SimulationNode
+    from maddening.core.simulation.adaptive import AdaptiveConfig
+    from maddening.core.simulation.history_logger import HistoryLogger
+    from maddening.info import show_versions
+    from maddening.surrogates.architecture import SurrogateArchitecture
+    from maddening.surrogates.node import SurrogateNode
 
 
-def __getattr__(name: str):
+#: The version of this tree: the one ``pyproject.toml`` gives the
+#: distribution built from it (``tests/test_version_is_the_trees_own.py``
+#: holds the two together).  It used to be read from the *installed*
+#: distribution's metadata first, so a source tree imported beside another
+#: installed version -- ``PYTHONPATH`` over a stale editable install --
+#: called itself that version: ``GET /healthz`` on the 0.4.0 tree answered
+#: 0.3.1, as did every record that stores ``maddening.__version__``.
+__version__ = "0.4.0"
+
+
+def __getattr__(name: str) -> Any:
     """Lazy imports so that ``maddening.viz`` can be used without JAX."""
     _lazy = {
         "AdaptiveConfig": "maddening.core.simulation.adaptive",
@@ -34,6 +57,7 @@ def __getattr__(name: str):
         "SurrogateArchitecture": "maddening.surrogates.architecture",
         "CloudSession": "maddening.cloud.session",
         "CloudConfig": "maddening.cloud.session",
+        "show_versions": "maddening.info",
     }
     if name in _lazy:
         import importlib
@@ -53,4 +77,5 @@ __all__ = [
     "SurrogateArchitecture",
     "CloudSession",
     "CloudConfig",
+    "show_versions",
 ]

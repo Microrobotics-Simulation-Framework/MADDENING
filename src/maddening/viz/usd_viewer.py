@@ -41,11 +41,58 @@ Requires: pyvista, pxr (usd-core), scipy
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import TYPE_CHECKING, Any, Optional, TypedDict
 
 from maddening.viz._imports import _import_pyvista, _import_pxr
 
+if TYPE_CHECKING:
+    from maddening.viz.history_viewer import HistoryViewer3D
+
 import numpy as np
+
+
+class _TubeConfigRequired(TypedDict):
+    """The three keys every tube must carry (see :class:`TubeConfig`)."""
+
+    #: Geometry prim path, e.g. ``"/Vessel/parent"``.
+    prim: str
+    #: Simulation node name.
+    node: str
+    #: Scalar state field used for colouring, e.g. ``"temperature"``.
+    field: str
+
+
+class TubeConfig(_TubeConfigRequired, total=False):
+    """One curve tube for :func:`viewer_from_usd_with_geometry` and
+    :func:`render_usd_frame`.
+
+    ``prim``, ``node`` and ``field`` are required; the rest are
+    presentation options with defaults.  The split is expressed with a
+    base class rather than with ``NotRequired`` because this module uses
+    PEP 563 string annotations, under which CPython reports every key as
+    required in ``__required_keys__``.
+
+    ``n_sides`` and ``opacity`` are read only by :func:`render_usd_frame`.
+
+    Examples
+    --------
+    >>> cfg: TubeConfig = {"prim": "/V/a", "node": "rod", "field": "T"}
+    >>> TubeConfig.__required_keys__ == {"prim", "node", "field"}
+    True
+    """
+
+    #: Tube radius (default 0.02).
+    radius: float
+    #: Matplotlib colormap name (default ``"coolwarm"``).
+    cmap: str
+    #: Colour limits; absent means auto-scale.
+    clim: tuple[float, float]
+    #: Colour bar label.
+    label: str
+    #: Cross-section resolution (default 12).
+    n_sides: int
+    #: Tube opacity (default 1.0).
+    opacity: float
 
 
 def _read_history_from_usd(stage, node_names=None):
@@ -159,8 +206,8 @@ def _read_history_from_usd(stage, node_names=None):
 def viewer_from_usd(
     filepath: str,
     node_names: list[str] | None = None,
-    **viewer_kwargs,
-):
+    **viewer_kwargs: Any,
+) -> HistoryViewer3D:
     """Create a HistoryViewer3D from a USD results file.
 
     Parameters
@@ -188,10 +235,10 @@ def viewer_from_usd(
 def viewer_from_usd_with_geometry(
     results_path: str,
     geometry_path: str,
-    tube_configs: list[dict],
+    tube_configs: list[TubeConfig],
     node_names: list[str] | None = None,
-    **viewer_kwargs,
-):
+    **viewer_kwargs: Any,
+) -> HistoryViewer3D:
     """Create a HistoryViewer3D with curve tubes from USD geometry.
 
     Combines simulation results (time-sampled scalars) with vessel
@@ -204,16 +251,8 @@ def viewer_from_usd_with_geometry(
         Path to USD results file.
     geometry_path : str
         Path to USD geometry file (e.g., vessel phantom).
-    tube_configs : list of dict
-        Each dict specifies a tube:
-
-        - ``"prim"``: geometry prim path (e.g., "/Vessel/parent")
-        - ``"node"``: simulation node name
-        - ``"field"``: scalar field for coloring (e.g., "temperature")
-        - ``"radius"`` (optional): tube radius
-        - ``"cmap"`` (optional): colormap
-        - ``"clim"`` (optional): color limits
-        - ``"label"`` (optional): color bar label
+    tube_configs : list of TubeConfig
+        Each entry specifies one tube; see :class:`TubeConfig`.
 
     node_names : list of str or None
         Which nodes to load from results.
@@ -275,14 +314,14 @@ def viewer_from_usd_with_geometry(
 def render_usd_frame(
     results_path: str,
     geometry_path: str,
-    tube_configs: list[dict],
+    tube_configs: list[TubeConfig],
     time: float | None = None,
     output_path: str = "frame.png",
     window_size: tuple[int, int] = (1280, 720),
     camera_position: str = "xy",
     zoom: float = 1.5,
     node_names: list[str] | None = None,
-):
+) -> str:
     """Render a single frame from USD data to an image file.
 
     Parameters
@@ -291,7 +330,7 @@ def render_usd_frame(
         Path to USD results file.
     geometry_path : str
         Path to USD geometry file.
-    tube_configs : list of dict
+    tube_configs : list of TubeConfig
         Tube configurations (see :func:`viewer_from_usd_with_geometry`).
     time : float or None
         Time code to render.  None = last frame.

@@ -3,7 +3,6 @@
 Covers:
   - Integrity manifest (write/read/verify, mismatch detection)
   - save_state_with_manifest / load_state_with_manifest round-trip
-  - download_and_load_state via file:// URL
   - make_preempt_snapshot_hook builds a callback that snapshots on
     a CloudSession preemption event
   - resume_from_url entry-point helper
@@ -28,7 +27,6 @@ from maddening.core.simulation.checkpoint import (
     CheckpointIntegrityError,
     CheckpointVersionError,
     compute_checkpoint_hash,
-    download_and_load_state,
     load_state_with_manifest,
     read_manifest,
     save_state,
@@ -266,73 +264,6 @@ class TestSaveLoadWithManifest:
         npz_path.write_bytes(npz_path.read_bytes() + b"\xff")
         with pytest.raises(CheckpointIntegrityError):
             load_state_with_manifest(matching_empty_graph, npz_path)
-
-
-# ---------------------------------------------------------------------------
-# download_and_load_state via file://
-# ---------------------------------------------------------------------------
-
-
-class TestDownloadAndLoad:
-    def test_file_scheme_url(
-        self, bouncing_ball_graph, matching_empty_graph, tmp_path,
-    ):
-        npz_path, _ = save_state_with_manifest(
-            bouncing_ball_graph, tmp_path / "snap.npz",
-        )
-        url = f"file://{npz_path}"
-        dest_dir = tmp_path / "resume"
-        manifest = download_and_load_state(
-            matching_empty_graph, url, dest_dir=dest_dir,
-        )
-        assert manifest["schema_version"] == CHECKPOINT_SCHEMA_VERSION
-        # Resumed graph should have the same ball position
-        src = float(bouncing_ball_graph.get_node_state("ball")["position"])
-        dst = float(matching_empty_graph.get_node_state("ball")["position"])
-        assert src == pytest.approx(dst, rel=1e-6)
-
-    def test_bare_path_treated_as_file_scheme(
-        self, bouncing_ball_graph, matching_empty_graph, tmp_path,
-    ):
-        npz_path, _ = save_state_with_manifest(
-            bouncing_ball_graph, tmp_path / "snap.npz",
-        )
-        dest_dir = tmp_path / "resume2"
-        # No scheme — should still work as a file path
-        manifest = download_and_load_state(
-            matching_empty_graph, str(npz_path), dest_dir=dest_dir,
-        )
-        assert manifest["schema_version"] == CHECKPOINT_SCHEMA_VERSION
-
-    def test_unsupported_scheme_raises(self, matching_empty_graph, tmp_path):
-        with pytest.raises(ValueError, match="scheme"):
-            download_and_load_state(
-                matching_empty_graph, "ftp://example.com/x.npz",
-                dest_dir=tmp_path,
-            )
-
-    def test_missing_manifest_triggers_failure(
-        self, bouncing_ball_graph, matching_empty_graph, tmp_path,
-    ):
-        # Save without manifest
-        npz_path = save_state(bouncing_ball_graph, tmp_path / "snap.npz")
-        url = f"file://{npz_path}"
-        with pytest.raises(FileNotFoundError):
-            download_and_load_state(
-                matching_empty_graph, url, dest_dir=tmp_path / "resume",
-            )
-
-    def test_skip_integrity_tolerates_missing_manifest(
-        self, bouncing_ball_graph, matching_empty_graph, tmp_path,
-    ):
-        npz_path = save_state(bouncing_ball_graph, tmp_path / "snap.npz")
-        url = f"file://{npz_path}"
-        manifest = download_and_load_state(
-            matching_empty_graph, url,
-            dest_dir=tmp_path / "resume",
-            skip_integrity_check=True,
-        )
-        assert manifest == {}
 
 
 # ---------------------------------------------------------------------------

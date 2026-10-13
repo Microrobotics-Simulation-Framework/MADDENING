@@ -1,6 +1,6 @@
 # Node Authoring Guide
 
-This guide covers everything required to add a new `SimulationNode` to MADDENING. Every requirement here is derived from the [Documentation Architecture](https://github.com/Microrobotics-Simulation-Framework/MADDENING/blob/main/DOCUMENTATION_ARCHITECTURE.md) and enforced by CI.
+This guide covers everything required to add a new {codeterm}`SimulationNode` to MADDENING. Every requirement here is derived from the [Documentation Architecture](https://github.com/Microrobotics-Simulation-Framework/MADDENING/blob/main/DOCUMENTATION_ARCHITECTURE.md) and enforced by CI.
 
 ## The Contract
 
@@ -9,8 +9,149 @@ A MADDENING {term}`node <Node>` is a **{term}`pure function <Pure function>` wra
 - `initial_state(params) -> dict` — returns the initial state arrays
 - `update(state, boundary_inputs, dt) -> new_state` — returns a new state dict
 - `update()` must be **{term}`JAX-traceable`**: no Python-level side effects, no data-dependent control flow, no print statements. Use `jnp.where` instead of `if/else`.
+- `update()` returns the state layout it was given: the same fields, each with the shape and kind of dtype `initial_state()` built. A step that changes one (a list passed for a scalar constant broadcasts a scalar field) is refused by `GraphManager.step`, `run` and `run_adaptive` with a `ValueError` naming the node and the field, as `run_scan` refuses it.
 - State is **immutable** — return a new dict, don't mutate in place
 - Parameters live in `self.params`, not in state
+
+### Events inside `update()`: what the gradient means
+
+`jnp.where` makes a branch traceable. It does not make it differentiable
+across the switch. If your `update()` tests the node's own state and picks
+a branch — a contact, a threshold, a stick-slip transition, a valve that
+opens, a saturation — then `jax.grad` returns the gradient of the branch
+the step took and **misses the term from the event time**: how the moment
+of the switch moves when a parameter or the initial state moves. Nothing
+warns you. The trajectory looks right, because the values are correct to
+within one step. Only the gradients are wrong. This is a framework
+limitation, recorded as **MADD-ANO-021**, and not a quirk of one node.
+
+What your gradients will do:
+
+- **A clamp gives exactly zero.** If the event sets a state to a constant
+  (pin the position to the surface, zero the velocity on sticking), then
+  everything downstream is flat in the quantities that decided *when* the
+  event happened, within each one-step window, and jumps between windows.
+  `BallNode` is the in-tree instance. The gradient of its post-bounce
+  height with respect to the drop height is exactly `0.0`, against an
+  exact `+0.5892`. A smaller `dt` narrows the windows but does not make
+  the gradient non-zero.
+- **Without a clamp, it is non-zero and wrong.** A parameter that moves
+  the event time gets a gradient that omits that motion. `BallNode`'s
+  gradient with respect to `|gravity|` is about 13 times the exact value.
+- **It is right only for parameters the event time does not depend on.**
+  `BallNode`'s gradient with respect to `elasticity` is correct, because
+  the first contact time does not depend on the restitution coefficient.
+
+A calibration or optimisation through such a node follows these
+gradients: it stalls on a zero, or walks the wrong way. Until event
+localisation lands (an {term}`implicit-function-theorem <Implicit function theorem>` derivative of the event
+time, planned for 0.5.0), do one of the following:
+
+- **Smooth the switch.** Use a penalty or regularised contact force (a
+  stiff spring active below the surface, a `softplus` in place of a hard
+  threshold, a regularised friction law) so that the dynamics are
+  differentiable and the event time is implicit in them. The smoothing
+  length is a modelling choice. Say what it is in the node's {codeterm}`NodeMeta`.
+- **Do not differentiate through the event.** Fit over intervals that
+  contain no switch, or treat the event time as a separate parameter you
+  estimate some other way.
+- **Declare it.** Whichever you choose, add a `NodeMeta.limitations`
+  entry that says what the node's gradients do across its events, and a
+  test that pins it. `tests/nodes/test_ball_event_gradient.py` is the
+  pattern: it has a strict `xfail` against the exact derivative and a
+  plain test that pins today's value.
+
+### Derivative rules and coupling groups
+
+Most nodes need no derivative rule: {term}`JAX` differentiates `update()` as it
+is.  A node that wraps code JAX cannot trace (an external kernel, a
+callback) needs one, and the kind of rule decides where the node can go.
+
+- **A reverse-mode-only rule (`jax.custom_vjp`) cannot be differentiated
+  inside a {term}`coupling group <Coupling group>` on the default solver.**  `solver="ift"`
+  differentiates a group in forward mode, also under `jax.grad`, and
+  JAX cannot run a `custom_vjp` forward.  The gradient raises
+  `NotImplementedError: Differentiation rule for 'custom_lin' not
+  implemented` when it is traced.  The same node works under `jax.grad`
+  in a plain graph.
+- **Write a `jax.custom_jvp` instead, with a tangent that is linear in
+  the tangents and made of operations JAX can transpose.**  JAX derives
+  the reverse mode from it, so the node works in a group under
+  `jax.grad`, `jax.jvp`, `jacfwd` and `jacrev`.  The tangent's
+  coefficients may come from code JAX cannot differentiate, such as a
+  Jacobian an external kernel returns.
+- **A first-order rule is not enough for `diagnostics=True`.**  The
+  gradient-error bound differentiates the group's linearisation once
+  more.  A member whose rule cannot be differentiated again makes the
+  step raise when it is traced with `diagnostics=True`; with
+  `diagnostics=False` it steps and differentiates as usual.  See
+  [Inspecting a graph](../user_guide/inspection.md).
+
+The pattern, on a two-node group differentiated by `jax.grad`:
+
+```python
+import jax
+import jax.numpy as jnp
+from maddening import GraphManager
+from maddening.core.node import BoundaryInputSpec, SimulationNode
+
+
+@jax.custom_jvp
+def squash(g, u):
+    return jnp.tanh(g * u)
+
+
+@squash.defjvp
+def _squash_jvp(primals, tangents):
+    g, u = primals
+    g_dot, u_dot = tangents
+    y = jnp.tanh(g * u)
+    slope = 1.0 - y * y  # the coefficient; an external kernel may supply it
+    # Linear in (g_dot, u_dot) and written in jnp, so JAX can transpose it.
+    return y, slope * (g_dot * u + g * u_dot)
+
+
+class Squash(SimulationNode):
+    """``x <- squash(g, u) + c`` on a 3-entry field."""
+
+    def __init__(self, name, g, c):
+        super().__init__(name, 1.0, g=g, c=c)
+
+    def initial_state(self):
+        return {"x": jnp.zeros(3)}
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(3,), default=jnp.zeros(3))}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        return {"x": squash(p["g"], boundary_inputs["u"]) + p["c"]}
+
+
+def loss(g):
+    gm = GraphManager()  # a fresh graph: run_scan leaves a graph at its final state
+    gm.add_node(Squash("a", 0.8, 0.3))
+    gm.add_node(Squash("b", 0.5, 0.1))
+    gm.add_edge("b", "a", "x", "u")
+    gm.add_edge("a", "b", "x", "u")
+    gm.add_coupling_group(["a", "b"], tolerance=1e-7, max_iterations=200)
+    gm.compile()
+    p = jax.tree.map(lambda v: v, gm.params)
+    p["nodes"]["a"]["g"] = g
+    return jnp.sum(gm.run_scan(3, params=p)["a"]["x"] ** 2)
+
+
+g0 = jnp.float32(0.8)
+grad = float(jax.grad(loss)(g0))
+central = float((loss(g0 + 1e-3) - loss(g0 - 1e-3)) / 2e-3)
+assert abs(grad - central) < 1e-3 * abs(central), (grad, central)
+```
+
+The same `squash` written as a `jax.custom_vjp` fails in that group,
+under `linear_solver="gmres"` and `"dense"`, both iteration modes and the
+accelerations.  The [coupling algorithm
+guide](coupling_algorithm_guide.md#a-member-with-a-reverse-mode-only-derivative)
+has the measurements.
 
 ## Directory Structure
 
@@ -25,6 +166,7 @@ docs/algorithm_guide/nodes/your_node.md # Algorithm documentation
 
 ### 1. Implement the Node
 
+<!-- snippet: no-run, reason: pseudo-code: the template's placeholders (value, shape_tuple, min_val, the dots) are the author's to fill -->
 ```python
 """YourNode -- one-line description."""
 
@@ -78,13 +220,14 @@ class YourNode(SimulationNode):
         ),
     )
 
-    def __init__(self, name, timestep, **kwargs):
-        params = {"key": value, ...}
-        state_spec = {"field": shape_tuple, ...}
-        super().__init__(name, timestep, params, state_spec)
+    def __init__(self, name, timestep, key=value, shape=shape_tuple):
+        # Hand every constructor argument to the base class.  It keeps
+        # them in self.params, and params is all a saved graph carries
+        # (see "Where a constant belongs" below).
+        super().__init__(name, timestep, key=key, shape=shape)
 
     def initial_state(self):
-        return {"field": jnp.zeros(self.state_spec["field"])}
+        return {"field": jnp.zeros(self.params["shape"])}
 
     def param_specs(self):
         # Bounds / transforms / trainable flags for the constants below;
@@ -110,7 +253,11 @@ by default) is what the graph injects, `param_specs()` says what an
 optimiser may do with each leaf, and the `verify_node` battery's
 `params_consistent` / `params_gradient_finite` / `params_effective` checks
 fail on the classic mistakes (a constant read from `self.params` on one
-path only, a NaN gradient, a leaf the update never reads).  A node on the
+path only, a NaN gradient, a leaf the update never reads).  The battery
+draws every state field on its own in a box, so a field that only means
+something under a constraint (a unit quaternion, positive populations, a
+counter used as an index) needs `constrain_state=`: see
+[Fields with constraints](verification.md#fields-with-constraints).  A node on the
 old 3-argument `update` still works, but its constants are baked into the
 trace and absent from `gm.params`.
 
@@ -122,7 +269,7 @@ Every node **must** have a `meta` ClassVar. Required fields:
 |-------|----------|-------------|
 | `algorithm_id` | Yes | `MADD-NODE-XXX` format (get next available from existing nodes) |
 | `algorithm_version` | Yes | Semantic version of this algorithm implementation |
-| `stability` | Yes | `StabilityLevel.EXPERIMENTAL` for new nodes |
+| `stability` | Yes | {codeterm}`StabilityLevel.EXPERIMENTAL <EXPERIMENTAL>` for new nodes |
 | `description` | Yes | One-line description |
 | `assumptions` | Yes | Tuple of strings — every physical/mathematical assumption |
 | `limitations` | Yes | Tuple of strings — every known failure mode |
@@ -148,7 +295,7 @@ Copy `docs/algorithm_guide/nodes/_template.md` and fill in every section:
 docs/algorithm_guide/nodes/your_node.md
 ```
 
-**Mandatory sections**: Summary, Governing Equations, Discretization, Implementation Mapping, Assumptions and Simplifications, Validated Physical Regimes, Known Limitations and Failure Modes, Stability Conditions, State Variables, Parameters, Boundary Inputs, References, Verification Evidence, Changelog.
+**Mandatory sections**: Summary, Governing Equations, Discretization, Implementation Mapping, Assumptions and Simplifications, Validated Physical Regimes, Known Limitations and Failure Modes, Stability Conditions, State Variables, Parameters, {term}`Boundary Inputs <Boundary inputs>`, References, Verification Evidence, Changelog.
 
 **Implementation Mapping**: Trace every equation term to a specific Python/JAX function. No silent omissions. Terms handled by JAX primitives (e.g., `jnp.fft.rfftn()`) must be documented as such.
 
@@ -189,18 +336,20 @@ CI validates that every `[@Key]` citation in algorithm guides resolves to an ent
 - Verify `jax.grad` compatibility if the node supports differentiation
 - Verify `jax.vmap` compatibility if the node supports batching
 
-**Verification benchmark** (`tests/verification/test_your_node_*.py`) — mandatory for physics nodes:
+**{term}`Verification benchmark`** (`tests/verification/test_your_node_*.py`) — mandatory for physics nodes:
 - Compare against analytical solution or published reference data
 - Register with `@verification_benchmark`:
 
 ```python
-from maddening.core.validation import verification_benchmark
+from maddening.compliance import BenchmarkType, verification_benchmark
 
 @verification_benchmark(
     benchmark_id="MADD-VER-XXX",
     description="Your benchmark description",
-    node_class="YourNode",
-    reference="AuthorYear",
+    node_type="YourNode",
+    benchmark_type=BenchmarkType.ANALYTICAL,
+    acceptance_criteria="Max error below 1e-3 against the analytical solution",
+    references=("AuthorYear",),
 )
 def test_your_analytical_comparison():
     ...
@@ -210,7 +359,12 @@ def test_your_analytical_comparison():
 - Verify finiteness, structure preservation, determinism for random inputs
 - Test conservation laws and energy dissipation where applicable
 - See the [Verification Guide](verification.md) for the full checklist
+- A verified node is the first of three levels: the {term}`edges <Edge>` it is coupled through
+  (`verify_mapping`) and the coupled graph (`verify_graph_order`) have checks of
+  their own, in [Verifying a coupled model in three
+  levels](verification.md#verifying-a-coupled-model-in-three-levels)
 
+<!-- snippet: no-run, reason: pseudo-code: your_node and bounds={...} are placeholders -->
 ```python
 from maddening.testing.strategies import node_states, bounded_dt
 from hypothesis import given, settings
@@ -224,10 +378,11 @@ def test_your_node_always_finite(state, dt):
 ```
 
 **Integration test** — mandatory:
-- Test the node within a `GraphManager` (add node, connect edges, run steps)
+- Test the node within a {codeterm}`GraphManager` (add node, connect edges, run steps)
 
 ### 6. Apply the `@stability` Decorator
 
+<!-- snippet: no-run, reason: fragment: the decorator, excerpted from the template above -->
 ```python
 from maddening.core.compliance.stability import stability
 
@@ -236,7 +391,7 @@ class YourNode(SimulationNode):
     ...
 ```
 
-New nodes start as `EXPERIMENTAL`. Promote to `STABLE` when:
+New nodes start as `EXPERIMENTAL`. Promote to {codeterm}`STABLE` when:
 - At least one verification benchmark passes
 - Algorithm guide is complete
 - API has been stable for at least one minor release
@@ -249,16 +404,25 @@ If your node has known failure modes or limitations, add entries to `docs/valida
 - anomaly_id: "MADD-ANO-XXX"
   title: "YourNode: brief description of limitation"
   description: "Full description..."
-  severity: "major"            # critical | major | minor
+  severity: "major"            # critical | major | minor | enhancement
   safety_relevance: "context_dependent"
   safety_relevance_rationale: "..."
-  affected_components: ["YourNode"]
-  affected_versions: ["0.2.0"]
-  status: "open"
+  affected_components: ["maddening.nodes.your_node.YourNode"]
+  affected_versions: ">=0.5.0.dev0"   # PEP 440; see the registry header
+  resolution_status: "open"
   workaround: "..."
 ```
 
-Run `python -m maddening.compliance check-anomalies docs/validation/known_anomalies.yaml` to validate.
+`affected_components` are dotted paths the gate imports.  `affected_versions`
+is a PEP 440 specifier set read against the registry's `maddening_version`:
+`>=FIRST` while the defect is reachable, `>=FIRST, <FIX` once it is
+`resolved`, and a defect first introduced during a development cycle starts
+at that cycle's `.dev0` build, not at the release.  The full convention is in
+the header comment of `docs/validation/known_anomalies.yaml`.
+
+Run `python scripts/check_anomalies.py --prefix MADD-ANO-` to validate — the
+gate CI runs, which adds the version-range and evidence rules to the schema
+check that `python -m maddening.compliance check-anomalies` performs.
 
 ### 8. Run CI Checks
 
@@ -276,6 +440,215 @@ python scripts/check_anomalies.py
 python scripts/check_impl_mapping.py
 python scripts/check_citations.py
 ```
+
+## Where a constant belongs, and what a saved graph carries
+
+**A constant belongs in `params`.** Hand every constructor argument to
+`super().__init__(name, timestep, key=value, ...)` and read it back from
+`self.params` (a float through the injected `params`, as in the template
+above).
+
+A saved graph holds, for each node, its class name, `name`, `timestep` and
+`params`, and nothing else. `GraphManager.from_dict` on a `to_dict()`
+config and `load_graph_from_usd` on a saved stage both rebuild a node as
+`cls(name=..., timestep=..., **params)`. A constructor argument the class
+keeps anywhere else is therefore dropped by the save:
+
+<!-- snippet: no-run, reason: fragment: two constructors side by side, without the rest of their classes -->
+```python
+class Spring(SimulationNode):
+    def __init__(self, name, timestep, stiffness=12.0):
+        super().__init__(name, timestep)
+        self.stiffness = stiffness          # NOT saved: a reload runs 12.0
+
+
+class Spring(SimulationNode):
+    def __init__(self, name, timestep, stiffness=12.0):
+        super().__init__(name, timestep, stiffness=stiffness)   # saved
+```
+
+With the first class, `Spring("s", 0.01, stiffness=40.0)` saved and
+reloaded is a spring of stiffness 12, and the reloaded graph runs. Since
+0.4.0 every door that saves a node's constants says so (in every release
+before, nothing did, MADD-ANO-277): `to_dict()` (a config, `GET /graph`,
+the reply to `POST /graph/nodes`) and `save_graph_to_usd` give a
+`UserWarning` naming the node, its class, the arguments and the fix.
+
+**The rule goes by the name.** The warning is given when the node *was
+constructed with* an argument for a named parameter of its class's
+`__init__` (its own, or the one it inherits), at a value that is not
+exactly that parameter's default, and `node.params` has no key of that
+name.
+
+- "Exactly the default" means the same object, or a value of the same type
+  that is the same bit for bit: `-0.0` is not the default `0.0`, `2` is not
+  the default `2.0`, a list is not a tuple, and a `NaN` is the default
+  `NaN` only with the same sign and payload (`-nan` is not `nan`; a
+  complex `NaN` built at run time is the complex `NaN` default when its
+  bits are). A reload passes the default
+  itself, and only a value that cannot be told from it is known to build
+  the same node. A node built with its defaults is not warned about.
+- **The warning is not proof of a loss.** A class that saves an argument
+  another way is named too, although it reloads bit for bit: an argument
+  accepted under two spellings and saved under one (`period=` saved as
+  `frequency`), one handed to `super().__init__` under another name, a flag
+  that says how to read another argument (`per_minute=True`), an attribute
+  put back to its default before the save. Such a class says that it
+  answers for its own saving by overriding `to_dict()` (calling the base
+  one is enough), and a config then does not ask it:
+
+<!-- snippet: no-run, reason: fragment: one method of a class the prose describes -->
+```python
+    def to_dict(self):
+        return super().to_dict()    # `period` is saved, as `frequency`
+```
+
+- **Only a config honours an override of `to_dict()`.** `to_dict()` and
+  `GraphManager.to_dict()` write what the override returns, and `from_dict`
+  rebuilds from its `params`. For a node whose `update` takes `params`,
+  `GraphManager.to_dict()` writes the live (calibrated) values of the keys
+  of `node.params` into the `params` the override returns and keeps the
+  keys the override adds there, so the reloaded node has both.
+  `save_graph_to_usd` writes `params` and never calls `to_dict`, so it asks
+  such a class like any other, and its warning says that the override does
+  not reach a stage. A class that saves an argument under another name is
+  then named at the stage door although its stage reloads bit for bit; one
+  that adds the argument in its override is named because its stage loses
+  it. Hand such an argument to `super().__init__` under its own name, and
+  every door carries it.
+
+- **Silence is not proof that everything is saved.** The rule reads the
+  signature of the class's own constructor and nothing else, so these lose
+  an argument without a word:
+  - anything a `**kwargs` of the constructor took in. Most of it reaches
+    the base class's `**params` and is saved. An argument the class takes
+    out on the way is not, and neither is one that a subclass's `**kwargs`
+    hands up to a parent that keeps it as an attribute (`Child(gain=5.0)`
+    where `Parent.__init__` does `self.gain = gain`). The parents'
+    signatures are not read, because a parent may save such an argument
+    under another name (the built-in adaptive node takes
+    `blindness_threshold` and saves it as `gradient_capture_threshold`);
+  - anything an `*args` of the constructor took in;
+  - a node whose arguments were not seen when it was created: a class (or
+    a mixin placed before `SimulationNode`) whose own `__new__` hands no
+    arguments on, a copy (`copy.deepcopy`), an unpickled node;
+  - an attribute written after construction (`node.stiffness = 40.0`).
+
+What a save does not carry, whatever the class does:
+
+- `geometry_source`, which the base constructor takes out of `params`;
+- an attribute written after construction. It is also not a counted write:
+  see
+  [Live values, recompiles and partial pytrees](../user_guide/parameters.md#live-values-recompiles-and-partial-pytrees);
+- anything that is not in `params` because it cannot be: a callable, a
+  device mesh, a partition layout;
+- state. A config and a stage carry structure; a {term}`checkpoint <Checkpoint>`
+  (`gm.save_state`) carries the state and the live `gm.params`.
+
+**A node inside a wrapper, door by door.** The two doors differ here:
+
+| Saved from | `to_dict()` then `from_dict()` | `save_graph_to_usd` then `load_graph_from_usd` |
+|---|---|---|
+| a {term}`sharded <Sharded>` wrapper (`ShardedStencilNode`, `ShardedPointwiseNode`, `ShardedUnstructuredNode`) | reloaded **unsharded**, as the node it wraps, with a `UserWarning` that names the call that wraps it again | the stage names the wrapper's class, and the load raises: `KeyError` ("... is not allowed by this load") by default or with a `node_registry` that names only the wrapped node's class, `TypeError` once the wrapper's class is allowed (named in `node_registry`, or `allow_import=True`), because the wrapper is not built from `name, timestep, **params`; MADD-ANO-036 |
+| a `HybridNode` | the entry's type is `HybridNode`, and `from_dict` raises: `KeyError` when the registry has no `HybridNode`, `TypeError` when it has | the load raises: `KeyError` by default or with a `node_registry` without `HybridNode`, `TypeError` once `HybridNode` is allowed |
+
+So a graph that holds a wrapper is saved from the node it wraps: save the
+unwrapped graph, and wrap the node again after loading. A correction
+function and a device mesh are not in any save.
+
+An array in `params` is saved as the array it is. `GraphManager.to_dict()`
+does not turn it into lists, so write such a config with
+`json.dumps(config, default=lambda a: numpy.asarray(a).tolist())`, or hold
+the constant as nested lists in `params` (as `HeatNode` holds
+`grid_points` and `LBMNode` its `wall_mask`). A list carries no dtype: an
+array written this way is read back at the default float type. Under
+`jax_enable_x64` a float32, float16 or bfloat16 array comes back as
+float64, the state it is applied to is promoted, and the reloaded graph
+drifts from the saved one (1e-7 to 3e-7 after five steps in a state of
+order one, in the cases measured). With x64 off it comes back as float32, which holds every
+float16 and bfloat16 value exactly: a node that applies such a constant to
+a float32 state reloads bit for bit. A node that computes in the
+constant's own dtype (a float16 state built from its dtype, say) does not,
+in either mode: the reloaded node computes in float32 or float64 (4e-4 off
+for float16 and 2e-3 for bfloat16 after five steps in the case measured).
+
+### An array computed from a constant: `static_data_deps`
+
+Some nodes compute an array from their constants once, in `__init__`, and
+read it in every step: a lookup table, a grid, a basis. Publish such an
+array in the `static_data` property, each array wrapped in
+`StaticArray`. The compiled step closes over it, so it is baked into the
+compiled program as a constant, and that has two consequences for the
+constants it was computed from:
+
+- **a gradient cannot pass through it.** If such a constant is trainable,
+  a fit moves the constant while the step goes on reading the array built
+  from its old value, and the gradient leaves out the term through the
+  array;
+- **the step never reads the constant itself**, so a new value written to
+  `gm.params` would change nothing and then be saved by `to_dict()`.
+
+`static_data_deps()` writes the link down. It returns
+`{static_data_key: (param_key, ...)}`: for each static whose *contents*
+the step reads, the `self.params` keys those contents were computed from.
+The graph then holds you to both consequences:
+
+- `compile()` raises a `ValueError`, naming the static and the
+  parameter, when a declared parameter is a float leaf of `gm.params` left
+  trainable, by the node's `param_specs()` or by a `gm.set_param_spec`
+  override. Declare it `ParamSpec(trainable=False)`, or stop baking it and
+  compute the quantity inside `update()` from the injected `params`, so
+  the gradient reaches it.
+- Every run method, `check_params`, `to_dict()` and `save_state` refuse a
+  `gm.params` whose value for a declared parameter differs from the
+  node's own (`gm.reset_params()` drops the edit). The declaration does not
+  rebuild the array: to change such a constant, build the node again with
+  the new value.
+
+Declare nothing for a static built from literals, read from a file or
+passed in by the caller (it has no parameter to name), or for one whose
+values the step never reads: `HeatNode` builds `grid_x` from `length` on
+a uniform grid but computes its spacing from the traced `length`, so
+`length` stays trainable. A structural parameter (an `int`, `str` or
+`bool`, never a leaf of `gm.params`) is never refused; baking it is what
+the static channel is for.
+
+<!-- snippet: no-run, reason: fragment: three methods of the example's node, without its constructor and update -->
+```python
+from maddening.core.node import SimulationNode
+from maddening.core.params import ParamSpec
+from maddening.core.static_data import StaticArray
+
+
+class HeatedBody(SimulationNode):
+    # __init__ tabulates self._power, the heater's power against the grid
+    # self._grid, from heater_power and setpoint; update() reads the table.
+
+    def param_specs(self):
+        positive = ParamSpec(bounds=(0.0, None), transform="log")
+        baked = ParamSpec(trainable=False, description="tabulated into power_table")
+        return {**super().param_specs(),
+                "conductance": positive, "heat_capacity": positive,
+                "heater_power": baked, "setpoint": baked}
+
+    @property
+    def static_data(self):
+        return {"temperature_grid": StaticArray(self._grid, replication="replicate"),
+                "power_table": StaticArray(self._power, replication="replicate")}
+
+    def static_data_deps(self):
+        # The grid is built from literals and declares nothing.
+        return {"power_table": ("heater_power", "setpoint")}
+```
+
+`python -m maddening.examples.advanced.calibrated_node` is the whole node,
+about forty lines, followed by what a node author checks before handing it
+to `maddening.sysid`: `gm.nodes_without_params()` is empty (a node on the
+three-argument `update` is listed), `verify_node` passes, `compile()`
+refuses the node with `heater_power` made trainable, a run refuses a new
+`heater_power` written to `gm.params`, and `fit_lm` recovers the
+conductance and the heat capacity from a noisy temperature record, each
+within four Cramér–Rao standard deviations of the value that made the data.
 
 ## Boundary Input Specification
 
@@ -314,9 +687,14 @@ def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
     T = state["temperature"]
     dx = p["length"] / p["n_cells"]
     alpha = p["thermal_diffusivity"]
+    T_left = boundary_inputs.get("left_temperature")
+    # The rod end is at x = 0, half a cell outside T[0].  Anchor the
+    # reconstruction there; see "Report the flux where you say you do".
     return {
-        "left_heat_flux": -alpha * (T[1] - T[0]) / dx,
-        "right_heat_flux": -alpha * (T[-1] - T[-2]) / dx,
+        # The quadratic through (0, T_left), (dx/2, T[0]) and (3dx/2, T[1]),
+        # differentiated at the rod end.  2nd order; the right end is its
+        # mirror image.
+        "left_heat_flux": -alpha * (9.0 * T[0] - T[1] - 8.0 * T_left) / (3.0 * dx),
     }
 ```
 
@@ -325,16 +703,122 @@ Requirements:
 - Return a dict of JAX arrays
 - Keys become available as `source_field` on edges
 - Called automatically after each node update during edge resolution
+- Inside a coupling group, compute a flux from the state, or from inputs
+  that do not come from another member's flux in a loop: a flux is not part
+  of what a group iterates, so fluxes that read each other in a loop are
+  refused at `compile()` (see "Robin {term}`coupling <Coupling>`" below for the way out).
+- Read every input with `boundary_inputs.get(name, default)`, never
+  `boundary_inputs[name]`: the hook is called without the inputs that are
+  not available yet.  `validate()` asks it for its flux names with none, and
+  lists a hook that indexes an input as an `ERROR` naming the node and the
+  input; and the first of the two sweeps that compute a coupling group's
+  fluxes leaves out an input whose flux does not exist yet.
+- On a {term}`multi-rate <Multi-rate>` graph, a node slower than the base step holds its state
+  between the base steps it fires on, and the hook is called on **every**
+  base step with the state the node holds after that step and the
+  boundary inputs resolved at that step: a reader gets the flux of the
+  held state (as a reader of a state field gets the held state), computed
+  with this base step's inputs.  It is the flux a reader would compute
+  itself from the held state it can read.
 - If `update` takes `params`, take it here too and read the same
   constants from it: the graph passes the node's `gm.params` entry on
   every flux evaluation, so a calibrated constant changes the flux the
   edge delivers.  `verify_node`'s `params_consistent` fails a flux
   producer that forgets this.
+- `output_units` must be the units of the number you actually return.
+  `HeatNode` returns `-alpha dT/dx`, which is `K*m/s`; it declared
+  `W/m^2` until 0.4.0, short by the `rho*c_p` it has no parameter for.
+
+### Report the flux where you say you do
+
+On a cell-centred grid the obvious one-sided difference is at the
+wrong place, and nothing will tell you.  `-alpha * (T[1] - T[0]) / dx`
+is the gradient of the line through the first two cell *centres*, so it
+is the flux at `x = dx` — one whole cell inside the boundary the field
+name claims.  `HeatNode` shipped exactly that: on `T = exp(x)` with
+`alpha = 1` and 10 cells it reported -1.10563 where the rod-end flux is
+-1.0, and it refined at **order 1.005** while the node's own state
+converged at 2.000, capping any flux-coupled solve at first order
+through the flux alone.
+
+Three things make this class of defect hard to notice, and all three
+are worth checking in a new node:
+
+1. **A linear profile cannot see it.** The scheme is exact on a
+   straight line and every candidate reading gives the same number, so
+   the natural smoke test is blind. Pin the value against a *curved*
+   analytic profile.
+2. **`isfinite` and `> 0.0` are not value tests.** Those were the only
+   assertions on this flux for three releases.
+3. **Measure the order, not just the value.** A flux that is merely
+   *convergent* can still be convergent to the wrong point; the order
+   is what separates "approximate" from "misplaced".
+
+The fix is to anchor the reconstruction at the boundary. With the
+Dirichlet datum in `boundary_inputs`, fit a polynomial through
+`(0, T_boundary)` and the nearest cell centres and differentiate it
+there: with `k` cells the flux is `O(dx**k)`, so `k = stencil_order`
+keeps the interface at the accuracy of the node it belongs to. With no
+datum, extrapolate to the end from one extra cell instead of moving
+the reported point inwards.  `maddening.nodes.heat` does both through
+`_lagrange_gradient_weights`, and
+`tests/verification/test_mms_order.py::TestTheReportedBoundaryFluxIsAtTheRodEnd`
+measures 1.999 and 3.993 against the old 1.005.
+
+One trade-off to state in your docstring: a conservative
+finite-volume update's *own* face flux is the first-order
+`-alpha (T[0] - T_b) / (dx/2)`, and reporting the more accurate
+reconstruction means the reported flux is not bit-for-bit the flux
+that closes this node's discrete energy balance. The two differ by
+`O(dx**k)`. Report the physical flux — that is what a coupled
+neighbour needs — and say so.
+
+### Compute a coefficient where it is known, not where it is used
+
+The same discipline applies one level down, to *how* a coefficient is
+built rather than to where the quantity is reported.  **A value known at
+trace time should be computed in Python, not with `jnp` operations.**
+
+`compute_boundary_fluxes` above is the worked example.  Its first cut
+built the Lagrange interpolation weights out of traced arithmetic —
+`jnp` operations on the offsets, inside the step function — which is
+`O(k**3)` primitives per rod end.  None of those offsets was ever
+unknown at build time: on a uniform grid they are the fixed multiples
+`(2j+1)/2` of `dx`, and on a non-uniform one they are entries of
+`grid_points`, which is `ParamSpec(trainable=False)` geometry.  Measured
+on `heat_chain`, two 64-cell rods at `stencil_order=4`:
+
+| | jaxpr primitives | HLO ops |
+|---|---|---|
+| before the flux change | 243 | 287 |
+| traced coefficients | **557** | 287 |
+| Python coefficients (shipped) | 271 | 287 |
+
+**{term}`XLA` constant-folded every one of those 314 primitives away, so the
+lowered program was byte-identical and the HLO count could not see the
+regression** — while the graph builder did 2.3x the work on every
+compile.  The `+28` between the first and last rows is the real cost of
+reading more cells.
+
+So this is guidance about *compile* cost, not runtime: the executable is
+the same either way, which is exactly why it is easy to miss, and why
+the compile-count gate counts jaxpr primitives as well as HLO ops.
+`docs/developer_guide/profiling.md` describes `jaxpr_primitive_count` as
+"how much work the graph builder emits", and
+`python scripts/compile_counts.py --check` is what noticed this one.
+
+A systematic compile-cost pass over the framework is deliberately left
+to 0.5.0: Phase 3 changes the representation of `state`,
+`boundary_inputs` and `static_data`, and optimising before that lands
+would mean measuring a structure that is about to change.  Writing a
+constant in Python in the first place costs nothing and does not wait
+for it.
 
 ## Additive vs Replacive Inputs
 
 By default, if multiple edges write to the same boundary input, the last one wins ("replacive"). For inputs that should accumulate (e.g., forces from multiple sources), mark them as `"additive"`:
 
+<!-- snippet: no-run, reason: fragment: a dict entry and two edges, excerpted -->
 ```python
 # In boundary_input_spec():
 "force": BoundaryInputSpec(shape=(2,), coupling_type="additive")
@@ -346,6 +830,215 @@ gm.add_edge("spring2", "body", "spring_force", "force", additive=True)
 ```
 
 The first additive edge sets the initial value; subsequent additive edges accumulate via addition.
+
+## A node that draws random numbers
+
+`update()` is a pure function, so a noise node cannot keep a generator on
+`self` or call `numpy.random`: whatever decides the next sample has to be
+in the node's state.  In 0.4.0 the form that goes through every door of
+the framework is the key's **raw data**:
+
+- `initial_state()` returns `jax.random.key_data(jax.random.key(seed))`:
+  a `uint32` array, of shape `(2,)` for JAX's default generator;
+- `update()` wraps it (`jax.random.wrap_key_data`), splits, draws from the
+  sub-key, and returns the new key's data in the state;
+- the seed is a constructor parameter, kept as a Python `int`.
+
+```python
+import pathlib
+import tempfile
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+from maddening import GraphManager
+from maddening.core.node import BoundaryInputSpec, SimulationNode
+from maddening.core.params import ParamSpec
+
+
+class NoisySensor(SimulationNode):
+    """reading = signal + amplitude * N(0, 1), a new sample each time it fires."""
+
+    def __init__(self, name, timestep, seed=0, amplitude=1.0):
+        super().__init__(name, timestep, seed=int(seed), amplitude=float(amplitude))
+
+    def initial_state(self):
+        return {"reading": jnp.zeros(()),
+                "key": jax.random.key_data(jax.random.key(self.params["seed"]))}
+
+    def param_specs(self):
+        return {**super().param_specs(),
+                "seed": ParamSpec(trainable=False, description="PRNG seed")}
+
+    def boundary_input_spec(self):
+        return {"signal": BoundaryInputSpec(shape=(), default=0.0,
+                                            description="the measured quantity")}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        key, sub = jax.random.split(jax.random.wrap_key_data(state["key"]))
+        noise = jax.random.normal(sub, (), state["reading"].dtype)
+        signal = boundary_inputs.get("signal", jnp.zeros((), noise.dtype))
+        return {"reading": signal + p["amplitude"] * noise,
+                "key": jax.random.key_data(key)}
+
+
+def build(seed):
+    gm = GraphManager()
+    gm.add_node(NoisySensor("sensor", 0.01, seed=seed, amplitude=0.1))
+    gm.compile()
+    return gm
+
+
+_, history = build(7).run_scan_with_history(5)
+_, again = build(7).run_scan_with_history(5)
+_, other = build(8).run_scan_with_history(5)
+readings = np.asarray(history["sensor"]["reading"])
+assert len(set(readings.tolist())) == 5                      # a new sample each step
+assert np.array_equal(readings, np.asarray(again["sensor"]["reading"]))   # same seed
+assert not np.array_equal(readings, np.asarray(other["sensor"]["reading"]))
+assert history["sensor"]["key"].shape == (5, 2)              # the key after every step
+
+gm = build(7)
+assert "seed" not in gm.params["nodes"]["sensor"]            # no parameter of the graph
+assert gm.to_dict()["nodes"][0]["params"]["seed"] == 7       # and rebuilt from a config
+
+# A checkpoint holds the key data: a fresh graph that loads it goes on
+# with the stream where the saved one stood.
+gm.run_scan(3)
+with tempfile.TemporaryDirectory() as tmp:
+    path = gm.save_state(pathlib.Path(tmp) / "sensor.npz")
+    resumed = build(0)
+    resumed.load_state(path)
+_, tail = resumed.run_scan_with_history(2)
+assert np.allclose(np.asarray(tail["sensor"]["reading"]), readings[3:])
+```
+
+Test the *properties* of the stream, as the snippet does (a new draw each
+firing, the same stream from the same seed), and not drawn values: JAX
+does not promise the same numbers for a key from one release to the next,
+and the same key gives other numbers in `float64` than in `float32`.  For
+a generator other than the default, pass the same `impl=` to
+`jax.random.key` and to `jax.random.wrap_key_data`.
+
+### What holds through each door
+
+Each row is pinned by `tests/core/test_a_node_that_draws_random_numbers.py`
+(the REST rows by `tests/api/test_a_node_that_draws_random_numbers_over_rest.py`,
+USD by `tests/usd/test_usd_a_node_that_draws_random_numbers.py`).
+
+| Door | What holds |
+|------|------------|
+| `step`, `run_scan`, `run_scan_with_history` | A new sample each time the node fires; the same seed gives the same stream; the history holds the key data after every step. |
+| `run_sweep`, `jax.vmap`, `jax.jit` | A batch of keys (shape `(batch, 2)`) runs each one as its own stream, equal to its unbatched run. `run_sweep` leaves the graph's own key where it was. |
+| `save_state` / `load_state`, with or without a manifest | The key data is written as `uint32`; a fresh graph that loads it continues the stream. |
+| `to_dict` / `from_dict`, USD | A config holds the node and not its state: it carries the seed, and the rebuilt graph draws the stream from its first sample. So does `reset_state()`. |
+| `get_node_state` / `set_node_state` | Carry the key data; a recorded state written back resumes the stream there. |
+| A coupling group | One sample per step, the same on every pass of the solve (below). |
+| A multi-rate graph | A slow node draws when it fires (below); a slow group draws one sample per solve it applies; a {term}`sub-cycled <Sub-cycled>` member draws once per sub-step, the same on every pass. |
+| `run_adaptive`, `run_adaptive_scan` | Two draws per accepted step, none for a rejected attempt; the error estimate reads the noise as error (below). |
+| `jax.grad` | The derivative at a fixed key (below), plain and through a coupling group under `solver="ift"`. |
+| `maddening.sysid` | A record holds the key data of every sample, so `windowed_loss` replays the recorded draws and is exactly zero at the parameters that made the record. The seed is not a leaf of `gm.params`. |
+| `verify_node` | The battery accepts the key leaf as it draws it (below). |
+| {term}`FMU` export | The key data is a `UInt32` output and the FMU state resumes the stream. Only a `STABLE` node enters an FMU (or an {codeterm}`EVOLVING` one with `include_evolving=True`); the seed is not an FMU parameter. |
+| REST | `GET /graph/state/{node}` returns the key data as a list of integers; a `PUT` of it and the checkpoint routes resume the stream; a write that is not key data is a 400 naming the field. |
+
+### Three behaviours that surprise
+
+**A coupling-group member draws one sample per step, not one per pass.**
+Every pass of a group's solve calls each member's `update` with the state
+the step *started* from, so the key a member wraps is the same on every
+pass and so is the sample.  The solvers iterate floating fields only: an
+integer leaf is never relaxed, extrapolated by a predictor or entered in a
+residual, and the state a step returns holds the key one pass computes
+from the pre-step state.  So the key advances once per step, however many
+passes the solve takes, under either schedule, any acceleration, both
+solvers and all three norms, and through the return rule of
+`convergence_norm="interface"` (which recomputes some fields by one more
+pass).  It could not be otherwise: a new sample on every pass would change
+the map between passes, and an iteration on a map that changes has no
+{term}`fixed point <Fixed point>` to converge to.  The group converges to the fixed point *of
+that step's sample*, and `coupling_diagnostics()` reports what it would
+with the noise replaced by the constant it drew.  A sub-cycled member
+takes several sub-steps per pass and draws once in each, again the same on
+every pass.
+
+**A slow node's stream advances at its own rate.**  On a multi-rate graph
+a node at divider 4 draws one sample per four base steps and holds it in
+between.  Until 0.5.0 its `update` is still *computed* on every base step
+and the result kept only on the steps it fires on: the draws in between
+are made from the held key and discarded, so they cost a draw and change
+nothing.  (A slow coupling group is not computed on the steps it does not
+fire on.)
+
+**Noise is differentiated at a fixed key.**  The key is not a function of
+any parameter, so `jax.grad` of a loss is the derivative of *this
+realisation*: with respect to the amplitude it is the sample drawn, and a
+parameter upstream of the sensor is differentiated with the samples held
+fixed.  It is not the gradient of an expectation; for that, average the
+loss over a batch of keys (`run_sweep`).
+
+Adaptive stepping needs more care than a surprise.  Each attempt of
+`run_adaptive` takes one full step and two half steps from the same state:
+an accepted attempt keeps its two half steps, so the key advances twice
+per accepted step, and a rejected attempt is discarded whole, so the retry
+draws the same samples again.  The error estimate compares the full step
+with the half steps over the floating fields, and a field that holds a
+sample differs between them by the noise itself.  That reads as
+truncation error: unless the noise is below the tolerances, every step is
+rejected down to `dt_min` and accepted there by force (`run_adaptive`
+warns that it hit `dt_min`).  Step a graph that holds a noise node at a
+fixed timestep.
+
+### Declaring the seed
+
+Store the seed as `int(seed)` in the node's `params` and declare it
+`ParamSpec(trainable=False)` in `param_specs()`, as above.  It is then:
+
+- in `to_dict()` and in a USD stage, so a graph rebuilt from either has
+  the same stream;
+- not in `gm.params` (an integer whose spec is not trainable is
+  structural), so the trainable mask, `fim` and the fitters have no leaf
+  to move, and it is not an FMU parameter.
+
+Two spellings put it among the parameters instead, and a fit is then
+handed a leaf whose gradient is zero: a seed stored as a `float`, and a
+spec left at the default `ParamSpec()`, which is trainable and makes the
+graph promote the integer to a float leaf.  `verify_node`'s
+`params_effective` fails both, naming `seed`.  To run another stream,
+build the node with another seed, or write key data with
+`set_node_state`.
+
+`verify_node` needs no recipe for the default generator.  It draws an
+integer field over its dtype's whole range, and every pair of `uint32`
+words is valid key data, so each drawn state is one `update` can split.
+The checks that say something about a noise node are `deterministic` and
+`jit_consistent` (the sample is a function of the state) and
+`params_effective` (the amplitude is read; the seed is not a leaf).  For a
+generator whose key data is not arbitrary words, pass a `state_strategy`
+that builds each key from a drawn seed
+(`st.integers(...).map(lambda s: jax.random.key_data(jax.random.key(s)))`).
+
+### What does not work in 0.4.0
+
+A **typed** key leaf (`jax.random.key(seed)` itself in the state) steps,
+scans and runs inside a coupling group, and then fails at two doors:
+
+- `save_state` raises `TypeError: JAX array with PRNGKey dtype cannot be
+  converted to a NumPy array`, so the graph has no checkpoint
+  (MADD-ANO-171);
+- the REST server refuses to add such a node (`400`: `its state holds a
+  PRNG key ('key'), which has no JSON form, so no reply could carry the
+  state`), and cannot return the state of a graph handed to it with one.
+
+0.5.0 settles it: a typed key is to be written as its key data and
+rewrapped on load.  Until then keep the raw data, as above.
+
+A state may hold floating, integer, unsigned and boolean leaves in any
+graph.  A complex leaf steps in a plain graph and is refused inside a
+coupling group, at the first step (`TypeError: cannot carry a leaf of
+dtype complex64 through the coupling solver`).
 
 ## Non-state arrays and sharded execution
 
@@ -359,7 +1052,7 @@ channel; v0.2.1 added per-device materialisation under
 Added the `replication="partition"` variant of
 {class}`~maddening.core.static_data.StaticArray`, paired with
 {class}`~maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode`
-for graph-partitioned (non-Cartesian) sharding.  See
+for graph-partitioned (non-Cartesian) {term}`sharding <Sharding>`.  See
 [{doc}`sharding_topology`](sharding_topology.md) for the choice
 criteria and the partition-assignment handoff contract.
 ```
@@ -384,7 +1077,7 @@ under multi-GPU sharding:
 
 * {meth}`update_padded <maddening.core.node.SimulationNode.update_padded>` —
   the entry point `ShardedStencilNode` calls instead of `update()`.
-  Receives halo-padded state plus, when the node declares sharded
+  Receives {term}`halo <Halo>`-padded state plus, when the node declares sharded
   statics, a `static_padded` dict and a `shard_info` map of
   `{spatial_axis: (global_offset, local_extent)}` (the offset is a
   traced JAX scalar — `lax.dynamic_slice` works, Python integer
@@ -397,14 +1090,46 @@ under multi-GPU sharding:
   ): ...
   ```
 
+* `halo_boundary()` (optional, duck-typed) — declare it when your
+  `update_padded` imposes no condition at the edges of the global grid,
+  so that what arrives in the halo *is* the boundary condition, and name
+  the fill (`"periodic"`, `"edge"` or `"zero"`) under which the sharded
+  step reproduces your `update` on the whole grid.
+  `ShardedStencilNode` then refuses at construction any `boundary` that
+  differs -- its own default `"edge"` included -- because that would make
+  the sharded node a different model from the unsharded one; the user
+  passes your declared fill explicitly.
+  {meth}`LBMNode.halo_boundary <maddening.nodes.lbm.LBMNode.halo_boundary>`
+  returns `"periodic"`: its `update` streams with `jnp.roll`, and wrapping
+  it with the default `"edge"` used to run and move a walled channel's
+  centreline velocity by 0.64%; it now fails with a message saying to pass
+  `boundary="periodic"`.  Declare it too when your `update_padded` builds
+  its own ghosts at the global edges, so that no fill reaches the answer:
+  {meth}`HeatNode.halo_boundary <maddening.nodes.heat.HeatNode.halo_boundary>`
+  returns `"edge"` because `update_padded` closes the rod ends from
+  `left_temperature` / `right_temperature` exactly as `update` does, and
+  the declaration makes the wrapper refuse `"zero"` and `"periodic"`
+  rather than ignore them; HeatNode's refusal also names the inputs that
+  hold an end at 0.  A node
+  that declares nothing keeps the `"edge"` default and takes any of the
+  three fills as given, exactly as before; the wrapper refuses a
+  `boundary` that is not one of the three, as a string, at construction.
+  If a boundary condition of your node cannot be
+  applied on a slab (a condition on a face, applied to whatever edge
+  plane the slab has), refuse the sharded axis it lies on inside
+  `update_padded`, reading `shard_info`, as `LBMNode` does for its
+  pressure faces -- do not rely on a docstring.
+
 * {meth}`domain_integral_fields <maddening.core.node.SimulationNode.domain_integral_fields>` —
   declares output keys that are `jnp.sum`-over-lattice integrals
   (e.g. total drag force on an immersed body).  The wrapper applies
-  `lax.psum` across every mesh axis after `update_padded` returns,
-  so the host sees the correct global sum instead of per-shard
-  partials.  Default returns `set()`.
+  `lax.psum` across every mesh axis that splits the grid after
+  `update_padded` returns, so the host sees the correct global sum
+  instead of per-{term}`shard <Shard>` partials.  A mesh axis the `axis_map` leaves
+  unused holds a copy of the same block on every device and is not
+  summed over.  Default returns `set()`.
 
-Pointwise nodes ignore all three and keep using `update()`.  Stencil
+Pointwise nodes ignore all three and keep using `update()`.  {term}`Stencil`
 nodes that don't shard can still declare `static_data` for cache
 hygiene without touching `update_padded`.  See the
 {class}`HeatNode <maddening.nodes.heat.HeatNode>` source for an
@@ -416,22 +1141,41 @@ docstring for the validation contract.
 
 ### Value coupling (most common)
 One node's state field feeds another's boundary input:
+<!-- snippet: no-run, reason: fragment: gm is a graph holding the named nodes -->
 ```python
-from maddening.core.coupling_helpers import add_value_coupling
+from maddening.core.coupling.helpers import add_value_coupling
 add_value_coupling(gm, "ball", "spring", "position", "anchor_position")
 ```
 
 ### Flux coupling
 One node's flux output feeds another's boundary input:
+<!-- snippet: no-run, reason: fragment: gm is a graph holding the named nodes -->
 ```python
-from maddening.core.coupling_helpers import add_flux_coupling
+from maddening.core.coupling.helpers import add_flux_coupling
 add_flux_coupling(gm, "rod_a", "rod_b", "right_heat_flux", "heat_source")
 ```
+A flux is computed by `compute_boundary_fluxes`, not held in the state, so
+inside a coupling group it cannot be read where the loop reads an edge's
+value from the state: under `convergence_norm="interface"`, or by a
+sub-cycled member under `boundary_interpolation="linear"`.  `compile()`
+refuses both, naming the edge and the setting that works (`"mixed"` or
+`"l2"`; `"constant"`).
+
+### A node reading itself
+A term you would rather wire than write into `update` can be an edge from
+the node to itself.  Outside a coupling group the node reads its own value
+from the previous step (the term is explicit); in a coupling group, one of
+that node alone included, the edge is iterated with the group (implicit
+once it has converged).  `gm.validate()` says which in an `INFO:` line for
+the edge.  The two numbers, and what a cap, a stiff term or
+a sub-cycled member does to them, are in
+[An edge from a node to itself](coupling_algorithm_guide.md#an-edge-from-a-node-to-itself).
 
 ### Dirichlet-Neumann coupling
 The classic partitioned approach — one node gets a value BC, the other gets a flux BC:
+<!-- snippet: no-run, reason: fragment: gm is a graph holding the named nodes -->
 ```python
-from maddening.core.coupling_helpers import add_dirichlet_neumann_pair
+from maddening.core.coupling.helpers import add_dirichlet_neumann_pair
 add_dirichlet_neumann_pair(
     gm,
     dirichlet_node="rod_a",  # receives temperature (value)
@@ -445,21 +1189,56 @@ add_dirichlet_neumann_pair(
 ```
 
 ### Robin coupling
-Combines value and flux for better convergence:
+Feeds each node `alpha * value + (1 - alpha) * flux` of the other, for
+better convergence than a pure value exchange:
+<!-- snippet: no-run, reason: fragment: gm is a graph holding the named nodes -->
 ```python
-from maddening.core.coupling_helpers import add_robin_coupling
+from maddening.core.coupling.helpers import add_robin_coupling
 add_robin_coupling(
-    gm, "rod_a", "rod_b",
-    value_field_a="temperature", flux_field_a="right_heat_flux",
-    value_field_b="temperature", flux_field_b="left_heat_flux",
-    input_a="right_temperature", input_b="left_temperature",
+    gm, "node_a", "node_b",
+    value_field_a="u", flux_field_a="q",
+    value_field_b="u", flux_field_b="q",
+    input_a="robin_in", input_b="robin_in",
     alpha=0.5,  # mixing: 0=pure Neumann, 1=pure Dirichlet
 )
+gm.add_coupling_group(["node_a", "node_b"])
 ```
+The names are a user node's: no built-in node has a Robin input, and a
+`HeatNode` pair cannot use this helper.  Two constraints decide that.  The
+helper takes no transforms, so every value and flux field must already have
+the shape of the input it feeds (a `HeatNode`'s `temperature` is per cell and
+its end-temperature inputs are scalars; use `add_dirichlet_neumann_pair`,
+which takes transforms, for a rod pair).  And the pair must be a coupling
+group: each node reads the other's flux, a flux exists only once its node has
+stepped, and outside a group one of the two reads would come before it (the
+step fails with a `KeyError` naming the flux field).  The value and the flux
+are added as they are, so choose `alpha` for fields in commensurate units.
+
+**What each node's flux may read.**  A coupling group iterates the states of
+its members and not their fluxes: every pass computes each flux again from the
+states.  So the recipe above solves the coupled equations when each node's
+`q` is computed from its **state** (a node that holds its boundary data in
+its state).  If `compute_boundary_fluxes` reads the Robin datum the node is
+handed (`q = h * (u - robin_in)`, say), the two fluxes depend on each other
+in a loop that the passes do not solve, and `compile()` refuses the group
+with a `ValueError` that names the loop; `validate()` lists it as an `ERROR`.
+(Releases to 0.3.1 failed on such a pair with a `KeyError` at the first step;
+during 0.4.0's development it ran and reported `converged=True` at a state
+that was not the coupled solution: MADD-ANO-276.)  For such nodes carry the
+flux in the state: compute `q` in `update()`, return it as a state field, and
+pass that field as `flux_field_a` / `flux_field_b`.  The group then iterates
+`q` together with `u` and measures its convergence; on two affine nodes whose
+flux loop has gain 0.56 that leaves each state within 1.0e-6 of its value in
+the coupled solution, as a fraction of that value, where the flux edges left
+them 0.49 ({term}`Gauss-Seidel`) and 0.77 ({term}`Jacobi`) off by the same measure.  Whether
+a flux reads an input is decided by tracing `compute_boundary_fluxes` on the
+inputs the node is handed, whether or not `boundary_input_spec()` declares
+them; a hook that cannot be traced (one that computes on values, such as
+`float(state["u"])`) is taken to read every input, and the message says so.
 
 ## Transform Registration
 
-Edge transforms are Python callables applied to data as it flows along edges. For local development, inline lambdas work fine. For **USD serialization** (and eventually IEC 62304 traceability), transforms must be registered with a unique name.
+Edge transforms are Python callables applied to data as it flows along edges. For local development, inline lambdas work fine. For **USD serialization** (and eventually {term}`IEC 62304` traceability), transforms must be registered with a unique name.
 
 ### Registering a transform
 
@@ -474,6 +1253,7 @@ def extract_right_boundary(T):
 
 Once registered, use either the callable or its string name in edges:
 
+<!-- snippet: no-run, reason: fragment: gm is a graph holding the named nodes -->
 ```python
 gm.add_edge("rod_a", "rod_b", "temperature", "left_temperature",
             transform="extract_right_boundary")
@@ -506,7 +1286,7 @@ These are pre-registered and always available:
 
 ### CI validation
 
-The `scripts/check_transforms.py` CI script scans production code for string transform references and verifies they resolve in the registry. Run it alongside the other compliance checks:
+The `scripts/check_transforms.py` CI script scans `src/maddening/` and `tests/` for string transform references and verifies that each one resolves — in the global registry, or via a `@register_transform` call in the same file. Run it alongside the other compliance checks:
 
 ```bash
 python scripts/check_transforms.py
@@ -515,7 +1295,9 @@ python scripts/check_transforms.py
 ## New Node Checklist
 
 - [ ] `SimulationNode` subclass with `initial_state()` and `update()`
-- [ ] `update()` is JAX-traceable (jit, grad, vmap compatible)
+- [ ] `update()` is JAX-traceable (jit, grad, {term}`vmap` compatible)
+- [ ] If `update()` branches on the node's own state (contact, threshold, stick-slip), its gradient behaviour across the switch is stated in `NodeMeta.limitations` and pinned by a test ([Events inside `update()`](#events-inside-update-what-the-gradient-means), MADD-ANO-021)
+- [ ] If `update()` draws random numbers, the key's raw data is in the state and the seed is an `int` constructor parameter declared `trainable=False` ([A node that draws random numbers](#a-node-that-draws-random-numbers))
 - [ ] `boundary_input_spec()` overridden (declares expected boundary inputs)
 - [ ] `compute_boundary_fluxes()` overridden if node exposes flux quantities
 - [ ] Additive inputs marked with `coupling_type="additive"` in spec

@@ -13,6 +13,9 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
+from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.stability import stability
+
 
 class DistributionType(Enum):
     """Supported probability distribution types for UQ."""
@@ -52,6 +55,7 @@ class UncertainParameter:
     description: str = ""
 
 
+@stability(StabilityLevel.EVOLVING)
 @dataclass(frozen=True)
 class UncertaintySpec:
     """UQ specification for a node, returned by ``node.uncertainty_spec()``.

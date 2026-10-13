@@ -1,17 +1,32 @@
-"""ZMQ sidecar protocol for the MADDENING FMU shim.
+"""Sidecar for the MADDENING FMU shim, and its (pickle) in-process protocol.
 
 Architecture
 ~~~~~~~~~~~~
 
 The FMU itself is a compiled DLL/dylib/so loaded into a host
 co-simulation tool (FMPy / Simulink / OpenModelica).  The host calls
-FMI 3.0 C functions on it; the DLL marshals each call into a ZMQ
-message and forwards it to a long-running Python sidecar process
-that holds the JAX-JITted graph.  This is the only way to avoid
-paying XLA's startup cost on every FMU instantiation.
+FMI 3.0 C functions on it; the DLL marshals each call into a
+length-prefixed frame and forwards it over TCP to
+:class:`maddening.fmi.tcp_bridge.FmuTcpBridge`, which drives a
+long-running Python :class:`FmuSidecar` holding the JAX-JITted graph.
+This is the only way to avoid paying XLA's startup cost on every FMU
+instantiation.  No ZeroMQ is involved.
 
 Wire format
 ~~~~~~~~~~~
+
+.. warning::
+
+   :meth:`FmuSidecar.handle` speaks a **pickled** request/response
+   protocol, and unpickling a request executes whatever the sender put
+   in it.  It is therefore **off by default** since 0.4.0: a sidecar has
+   to be built with ``SidecarConfig(allow_pickle_rpc=True)`` before
+   ``handle`` will answer at all, and that opt-in is only ever
+   appropriate for an in-process caller whose bytes you already trust as
+   much as your own code.  Nothing in MADDENING calls it: the shipped
+   transport is :class:`maddening.fmi.tcp_bridge.FmuTcpBridge`, which
+   speaks length-prefixed JSON and raw arrays and never unpickles
+   anything.
 
 Every message is a length-prefixed bytes blob; the payload is a
 Python pickle.  Two message kinds:
@@ -47,13 +62,18 @@ from __future__ import annotations
 import pickle
 import traceback
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 import jax.numpy as jnp
 import numpy as np
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
+from maddening.core._exact_integers import lost_as_integer
+from maddening.core._graph_specs import _META_KEY
+from maddening.core._param_probes import _state_layout_drift
+from maddening.core.coupling._reports import _REPORT_SLOT_SUFFIXES
+from maddening.core.params import check_bounds
 from maddening.fmi.directional_derivatives import (
     DirectionalDerivativeKind,
     get_directional_derivative,
@@ -63,6 +83,7 @@ from maddening.fmi.fmu_state import (
     deserialize_fmu_state,
     serialize_fmu_state,
 )
+from maddening.fmi.model_description import _graph_changed_since
 
 
 def _copy_tree(tree: Any) -> Any:
@@ -71,6 +92,375 @@ def _copy_tree(tree: Any) -> Any:
     if isinstance(tree, dict):
         return {k: _copy_tree(v) for k, v in tree.items()}
     return tree
+
+
+def _not_tunable_error(name: str, reason: str, current: Any) -> ValueError:
+    """The refusal for a new value of a parameter the step cannot read.
+
+    Shared by :meth:`FmuSidecar.set_params`, :meth:`FmuSidecar.set_fmu_state`
+    and the bridge's ``set_state``, so every door into the parameter tree
+    says the same thing.
+    """
+    return ValueError(
+        f"parameter {name!r} is not tunable: {reason}.  The FMU would report "
+        f"the new value while every step kept computing with "
+        f"{np.array2string(np.asarray(current), threshold=8)}; nothing was "
+        "written"
+    )
+
+
+def _mapping_not_tunable_error(owner: str, key: str, current: Any) -> ValueError:
+    """The refusal for a snapshot that would install new interface-mapping
+    weights (``params["mappings"][owner][key]``).
+
+    Mapping weights are built from the graph when it is compiled, and are
+    not FMI variables: no ``set`` can reach them, so an FMU-state archive
+    may not change them either.  One that did made the FMU compute a
+    coupling its model description does not describe.
+    """
+    return ValueError(
+        f"FMU state would change the interface-mapping weights "
+        f"{owner!r} / {key!r}, which are not FMI variables: they are built "
+        f"from the graph when it is compiled, and no set can reach them.  "
+        f"The model computes with "
+        f"{np.array2string(np.asarray(current), threshold=8)}; nothing was "
+        "written"
+    )
+
+
+def _parameter_names(params: Optional[dict]) -> dict[str, tuple[str, str]]:
+    """``{"<node>.params.<key>": (node, key)}`` for every leaf of
+    ``params["nodes"]``, resolved by exact name.
+
+    A name is never split: a node's own name may hold ``.params.``
+    (``rig.params.v2``), and splitting ``rig.params.v2.params.elasticity``
+    at the first one named a node ``rig`` that does not exist, so every
+    set of such a parameter was refused as unknown and its fixed-parameter
+    rule was never applied.  Two leaves that would spell the same name
+    (node ``a.params.b`` key ``c`` and node ``a`` key ``b.params.c``) map
+    to ``None`` and are refused by name as ambiguous.
+    """
+    names: dict[str, Any] = {}
+    for node, leaves in ((params or {}).get("nodes") or {}).items():
+        for key in leaves:
+            name = f"{node}.params.{key}"
+            names[name] = None if name in names else (node, key)
+    return names
+
+
+def _same_leaf(a: Any, b: Any) -> bool:
+    x, y = np.asarray(a), np.asarray(b)
+    return x.shape == y.shape and bool(np.array_equal(x, y))
+
+
+def _number_kind_error(a: np.ndarray, target: np.dtype, what: str) -> Optional[ValueError]:
+    """The refusal for an incoming array whose *kind* is not a number the
+    target can take, or ``None``.
+
+    Numbers only: a string (``"45"``, which ``astype`` would parse), an
+    object array, or anything else that is not an integer or a float is
+    refused rather than coerced -- the rule :func:`maddening.fmi.tcp_bridge._value_reference`
+    already applies to a value reference.  A boolean is a number only to
+    a boolean leaf (``True`` used to be stored as ``1.0`` in a float
+    parameter), and a complex value only to a complex one (``astype``
+    would drop the imaginary part).
+    """
+    kind, to = a.dtype.kind, target.kind
+    if kind in "iuf" or (kind == "b" and to == "b") or (kind == "c" and to == "c"):
+        return None
+    what_it_is = {"b": "a boolean", "c": "a complex number", "U": "a string",
+                  "S": "a byte string", "O": "an object"}.get(kind, f"dtype {a.dtype}")
+    return ValueError(f"{what}: value must be a number, got {what_it_is} "
+                      f"({np.array2string(a, threshold=8)}); nothing was written")
+
+
+def _checked_value(arr: Any, dtype: Any, *, what: str) -> np.ndarray:
+    """``arr`` cast to ``dtype``, refused unless the model can hold it.
+
+    The one value check on every write path into a sidecar's parameters
+    and state: :meth:`FmuSidecar.set_params` here, and the TCP bridge's
+    ``set`` and ``set_state`` through
+    :func:`maddening.fmi.tcp_bridge.checked_value`, which delegates to
+    this function.  It lives in this module because the bridge imports
+    the sidecar and not the other way round.
+
+    Raises
+    ------
+    ValueError
+        If the incoming value is not a number (a string, an object, a
+        boolean for a numeric leaf: :func:`_number_kind_error`), is not
+        finite, or if ``dtype`` cannot hold it: a float32 leaf set to
+        ``1e39`` would be stored (and read back) as ``inf``, and one set to
+        ``1e-50`` as ``0.0`` -- the value lost entirely, its sign included;
+        an integer would wrap or truncate silently (an integer leaf takes a
+        whole number of its own range, judged without rounding it:
+        :func:`maddening.core._exact_integers.lost_as_integer`), and a
+        boolean leaf
+        takes a boolean or exactly 0 or 1 -- ``0.5``, ``2.0`` and ``-3.0``
+        used to be stored as ``True`` by their truthiness, from a ``set``
+        and from an FMU-state archive alike.  A value that rounds to a
+        subnormal keeps its sign and magnitude and is accepted; whether it
+        lies inside a parameter's bounds is :meth:`ParamSpec.check
+        <maddening.core.params.ParamSpec.check>`'s question.
+    """
+    a = np.asarray(arr)
+    target = np.dtype(dtype)
+    refusal = _number_kind_error(a, target, what)
+    if refusal is not None:
+        raise refusal
+    if np.issubdtype(a.dtype, np.inexact) and not bool(np.all(np.isfinite(a))):
+        raise ValueError(f"{what}: value must be finite")
+    if target.kind == "b" and a.dtype.kind in "iuf" and not bool(np.all((a == 0) | (a == 1))):
+        raise ValueError(
+            f"{what}: a Boolean takes true / false or exactly 1 / 0, got "
+            f"{np.array2string(a, threshold=8)}; nothing was written")
+    if np.issubdtype(target, np.integer) and bool(np.any(lost_as_integer(a, target))):
+        # Before the cast, and without rounding either side.  The check used
+        # to compare the cast with the value through float64, which made an
+        # int64 above 2**53 equal to its rounded neighbour and a float64 of
+        # 2**63 equal to the largest int64 wherever the out-of-range cast
+        # saturates (it wraps on x86 and saturates on ARM).
+        raise ValueError(f"{what}: value does not fit its type {dtype}")
+    with np.errstate(over="ignore", invalid="ignore"):
+        cast = a.astype(dtype)
+    if np.issubdtype(cast.dtype, np.floating):
+        # Finite, and not a non-zero value flushed to +-0 by the cast: both
+        # lose the value, at either end of the type's range.
+        fits = bool(np.all(np.isfinite(cast)) and not np.any((a != 0) & (cast == 0)))
+    else:
+        fits = True      # an integer: checked above; bool: only 0 / 1 reach here
+    if not fits:
+        raise ValueError(f"{what}: value does not fit its type {dtype}")
+    return cast
+
+
+#: How the name of a coupling group's report slot ends in ``_meta``
+#: (``coupling_{group key}_{suffix}``).  No other slot of a group ends so:
+#: its warm starts are ``_V``, ``_W``, ``_pred_count`` and ``_pred_{i}``.
+_REPORT_SLOT_ENDINGS = tuple(f"_{suffix}" for suffix in _REPORT_SLOT_SUFFIXES)
+
+
+def _is_report_slot(node: str, field: str) -> bool:
+    """Whether the state leaf ``node.field`` is a coupling group's report
+    slot: what its last solve measured, which
+    ``GraphManager.coupling_diagnostics`` reads.
+
+    A step writes every one of them and reads none (it asks two for their
+    dtype), so they describe a step and are not what the model continues
+    from, unlike the group's warm starts beside them.  And a non-finite
+    value is an ordinary reading there, on a model whose fields are all
+    finite: ``gradient_relative_error_bound`` is ``inf`` where the bound
+    does not certify (a group stopped at its iteration cap on a curved
+    map), the experimental ``geometry_plane_limit`` and
+    ``geometry_plane_margin`` are ``inf`` where no position the pass reads
+    can reach a lattice plane, and each spectral slot is ``NaN`` until a
+    solve fills it.  A restore therefore takes one as it is
+    (:func:`_restored_leaf`): an FMU refused the snapshot it had just
+    handed out, so an importer could not roll such a model back.
+    """
+    return (node == _META_KEY and field.startswith("coupling_")
+            and field.endswith(_REPORT_SLOT_ENDINGS))
+
+
+def _restored_leaf(value: Any, live: Any, *, what: str,
+                   initial: Any = None, report: bool = False) -> np.ndarray:
+    """A snapshot leaf, checked against the live leaf it would replace.
+
+    The shape must match and the value must pass :func:`_checked_value` in
+    the live leaf's dtype.  A leaf with no live counterpart is checked in
+    its own dtype (finite only).
+
+    ``report`` says the leaf is a coupling group's report slot
+    (:func:`_is_report_slot`).  A floating one restores with the
+    non-finite values it holds: every other check stands (the shape, a
+    number and not text, and a finite value must fit the slot's type), and
+    an integer report slot still takes no ``NaN``.
+
+    ``initial`` is the leaf as the FMU was instantiated, when the caller
+    has it: a value equal to it (``NaN`` equal to ``NaN``) is one the FMU
+    held itself, so it restores even where it is not finite.  A coupling
+    group with ``diagnostics=True`` seeds its spectral ``_meta`` slots with
+    ``NaN`` until a solve fills them, so a snapshot taken at instantiation
+    or after a reset holds them, and both restore paths refused it while
+    ``GraphManager.load_state`` restored the graph's own checkpoint.  A
+    field that *became* non-finite -- a diverged model -- still does not
+    restore.
+    """
+    arr = np.asarray(value)
+    if live is None:
+        return _checked_value(arr, arr.dtype, what=what)
+    live_arr = np.asarray(live)
+    if arr.shape != live_arr.shape:
+        raise ValueError(f"{what}: shape {arr.shape} != {live_arr.shape}")
+    if initial is not None and np.issubdtype(arr.dtype, np.inexact) \
+            and not bool(np.all(np.isfinite(arr))):
+        start = np.asarray(initial)
+        with np.errstate(over="ignore", invalid="ignore"):
+            cast = arr.astype(live_arr.dtype)
+        if start.shape == cast.shape and bool(np.array_equal(cast, start, equal_nan=True)):
+            return cast
+    if report and np.issubdtype(arr.dtype, np.inexact) \
+            and np.issubdtype(live_arr.dtype, np.floating):
+        finite = np.isfinite(arr)
+        if not bool(np.all(finite)):
+            # The finite entries by the rule of every leaf; the others as
+            # they are, in the slot's type.
+            checked = _checked_value(np.where(finite, arr, 0), live_arr.dtype, what=what)
+            with np.errstate(over="ignore", invalid="ignore"):
+                cast = arr.astype(live_arr.dtype)
+            return np.where(finite, checked, cast)
+    return _checked_value(arr, live_arr.dtype, what=what)
+
+
+def _state_key(node: str, field: str) -> str:
+    """How a state field is named in a key-set refusal (the bridge's member name)."""
+    return f"s/{node}/{field}"
+
+
+def _param_key(section: str, owner: str, key: str) -> str:
+    """How a parameter leaf is named in a key-set refusal (the bridge's member name)."""
+    return f"p/{section}/{owner}/{key}"
+
+
+def _key_set_error(what: str, expected: set, got: set) -> Optional[ValueError]:
+    """The refusal for a snapshot whose ``what`` (``"fields"``,
+    ``"parameters"`` or, for the bridge's archive, ``"inputs"``) are not
+    exactly the live model's, or ``None``.
+
+    Shared by :meth:`FmuSidecar.set_fmu_state` and the TCP bridge's
+    ``set_state``, which name members the same way (``s/<node>/<field>``,
+    ``p/<section>/<owner>/<key>``), so the two restore paths refuse a
+    partial or padded snapshot with the same words.
+    """
+    if got == expected:
+        return None
+    return ValueError(f"FMU state {what} differ from the model: "
+                      f"missing {sorted(expected - got)}, extra {sorted(got - expected)}")
+
+
+def _state_leaves(state: Any, *, what: str) -> dict[tuple[str, str], Any]:
+    """``{(node, field): leaf}`` of a graph state (``node -> {field: array}``)."""
+    if not isinstance(state, dict):
+        raise ValueError(f"{what}: expected a mapping of nodes, got {type(state).__name__}")
+    out: dict[tuple[str, str], Any] = {}
+    for node, fields in state.items():
+        if not isinstance(fields, dict):
+            # A graph state is node -> {field: array}; anything else is
+            # not a snapshot of this sidecar's model.
+            raise ValueError(f"{what} {node}: expected a mapping of fields, "
+                             f"got {type(fields).__name__}")
+        for field, value in fields.items():
+            out[(node, field)] = value
+    return out
+
+
+def _param_leaves(params: Any, *, what: str) -> dict[tuple[str, str, str], Any]:
+    """``{(section, owner, key): leaf}`` of a parameter tree
+    (``section -> {owner: {key: array}}``, the ``GraphManager.params`` layout)."""
+    if not isinstance(params, dict):
+        raise ValueError(f"{what}: expected a mapping of sections, got {type(params).__name__}")
+    out: dict[tuple[str, str, str], Any] = {}
+    for section, owners in params.items():
+        if not isinstance(owners, dict):
+            raise ValueError(f"{what} {section}: expected a mapping of owners, "
+                             f"got {type(owners).__name__}")
+        for owner, leaves in owners.items():
+            if not isinstance(leaves, dict):
+                raise ValueError(f"{what} {section}/{owner}: expected a mapping of "
+                                 f"parameters, got {type(leaves).__name__}")
+            for key, value in leaves.items():
+                out[(section, owner, key)] = value
+    return out
+
+
+def _copy_specs(specs: Optional[dict]) -> Optional[dict]:
+    """The ``section -> owner -> {key: ParamSpec}`` spine copied, so a
+    spec the bridge adds is never written into the caller's tree."""
+    if specs is None:
+        return None
+    return {section: ({owner: dict(leaves) for owner, leaves in owners.items()}
+                      if isinstance(owners, dict) else owners)
+            for section, owners in specs.items()}
+
+
+def _declared_inputs_resolver(
+    declared: Mapping[tuple[str, str], Any], *, whose: str = "this graph",
+) -> Callable[[Optional[dict]], dict]:
+    """A resolver with :meth:`GraphManager._resolve_external_inputs
+    <maddening.core.graph_manager.GraphManager._resolve_external_inputs>`'s
+    rule, over a fixed set of declared inputs.
+
+    ``declared`` maps every declared ``(node, field)`` to the zero leaf it
+    takes when a caller omits it.  The returned function completes a
+    caller's ``external_inputs`` with those zeros and refuses a name it
+    does not declare -- what ``GraphManager.step`` does, for a sidecar
+    that has no graph to ask (:class:`maddening.fmi.tcp_bridge.FmuTcpBridge`
+    builds one from its model description: the inputs it exports and the
+    ones it holds at zero).
+    """
+    zeros = {pair: leaf for pair, leaf in declared.items()}
+
+    def resolve(external_inputs: Optional[dict]) -> dict:
+        given = external_inputs or {}
+        unknown = sorted(f"{node}.{field}" for node, fields in given.items()
+                         for field in fields if (node, field) not in zeros)
+        if unknown:
+            known = sorted(f"{n}.{f}" for n, f in zeros)
+            raise ValueError(
+                f"external_inputs names {unknown}, which {whose} does not "
+                f"declare; declared external inputs: {known or ['(none)']}.  "
+                f"An undeclared name never reaches the node, so accepting it "
+                f"would mean the value silently did nothing; fix the name."
+            )
+        out: dict[str, dict] = {}
+        for (node, field), leaf in zeros.items():
+            out.setdefault(node, {})[field] = leaf
+        for node, fields in given.items():
+            out[node] = {**out.get(node, {}), **fields}
+        return out
+
+    return resolve
+
+
+def _step_compile(step_fn: Any) -> Optional[tuple[Any, int]]:
+    """``(graph, generation)`` when ``step_fn`` is a ``GraphManager``'s
+    compiled step (``gm._compiled_step``), which ``compile`` tags with the
+    graph and the compile it is; ``None`` for any other callable."""
+    tag = getattr(step_fn, "_maddening_compile", None)
+    if not (isinstance(tag, tuple) and len(tag) == 2 and callable(tag[0])):
+        return None
+    return tag[0](), tag[1]
+
+
+def _refuse_a_step_its_graph_has_left(step_fn: Any) -> None:
+    """Refuse a graph's compiled step once that graph has changed or been
+    compiled again.
+
+    The step bakes in every structural value it reads when it is traced,
+    so a sidecar built on it after a structural ``node.params`` write (or
+    any other change that makes the graph recompile) ran the old model --
+    or the new one, if the step had not been traced yet -- while every
+    graph entry point ran the new one.  A step that is not a graph's
+    compiled step (a wrapper, a test double) is not judged.
+
+    Raises
+    ------
+    ValueError
+        If the step's graph has changed since the compile that built it.
+    """
+    owner = _step_compile(step_fn)
+    if owner is None or owner[0] is None:
+        return
+    graph, generation = owner
+    stale = _graph_changed_since(graph, generation)
+    if stale is not None:
+        raise ValueError(
+            f"SidecarConfig.step_fn is the compiled step of compile {generation} of a "
+            f"graph, and {stale}.  The sidecar would run a model the graph does not "
+            "runs.  Call compile() on the graph, then build the model description and "
+            "the sidecar from it (step_fn=gm._compiled_step, initial_state=gm._state, "
+            "params=gm.params) without changing it in between."
+        )
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -85,8 +475,16 @@ class SidecarConfig:
         :class:`maddening.fmi.model_description.ModelDescription` this
         FMU was built from.  Used to validate snapshots on SetFMUState.
     step_fn : callable
-        ``step_fn(state, external_inputs) -> new_state``.  Typically
-        :meth:`GraphManager.step` bound to a particular graph.
+        ``step_fn(state, external_inputs) -> new_state``, or
+        ``step_fn(state, external_inputs, params)`` when ``params`` is
+        given: the graph's compiled step, ``GraphManager._compiled_step``.
+        :meth:`GraphManager.step` cannot serve -- it takes no state and
+        advances the graph's own.  Build the sidecar from a graph that is
+        unchanged since its last ``compile()``: :class:`FmuSidecar` refuses
+        a graph's compiled step once that graph has changed (a structural
+        ``node.params`` write, a node or edge added, ...) or been compiled
+        again, because the step bakes in what it reads when it is traced
+        and would run a model the graph no longer runs.
     initial_state : dict
         The seed state at FMU instantiation time.
     unknown_fn : callable, optional
@@ -104,8 +502,55 @@ class SidecarConfig:
         ``GraphManager.param_specs()`` for the same graph.  When given,
         :meth:`FmuSidecar.set_params` rejects a value outside a leaf's
         declared ``ParamSpec.bounds`` (the ``min`` / ``max`` the model
-        description advertises), so an importer cannot drive the step
-        with a constant the graph declares invalid.
+        description advertises), so an importer cannot drive the step with
+        a constant the graph declares invalid, and
+        :meth:`FmuSidecar.set_fmu_state` rejects a snapshot that would
+        install one -- a value the parameter neither holds now nor held
+        when the FMU was instantiated (a graph runs a value outside its
+        bounds, which are metadata to it, so an FMU can start outside them
+        and must restore its own snapshots).  The FMU-state archive path in
+        :class:`maddening.fmi.tcp_bridge.FmuTcpBridge` checks through the
+        same method (:meth:`FmuSidecar._check_restored_params`), so no door
+        into the parameter tree is wider than another.  A bridge holds
+        its sidecar to the ``min`` / ``max`` its model description
+        advertises whether or not this was given: for an exported
+        parameter with no spec here it adds one carrying those bounds, and
+        one with a spec here is held to that spec and to the advertised
+        bounds both.  A spec here that enforces another envelope than the
+        description advertises -- a ``gm.set_param_spec`` between building
+        the description and this config, or a hand-made tree -- makes the
+        bridge refuse to start, naming the parameter.
+    fixed_params : mapping of str to str, optional
+        ``{"<node>.params.<key>": reason}`` for parameters the compiled step
+        cannot read -- pass :attr:`ModelDescription.fixed_parameters
+        <maddening.fmi.model_description.ModelDescription.fixed_parameters>`.
+        :meth:`FmuSidecar.set_params` and :meth:`FmuSidecar.set_fmu_state`
+        refuse a *new* value for any of them (re-setting the current value
+        is accepted): it would be reported by :meth:`FmuSidecar.get_params`
+        and ignored by every step.  A sidecar holds only the compiled step,
+        so it cannot work this out alone; :class:`FmuTcpBridge
+        <maddening.fmi.tcp_bridge.FmuTcpBridge>` fills it from the model
+        description it serves, whatever was passed here.
+    allow_pickle_rpc : bool, default False
+        Let :meth:`FmuSidecar.handle` serve the pickled RPC protocol.
+        Unpickling a request runs arbitrary code from whoever supplied
+        the bytes, so ``handle`` refuses unless this is set; the TCP
+        bridge does not use it and does not need it.
+    input_resolver : callable, optional
+        ``input_resolver(external_inputs) -> external_inputs``, applied
+        before every step: pass the graph's own
+        ``gm._resolve_external_inputs``.  It completes the inputs a caller
+        omits with zeros and refuses a ``(node, field)`` the graph does not
+        declare -- what ``GraphManager.step`` does -- so
+        :meth:`FmuSidecar.step` computes what the graph computes.  Without
+        it, ``step_fn`` (``gm._compiled_step``, which validates nothing)
+        receives the inputs as given: an omitted input never reaches its
+        node, which then takes its own "input missing" branch (a ball with
+        no table falls through the floor), and a misspelt node name does
+        nothing at all.  :class:`FmuTcpBridge
+        <maddening.fmi.tcp_bridge.FmuTcpBridge>` installs a resolver built
+        from its model description when none was given here, covering the
+        inputs it exports and those the description holds at zero.
     """
     schema_token: str
     step_fn: Callable[..., dict]
@@ -113,6 +558,9 @@ class SidecarConfig:
     unknown_fn: Optional[Callable[[Any], Any]] = None
     params: Optional[dict] = None
     param_specs: Optional[dict] = None
+    fixed_params: Optional[Mapping[str, str]] = None
+    allow_pickle_rpc: bool = False
+    input_resolver: Optional[Callable[[Optional[dict]], dict]] = None
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -120,17 +568,111 @@ class FmuSidecar:
     """In-process FMU sidecar — handles FMI 3.0 RPC messages.
 
     Holds the JAX-JITted graph in long-running memory.  A real
-    deployment runs this as a separate process behind a ZMQ socket;
-    tests instantiate it directly and call :meth:`handle` to
-    exercise the protocol without involving a real socket.
+    deployment runs it in a Python process of its own, apart from the
+    importer's, behind :class:`~maddening.fmi.tcp_bridge.FmuTcpBridge`;
+    tests instantiate it directly and call :meth:`handle` to exercise the
+    protocol without involving a real socket.
+
+    Raises
+    ------
+    ValueError
+        If ``config.step_fn`` is a graph's compiled step and that graph has
+        changed or been compiled again since (see
+        :attr:`SidecarConfig.step_fn`).
     """
 
     def __init__(self, config: SidecarConfig) -> None:
+        _refuse_a_step_its_graph_has_left(config.step_fn)
         self._config = config
         self._state = dict(config.initial_state)
         self._params = (
             None if config.params is None else _copy_tree(config.params)
         )
+        #: The state and the parameter tree as instantiated, for the restore
+        #: checks (:meth:`_initial_state_leaf`, :meth:`_check_restored_params`);
+        #: never written.
+        self._initial_state = {n: dict(f) for n, f in config.initial_state.items()}
+        self._initial_params = (
+            None if config.params is None else _copy_tree(config.params)
+        )
+        self._fixed: dict[str, str] = dict(config.fixed_params or {})
+        # Copies, because a bridge adds to both from its model description
+        # (``_adopt_advertised_bounds``, ``_adopt_input_resolver``) and must
+        # never write into the caller's config.
+        self._param_specs: Optional[dict] = _copy_specs(config.param_specs)
+        #: ``{(node, key): ParamSpec}`` of the ``min`` / ``max`` a bridge's
+        #: model description advertises (``_adopt_advertised_bounds``),
+        #: checked on every write and restore alongside this sidecar's own
+        #: spec, so the accepted values are the intersection of the two.
+        self._advertised: dict[tuple[str, str], Any] = {}
+        self._input_resolver = config.input_resolver
+        #: Which trace of the graph's compiled step the last layout
+        #: comparison was made on (:meth:`_refuse_layout_drift`).
+        self._layout_checked_trace: Optional[int] = None
+
+    def _refuse_new_values_for(self, fixed: Mapping[str, str]) -> None:
+        """Add ``{"<node>.params.<key>": reason}`` to the parameters whose
+        new values are refused (the bridge's model-description contract)."""
+        for name, reason in fixed.items():
+            self._fixed.setdefault(name, reason)
+
+    def _adopt_advertised_bounds(self, specs: Mapping[tuple[str, str], Any]) -> None:
+        """Hold every write and restore of ``(node, key)`` to ``specs``
+        (the bridge's model-description contract: the ``min`` / ``max`` it
+        advertises hold however this sidecar was configured).
+
+        A parameter with no spec of its own gets the advertised one in
+        :attr:`param_specs`.  One with a spec keeps it there, and is held
+        to *both*: the sidecar's spec and the advertised bounds, the
+        intersection.  The bridge first refuses a sidecar whose spec
+        enforces another envelope than the description advertises
+        (``FmuTcpBridge._check_sidecar_envelope``); the intersection keeps
+        a value outside the advertised bounds out even so.  It used to keep
+        the sidecar's spec alone, assuming it was the declaration the
+        description had been built from, and a spec changed in between
+        (``gm.set_param_spec``) let a bridge accept values its XML forbids.
+        """
+        tree = self._param_specs if self._param_specs is not None else {}
+        nodes = tree.setdefault("nodes", {})
+        for (node, key), spec in specs.items():
+            nodes.setdefault(node, {}).setdefault(key, spec)
+            self._advertised[(node, key)] = spec
+        self._param_specs = tree
+
+    def _check_advertised(self, node: str, key: str, value: Any, own: Any) -> None:
+        """Refuse ``value`` for ``(node, key)`` outside the bounds a bridge's
+        description advertises (:meth:`_adopt_advertised_bounds`), unless
+        those bounds are the sidecar's own spec ``own``, already checked."""
+        advertised = self._advertised.get((node, key))
+        if advertised is not None and advertised is not own:
+            advertised.check(value, name=f"{node}.params.{key}")
+
+    def _adopt_input_resolver(self, resolver: Callable[[Optional[dict]], dict]) -> None:
+        """Use ``resolver`` before every step unless the sidecar was
+        configured with one (the graph's own is the better authority)."""
+        if self._input_resolver is None:
+            self._input_resolver = resolver
+
+    def _adopt_instantiation_params(self, params: dict) -> None:
+        """Make ``params`` both the current parameters and the ones this
+        FMU was instantiated with (the restore check's exemption)."""
+        self._params = _copy_tree(params)
+        self._initial_params = _copy_tree(params)
+
+    @property
+    def input_resolver(self) -> Optional[Callable[[Optional[dict]], dict]]:
+        """What completes and validates a step's external inputs, if anything.
+
+        ``SidecarConfig.input_resolver``, or the resolver a bridge built
+        from its model description when none was configured; ``None``
+        means :meth:`step` hands its inputs to ``step_fn`` as given.
+        """
+        return self._input_resolver
+
+    @property
+    def fixed_params(self) -> dict[str, str]:
+        """The parameters this sidecar refuses a new value for, with why."""
+        return dict(self._fixed)
 
     @property
     def state(self) -> dict[str, dict[str, Any]]:
@@ -140,16 +682,102 @@ class FmuSidecar:
     def params(self) -> Optional[dict]:
         return self._params
 
+    @property
+    def param_specs(self) -> Optional[dict]:
+        """The ``ParamSpec`` tree this sidecar validates against, if any.
+
+        ``{"nodes": {name: {key: ParamSpec}}, "mappings": {...}}``, the
+        layout :meth:`GraphManager.param_specs` returns.  Exposed so that
+        every writer into the parameter tree -- ``set_params`` here and
+        the FMU-state archive in
+        :meth:`maddening.fmi.tcp_bridge.FmuTcpBridge._decode_state` --
+        checks against the same declarations.  A bridge adds a spec for
+        every exported parameter that had none, carrying the ``min`` /
+        ``max`` its model description advertises.
+        """
+        return self._param_specs
+
     # -- High-level handlers -------------------------------------------------
 
-    def step(self, external_inputs: dict[str, dict[str, Any]]) -> dict:
-        if self._params is None:
-            self._state = self._config.step_fn(self._state, external_inputs)
-        else:
-            self._state = self._config.step_fn(
-                self._state, external_inputs, self._params,
-            )
+    def step(self, external_inputs: Optional[dict[str, dict[str, Any]]]) -> dict:
+        """Advance one step and commit it; returns the new state.
+
+        With an :attr:`input_resolver` (``SidecarConfig.input_resolver``,
+        or the one a bridge installs), ``external_inputs`` is completed and
+        checked as ``GraphManager.step`` does: an input it omits is zero,
+        and a ``(node, field)`` the graph does not declare is a
+        ``ValueError`` with nothing advanced.
+
+        Raises
+        ------
+        ValueError
+            If the resolver refuses ``external_inputs``.
+        """
+        self._state = self._advanced(self._state, external_inputs)
         return self._state
+
+    def _advanced(self, state: dict[str, dict[str, Any]],
+                  external_inputs: Optional[dict[str, dict[str, Any]]]) -> dict:
+        """``state`` one step on, under the current parameters, without
+        committing it.
+
+        :meth:`step` is this plus the commit.  The TCP bridge runs a
+        communication step's sub-steps through here on a local state and
+        commits once at the end, so a failed sub-step leaves nothing
+        behind and a step still running when the bridge is stopped writes
+        nothing into a stopped bridge's sidecar.  The inputs go through
+        :attr:`input_resolver` first, on both paths.
+        """
+        if self._input_resolver is not None:
+            external_inputs = self._input_resolver(external_inputs)
+        if self._params is None:
+            advanced = self._config.step_fn(state, external_inputs)
+        else:
+            advanced = self._config.step_fn(state, external_inputs, self._params)
+        self._refuse_layout_drift(state, advanced)
+        return advanced
+
+    def _refuse_layout_drift(self, state: Any, advanced: Any) -> None:
+        """Raise if one step gave *advanced* other keys, shapes or kinds of
+        dtype than *state* has, as ``GraphManager.step`` does.
+
+        The sidecar runs the graph's compiled step on a state of its own,
+        so the graph's check never sees it: a node that broadcasts a state
+        leaf at its first step (a list given for a scalar constant) left
+        the sidecar holding a state that is not the one its model
+        description declares.  Nothing is committed: :meth:`step` and the
+        bridge commit only what this returns.
+
+        A graph's compiled step is compared once per trace (the layout a
+        traced program returns is fixed by the layout it is given); any
+        other callable, and the step of a graph compiled again since, is
+        compared at every step.  Host-side: shapes and dtypes are read,
+        nothing is traced or computed.
+
+        Raises
+        ------
+        ValueError
+            Naming each leaf (``node/field``) and how it differs.
+        """
+        trace = None
+        owner = _step_compile(self._config.step_fn)
+        if owner is not None and owner[0] is not None:
+            graph, generation = owner
+            if getattr(graph, "_compile_generation", None) == generation:
+                trace = getattr(graph, "_n_traces", None)
+        if trace is not None and trace == self._layout_checked_trace:
+            return
+        drift = _state_layout_drift(state, advanced)
+        if drift:
+            raise ValueError(
+                "one step changes the layout of the state, which is then not the "
+                "state the model description declares: " + "; ".join(drift)
+                + " (leaves are named node/field).  A node's update() must return "
+                "its state with the shapes and kinds of dtype initial_state() gave "
+                "it: check the node's constructor values and the shapes its edges "
+                "and inputs deliver.  Nothing was advanced."
+            )
+        self._layout_checked_trace = trace
 
     def get_params(self) -> dict[str, Any]:
         """``{"<node>.params.<key>": value}`` for every FMI ``parameter``
@@ -167,11 +795,23 @@ class FmuSidecar:
         parameter value reference) into the pytree the next step uses.
 
         Keys are ``"<node>.params.<key>"``; an unknown name, a shape
-        that differs from the current leaf, or a value outside the
-        leaf's ``ParamSpec.bounds`` (when the config carries
-        ``param_specs``) is an error, so an importer cannot silently
-        tune a constant the step never reads or declares invalid.  The
-        call is atomic: nothing is written unless every update is valid.
+        that differs from the current leaf, a value that is not a number
+        (``"45"`` or ``True`` for a float leaf, which used to be stored as
+        45.0 and 1.0), not finite, or that the leaf's dtype cannot hold (a
+        float32 leaf set to ``1e39`` would read back as ``inf``), a new
+        value for a parameter the step cannot read
+        (``SidecarConfig.fixed_params``), or a value outside the leaf's
+        ``ParamSpec.bounds`` (when the sidecar has a spec for it: from
+        ``param_specs``, or added by a bridge from the ``min`` / ``max``
+        its model description advertises), or -- behind a bridge -- outside
+        the advertised ``min`` / ``max`` whatever the sidecar's own spec
+        admits, is an error, so an importer
+        cannot silently tune a constant the step never reads or declares
+        invalid.  The
+        value check is the TCP bridge's own, so ``set_params`` refuses
+        what the bridge's ``set`` refuses, with or without
+        ``param_specs``.  The call is atomic: nothing is written unless
+        every update is valid.
         """
         if self._params is None:
             raise RuntimeError(
@@ -179,23 +819,36 @@ class FmuSidecar:
                 "exposes no parameter variables.",
             )
         nodes = self._params.get("nodes", {})
-        spec_nodes = (self._config.param_specs or {}).get("nodes", {})
+        spec_nodes = (self._param_specs or {}).get("nodes", {})
+        names = _parameter_names(self._params)
         staged: list[tuple[str, str, Any]] = []
         for name, value in updates.items():
-            node, sep, key = name.partition(".params.")
-            if not sep or node not in nodes or key not in nodes[node]:
+            if name not in names:
                 raise KeyError(
                     f"unknown parameter {name!r}; known: {sorted(self.get_params())}",
                 )
+            owner = names[name]
+            if owner is None:
+                raise KeyError(
+                    f"parameter name {name!r} is ambiguous: two parameters of this "
+                    "model spell it (a node name holding '.params.'); rename a node")
+            node, key = owner
             current = nodes[node][key]
-            new = jnp.asarray(value, dtype=current.dtype)
+            # Checked before the cast, not after: ``jnp.asarray(1e39,
+            # dtype=float32)`` is ``inf``, NaN passes straight through, and
+            # without ``param_specs`` nothing below looks at the value.
+            new = jnp.asarray(_checked_value(
+                value, current.dtype, what=f"parameter {name!r}"))
             if new.shape != current.shape:
                 raise ValueError(
                     f"parameter {name!r} has shape {current.shape}, got {new.shape}",
                 )
+            if name in self._fixed and not _same_leaf(new, current):
+                raise _not_tunable_error(name, self._fixed[name], current)
             spec = spec_nodes.get(node, {}).get(key)
             if spec is not None:
                 spec.check(new, name=name)
+            self._check_advertised(node, key, new, spec)
             staged.append((node, key, new))
         for node, key, new in staged:
             nodes[node][key] = new
@@ -220,17 +873,166 @@ class FmuSidecar:
         )
 
     def set_fmu_state(self, fmu_state: FMUState) -> None:
+        """Restore a snapshot taken by :meth:`get_fmu_state` (or built with
+        :func:`~maddening.fmi.fmu_state.serialize_fmu_state`).
+
+        A snapshot is a door into the state and parameter tree, so it is
+        held to the checks the TCP bridge's ``set_state`` applies, with the
+        same messages, all before anything is committed: it must carry
+        exactly the live model's state fields and, when this sidecar has a
+        parameter tree, exactly its parameters -- no node, field or
+        parameter missing and none extra; every state leaf and every
+        parameter must be finite and representable in the dtype (and have
+        the shape) of the live leaf it replaces; a parameter the step
+        cannot read (``SidecarConfig.fixed_params``) may not change, nor
+        may an interface-mapping weight (``params["mappings"]``), which no
+        FMI variable reaches; and a restored parameter must lie inside its declared ``ParamSpec``
+        bounds when the config carries ``param_specs``, unless it is the
+        value the parameter holds now or held when the FMU was
+        instantiated (:meth:`_check_restored_params`).  A
+        snapshot of a *diverged* model -- one holding ``inf`` or ``NaN`` the
+        FMU did not start with -- therefore does not restore; the error
+        names the field.  A non-finite value the FMU was instantiated with
+        restores (a ``diagnostics=True`` coupling group's spectral ``_meta``
+        slots are seeded ``NaN``), and so does one in a coupling group's
+        report slot, where it is a reading and not a divergence (a
+        ``gradient_relative_error_bound`` of ``inf`` says the bound does
+        not certify; :func:`_is_report_slot`).  A sidecar without a parameter tree
+        refuses a snapshot that carries parameters, as the bridge's
+        ``set_state`` does (it used to ignore them).
+
+        Raises
+        ------
+        ValueError
+            On a schema-token mismatch or an unreadable payload (see
+            :func:`~maddening.fmi.fmu_state.deserialize_fmu_state`), or if
+            any of the checks above fails.  Nothing is written.
+        """
         state, params = deserialize_fmu_state(
             fmu_state, expected_schema_token=self._config.schema_token,
             return_params=True,
         )
-        self._state = state
-        if params is not None and self._params is not None:
-            self._params = {
-                k: ({n: {kk: jnp.asarray(vv) for kk, vv in leaves.items()}
-                     for n, leaves in v.items()} if isinstance(v, dict) else v)
-                for k, v in params.items()
-            }
+        # The key sets first, as the bridge compares its archive's members:
+        # a snapshot missing a node used to restore and leave the next step
+        # to fail with a KeyError (the sidecar stayed broken), one with an
+        # extra field restored it, and one missing a parameter leaf failed
+        # the next step's completeness check.
+        got_state = _state_leaves(state, what="FMU state")
+        live_state = _state_leaves(self._state, what="live state")
+        refusal = _key_set_error("fields", {_state_key(*k) for k in live_state},
+                                 {_state_key(*k) for k in got_state})
+        if refusal is not None:
+            raise refusal
+        # Rebuilt on the live skeleton, so a node with no fields -- which no
+        # key names -- is kept as it is.
+        new_state: dict[str, dict[str, Any]] = {node: {} for node in self._state}
+        for (node, field), live in live_state.items():
+            new_state[node][field] = _restored_leaf(
+                got_state[(node, field)], live, what=f"FMU state {node}.{field}",
+                initial=self._initial_state_leaf(node, field),
+                report=_is_report_slot(node, field))
+        new_params = None
+        got_params = ({} if params is None
+                      else _param_leaves(params, what="FMU state params"))
+        if self._params is None and got_params:
+            # A snapshot carrying parameters into a model with none: the
+            # bridge's set_state refuses it (its archive directory names
+            # members the model cannot hold), and this door used to drop
+            # them in silence.  The same refusal, from the same helper.
+            refusal = _key_set_error("parameters", set(),
+                                     {_param_key(*k) for k in got_params})
+            if refusal is not None:
+                raise refusal
+        if self._params is not None:
+            live_params = _param_leaves(self._params, what="live params")
+            refusal = _key_set_error("parameters",
+                                     {_param_key(*k) for k in live_params},
+                                     {_param_key(*k) for k in got_params})
+            if refusal is not None:
+                raise refusal
+            new_params = {section: {owner: {} for owner in owners}
+                          for section, owners in self._params.items()}
+            for (section, owner, key), live in live_params.items():
+                new_params[section][owner][key] = jnp.asarray(_restored_leaf(
+                    got_params[(section, owner, key)], live,
+                    what=f"FMU state param {owner}.params.{key}"))
+            # Tunability and the declared bounds, through the one method the
+            # bridge's set_state calls too, before anything is committed.
+            self._check_restored_params(new_params)
+        self._state = new_state
+        if new_params is not None:
+            self._params = new_params
+
+    def _initial_state_leaf(self, node: str, field: str) -> Any:
+        """The state field as this FMU was instantiated, or ``None``.
+
+        A restore accepts a non-finite value equal to it
+        (:func:`_restored_leaf`): the FMU held it itself.  Read by
+        :meth:`set_fmu_state` and by the TCP bridge's ``set_state``, so the
+        two restore paths judge a snapshot alike.
+        """
+        return self._initial_state.get(node, {}).get(field)
+
+    def _check_restored_params(self, new_params: dict) -> None:
+        """Refuse a restored parameter tree that installs what
+        :meth:`set_params` could not: a new value for a parameter the step
+        cannot read (``fixed_params``), new interface-mapping weights
+        (``params["mappings"]``, which no FMI variable reaches), or a value
+        outside a leaf's declared ``ParamSpec.bounds`` that the parameter
+        neither holds now nor held when this FMU was instantiated.
+
+        The one check of :meth:`set_fmu_state` and of the TCP bridge's
+        ``set_state`` (:meth:`maddening.fmi.tcp_bridge.FmuTcpBridge._decode_state`),
+        so the two restore paths refuse the same snapshots with the same
+        words.  Bounds are checked on the values a restore would *install*,
+        not on every leaf, for the reason ``fixed_params`` already compares
+        with the current value: a graph runs whatever its constructor was
+        given, bounds being metadata to it, so an FMU can be instantiated
+        with a parameter outside them -- and it then refused to restore the
+        snapshot it had handed out itself, while ``GraphManager.load_state``
+        restored the same graph's checkpoint.  Every value a snapshot of this
+        FMU can hold is its instantiation value or one :meth:`set_params`
+        accepted (inside the bounds), so its own snapshots restore and a
+        forged out-of-bounds value is still refused.
+
+        Raises
+        ------
+        ValueError
+            Naming the first parameter refused; nothing is written.
+        """
+        live = self._params or {}
+        live_nodes = live.get("nodes", {})
+        names = _parameter_names(live)
+        for name, reason in self._fixed.items():
+            owner = names.get(name)
+            if owner is None:
+                continue
+            node, key = owner
+            current = live_nodes[node][key]
+            restored = new_params.get("nodes", {}).get(node, {}).get(key, current)
+            if not _same_leaf(restored, current):
+                raise _not_tunable_error(name, reason, current)
+        # Every interface-mapping leaf is fixed: no FMI variable reaches it.
+        for owner_name, leaves in (live.get("mappings") or {}).items():
+            for key, current in leaves.items():
+                restored = (new_params.get("mappings") or {}).get(owner_name, {}).get(key, current)
+                if not _same_leaf(restored, current):
+                    raise _mapping_not_tunable_error(owner_name, key, current)
+        held = (live, self._initial_params or {})
+        installed: dict = {}
+        for section, owners in new_params.items():
+            for owner, leaves in (owners or {}).items():
+                for key, value in (leaves or {}).items():
+                    if any(_same_leaf(value, tree[section][owner][key]) for tree in held
+                           if key in tree.get(section, {}).get(owner, {})):
+                        continue
+                    installed.setdefault(section, {}).setdefault(owner, {})[key] = value
+        check_bounds(installed, self._param_specs or {})
+        own_nodes = (self._param_specs or {}).get("nodes", {}) or {}
+        for owner, leaves in (installed.get("nodes") or {}).items():
+            for key, value in leaves.items():
+                self._check_advertised(owner, key, value,
+                                       (own_nodes.get(owner) or {}).get(key))
 
     # -- Wire-level RPC -----------------------------------------------------
 
@@ -241,7 +1043,32 @@ class FmuSidecar:
         returned as ``("err", traceback_string)`` so the C wrapper
         can surface the failure to the FMI runtime via
         ``fmi3Status`` without losing the Python traceback.
+
+        .. warning::
+
+           ``pickle.loads`` on the request executes whatever produced the
+           bytes.  This method therefore refuses to run unless the
+           sidecar was built with
+           ``SidecarConfig(allow_pickle_rpc=True)``.  The shipped
+           transport, :class:`maddening.fmi.tcp_bridge.FmuTcpBridge`,
+           does not go through here; prefer it.
+
+        Raises
+        ------
+        RuntimeError
+            If the sidecar was not built with ``allow_pickle_rpc=True``.
         """
+        if not self._config.allow_pickle_rpc:
+            raise RuntimeError(
+                "FmuSidecar.handle speaks a pickled protocol, and unpickling "
+                "a request executes whatever produced it.  It is disabled "
+                "unless the sidecar is built with "
+                "SidecarConfig(..., allow_pickle_rpc=True), which is only "
+                "appropriate for an in-process caller you trust as much as "
+                "your own code.  The shipped FMU transport is "
+                "maddening.fmi.tcp_bridge.FmuTcpBridge, which never "
+                "unpickles anything.",
+            )
         try:
             payload = pickle.loads(request)
         except Exception as exc:  # pragma: no cover — pickle errors

@@ -1,0 +1,1085 @@
+"""What ``maddening.sysid`` does when its inputs are degenerate.
+
+The fitters and :func:`~maddening.sysid.fim` are the surface a user
+trusts to tell them whether their data determine their constants, so the
+failure that matters here is not an exception -- it is a confident
+answer that is wrong.  Every test below fixes one way that used to
+happen, with the reproducer it came from named in the test.
+
+Reproducers: ``benchmarks/results/audit_040_final/params-io/repro/``
+(``r6_fim.py``, ``r7_fim_crb.py``, ``r8_fim_relative_zero.py``,
+``r9_fit_degenerate.py``, ``r10_noop_fit_drift.py``,
+``r14_mask_structure.py``).
+"""
+
+import os
+
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
+
+import collections
+import contextlib
+import warnings
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+from maddening.core.graph_manager import GraphManager
+from maddening.nodes.spring import SpringDamperNode
+from maddening.sysid import _rank_and_crb, fim, fit, fit_lm
+from maddening.warnings import PrecisionLimitWarning
+
+
+def _spring_gm():
+    gm = GraphManager()
+    gm.add_node(SpringDamperNode("s", 0.01, stiffness=30.0, damping=2.0,
+                                 mass=1.5, rest_length=1.0,
+                                 initial_position=0.5))
+    gm.compile()
+    return gm
+
+
+_PARAMS = {"a": jnp.asarray(1.0), "b": jnp.asarray(2.0)}
+
+
+def _residual(p):
+    return jnp.asarray([p["a"], 2.0 * p["b"]])
+
+
+# ---------------------------------------------------------------------------
+# The +inf fail-safe (r7_fim_crb.py, r6_fim.py)
+# ---------------------------------------------------------------------------
+
+
+def test_an_eigendecomposition_that_is_not_finite_reports_no_finite_bound():
+    """``FIMReport`` promises ``crb = +inf`` *because* it fails safe.
+
+    With a NaN decomposition the old test (``support > n * eps``) was
+    False for every parameter -- NaN compares False against everything --
+    so the empty resolved-subspace sum, ``0.0``, survived as the bound
+    and ``crb < tol`` answered "identified" for a matrix holding no
+    information at all.
+    """
+    n = 3
+    nan_ev = jnp.full((n,), jnp.nan, dtype=jnp.float32)
+    nan_vecs = jnp.full((n, n), jnp.nan, dtype=jnp.float32)
+    rank, crb = _rank_and_crb(nan_ev, nan_vecs, None)
+    crb = np.asarray(crb)
+    assert rank == 0
+    assert np.all(np.isinf(crb)), crb
+    assert not np.any(crb < 1e-6), "an unidentifiable parameter read as identified"
+
+
+def test_a_partly_resolved_decomposition_with_a_nan_direction_fails_safe():
+    """One good eigenvalue does not license a bound on the NaN direction."""
+    ev = jnp.asarray([jnp.nan, 1.0], dtype=jnp.float32)
+    vecs = jnp.asarray([[jnp.nan, 0.0], [jnp.nan, 1.0]], dtype=jnp.float32)
+    _, crb = _rank_and_crb(ev, vecs, None)
+    assert np.all(np.isinf(np.asarray(crb)))
+
+
+def test_fim_refuses_to_report_on_a_non_finite_fisher_matrix():
+    def nan_residual(p):
+        return jnp.asarray([p["a"] * jnp.nan, p["b"]])
+
+    with pytest.raises(FloatingPointError, match="non-finite Fisher matrix"):
+        fim(nan_residual, _PARAMS, scale=None)
+
+
+@pytest.mark.parametrize("sigma", [0.0, -1.0, float("nan"), float("inf"), 1e-320])
+def test_fim_rejects_a_noise_std_that_is_not_positive_at_the_residual_precision(sigma):
+    """``1e-320`` is ``0.0`` once cast to float32, which is why the check
+    runs after the cast rather than on the caller's Python float."""
+    with pytest.raises(ValueError, match="noise_std must be finite and strictly positive"):
+        fim(_residual, _PARAMS, scale=None, noise_std=sigma)
+
+
+def test_fim_rejects_a_non_positive_sigma_inside_a_pytree_noise_model():
+    def tree_residual(p):
+        return {"x": jnp.asarray([p["a"]]), "y": jnp.asarray([p["b"]])}
+
+    with pytest.raises(ValueError, match="noise_std must be finite and strictly positive"):
+        fim(tree_residual, _PARAMS, scale=None, noise_std={"x": 1.0, "y": 0.0})
+
+
+def test_fit_lm_rejects_a_non_positive_sigma_on_the_same_path():
+    gm = _spring_gm()
+    step, ext = gm._compiled_step, gm._default_external_inputs()
+    target = step(gm._state, ext, gm.params)["s"]
+
+    def residual(p):
+        return step(gm._state, ext, p)["s"]["position"] - target["position"]
+
+    with pytest.raises(ValueError, match="noise_std must be finite and strictly positive"):
+        fit_lm(gm, residual, n_iter=1, noise_std=-1.0)
+
+
+def test_a_positive_noise_std_still_scales_the_information():
+    base = fim(_residual, _PARAMS, scale=None)
+    scaled = fim(_residual, _PARAMS, scale=None, noise_std=2.0)
+    np.testing.assert_allclose(np.asarray(scaled.fim), np.asarray(base.fim) / 4.0,
+                               rtol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# A mask is read by position, so its structure has to match (r14_mask_structure)
+# ---------------------------------------------------------------------------
+
+
+def _relabelled(tree, labels):
+    """``tree``'s leaves under different keys, same flatten order."""
+    leaves = jax.tree.leaves(tree)
+    return {name: leaf for name, leaf in zip(sorted(labels), leaves)}
+
+
+def test_a_mask_whose_keys_differ_from_params_is_refused_by_fit():
+    """The count matched and the keys did not, so the flags landed by
+    flatten position: the audit marked ``damping`` and the fit moved
+    ``stiffness`` from 30.0 to 76.3."""
+    gm = _spring_gm()
+    names = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"]
+    mask = {"nodes": {"s": _relabelled(gm.params["nodes"]["s"], names)}}
+    mask["nodes"]["s"] = {k: (k == "zeta") for k in mask["nodes"]["s"]}
+    assert len(jax.tree.leaves(mask)) == len(jax.tree.leaves(gm.params))
+
+    with pytest.raises(ValueError, match="same tree structure as params"):
+        fit(gm, lambda p: jnp.sum(jnp.asarray(p["nodes"]["s"]["stiffness"]) ** 2),
+            mask=mask, n_iter=1)
+
+
+def test_the_structure_error_names_the_first_path_that_differs():
+    gm = _spring_gm()
+    mask = {"nodes": {"s": {k if k != "damping" else "zeta": False
+                            for k in gm.params["nodes"]["s"]}}}
+    mask["nodes"]["s"]["stiffness"] = True
+    with pytest.raises(ValueError) as excinfo:
+        fit(gm, lambda p: jnp.asarray(0.0), mask=mask, n_iter=1)
+    message = str(excinfo.value)
+    assert "They first differ at leaf" in message
+    assert "['nodes']['s']['damping']" in message
+
+
+def test_a_mask_missing_only_an_empty_container_names_it():
+    """``gm.params`` is ``{"nodes": ..., "mappings": {}}``; a hand-written
+    mask of ``{"nodes": ...}`` -- the natural spelling for a graph with no
+    interface mappings -- has every leaf params has.  The refusal is right
+    (the structures differ), but it used to print the same six leaf paths
+    twice and no "first differ" clause, so it did not say what to fix.
+    (audit_040_p4_4/fmu-sysid/repro_mask_refusal_message.py)"""
+    gm = _spring_gm()
+    mask = {"nodes": {"s": {k: (k == "stiffness") for k in gm.params["nodes"]["s"]}}}
+    with pytest.raises(ValueError, match="same tree structure as params") as excinfo:
+        fit_lm(gm, lambda p: p["nodes"]["s"]["stiffness"][None] - 40.0, mask=mask, n_iter=1)
+    message = str(excinfo.value)
+    assert "params['mappings'] is an empty dict, and mask has no such key" in message
+    assert "same 6 leaves" in message
+    # The leaf list is given once, not twice.
+    assert message.count("['nodes']['s']['damping']") == 1
+
+
+@pytest.mark.parametrize("mask, says", [
+    ({"a": True, "b": (True, False), "c": {}},
+     "at params['b'], params has a list holding 2 leaves and mask has a tuple"),
+    ({"a": True, "b": [True, False], "c": {}, "d": None},
+     "mask['d'] is None, and params has no such key"),
+    ({"a": True, "b": [True, False], "c": {"x": {}}},
+     "mask['c']['x'] is an empty dict, and params has no such key"),
+])
+def test_a_structure_that_differs_where_no_leaf_is_is_named(mask, says):
+    params = {"a": jnp.float32(1.0), "b": [jnp.float32(2.0), jnp.float32(3.0)], "c": {}}
+
+    def residual(p):
+        return jnp.stack([p["a"], p["b"][0], p["b"][1]])
+
+    with pytest.raises(ValueError, match="same tree structure as params") as excinfo:
+        fim(residual, params, mask=mask)
+    assert says in str(excinfo.value)
+
+
+def test_a_mask_built_from_the_params_tree_is_still_accepted():
+    gm = _spring_gm()
+    mask = jax.tree.map(lambda _: False, gm.params)
+    mask["nodes"]["s"]["stiffness"] = True
+    res = fit(gm, lambda p: jnp.sum(jnp.asarray(p["nodes"]["s"]["stiffness"]) ** 2),
+              mask=mask, n_iter=2, lr=0.1)
+    assert not np.array_equal(np.asarray(res.params["nodes"]["s"]["stiffness"]),
+                              np.asarray(gm.params["nodes"]["s"]["stiffness"]))
+
+
+def test_fim_refuses_a_mask_whose_keys_differ_from_params():
+    params = {"a": jnp.float32(2.0), "b": jnp.float32(3.0)}
+    with pytest.raises(ValueError, match="same tree structure as params"):
+        fim(_residual, params, mask={"a": True, "c": False})
+
+
+# ---------------------------------------------------------------------------
+# Relative scaling at zero (r8_fim_relative_zero.py)
+# ---------------------------------------------------------------------------
+
+
+def test_fim_names_the_parameters_relative_scaling_zeroed():
+    """With ``J = I`` every parameter is exactly identifiable; the one
+    sitting at 0.0 still reports ``crb = +inf`` under the default scale,
+    because its column was multiplied by its value.  The report has to
+    say that is what happened."""
+    params = {"a": jnp.float32(2.0), "zero": jnp.float32(0.0)}
+
+    def identity_residual(p):
+        return jnp.stack([p["a"], p["zero"]])
+
+    rel = fim(identity_residual, params)          # scale="relative", the default
+    absolute = fim(identity_residual, params, scale=None)
+
+    assert rel.zero_scaled == ("['zero']",)
+    assert np.isinf(np.asarray(rel.crb)[rel.param_names.index("['zero']")])
+    assert rel.rank == 1
+    # The absolute question has an answer, and the report does not
+    # pretend the relative one was it.
+    assert absolute.zero_scaled == ()
+    assert np.all(np.isfinite(np.asarray(absolute.crb)))
+    assert absolute.rank == 2
+
+
+def test_a_report_with_no_zero_valued_parameter_names_none():
+    params = {"a": jnp.float32(2.0), "b": jnp.float32(3.0)}
+    assert fim(_residual, params).zero_scaled == ()
+
+
+# ---------------------------------------------------------------------------
+# Hyper-parameters that invert their own meaning (r9_fit_degenerate.py)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("kwargs,match", [
+    ({"lr": 0.0}, "lr must be greater than 0"),
+    ({"lr": -0.1}, "lr must be greater than 0"),
+    ({"eps": 0.0}, "eps must be greater than 0"),
+    ({"eps": -1e-8}, "eps must be greater than 0"),
+    ({"tol": float("nan")}, "tol must be a finite number"),
+    ({"tol": -1.0}, "tol must be at least 0"),
+    ({"betas": (1.0, 0.999)}, r"betas\[0\] must be less than 1"),
+    ({"betas": (0.9, 1.0)}, r"betas\[1\] must be less than 1"),
+    ({"n_iter": -1}, "n_iter must be an integer"),
+    ({"notify_every": -1}, "notify_every must be an integer"),
+])
+def test_fit_rejects_a_hyper_parameter_with_no_reading(kwargs, match):
+    gm = _spring_gm()
+    call = {"n_iter": 2, **kwargs}
+    with pytest.raises(ValueError, match=match):
+        fit(gm, lambda p: jnp.asarray(0.0), **call)
+
+
+@pytest.mark.parametrize("kwargs,match", [
+    ({"lam0": 0.0}, "lam0 must be greater than 0"),
+    ({"lam0": -1.0}, "lam0 must be greater than 0"),
+    ({"lam_up": 0.5}, "lam_up must be greater than 1"),
+    ({"lam_up": 1.0}, "lam_up must be greater than 1"),
+    ({"lam_down": 2.0}, "lam_down must be at most 1"),
+    ({"step_tol": -1.0}, "step_tol must be at least 0"),
+    ({"tol": float("nan")}, "tol must be a finite number"),
+])
+def test_fit_lm_rejects_a_hyper_parameter_with_no_reading(kwargs, match):
+    gm = _spring_gm()
+    with pytest.raises(ValueError, match=match):
+        fit_lm(gm, lambda p: jnp.ones(3, jnp.float32), n_iter=1, **kwargs)
+
+
+def test_the_documented_defaults_are_inside_the_accepted_range():
+    """A validator that rejected its own defaults would be worse than none."""
+    gm = _spring_gm()
+    fit(gm, lambda p: jnp.asarray(0.0), n_iter=1)
+    fit_lm(gm, lambda p: jnp.ones(3, jnp.float32), n_iter=1)
+
+
+# ---------------------------------------------------------------------------
+# A wrongly typed argument is refused, not read
+# (audit_040_p4_8/fmu-sysid/repro_hyper_and_mask_types.py)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("call", [
+    pytest.param(lambda gm: fit(gm, lambda p: jnp.asarray(0.0), n_iter=2, tol=True),
+                 id="fit-tol-True"),
+    pytest.param(lambda gm: fit(gm, lambda p: jnp.asarray(0.0), n_iter=2, lr="0.05"),
+                 id="fit-lr-string"),
+    pytest.param(lambda gm: fit(gm, lambda p: jnp.asarray(0.0), n_iter=2, eps=np.True_),
+                 id="fit-eps-numpy-bool"),
+    pytest.param(lambda gm: fit(gm, lambda p: jnp.asarray(0.0), n_iter=2,
+                                betas=(0.9, jnp.asarray(True))),
+                 id="fit-beta-jax-bool"),
+    pytest.param(lambda gm: fit_lm(gm, lambda p: jnp.ones(3, jnp.float32), n_iter=1,
+                                   lam_down=True), id="fit_lm-lam_down-True"),
+    pytest.param(lambda gm: fit_lm(gm, lambda p: jnp.ones(3, jnp.float32), n_iter=1,
+                                   step_tol=False), id="fit_lm-step_tol-False"),
+    pytest.param(lambda gm: fit_lm(gm, lambda p: jnp.ones(3, jnp.float32), n_iter=1,
+                                   lam0=[0.01]), id="fit_lm-lam0-list"),
+    pytest.param(lambda gm: fit_lm(gm, lambda p: jnp.ones(3, jnp.float32), n_iter=1,
+                                   tol=1j), id="fit_lm-tol-complex"),
+])
+def test_a_bool_or_a_non_number_hyper_parameter_is_refused(call):
+    """``float()`` reads ``True`` as ``1.0`` and ``"0.05"`` as ``0.05``:
+    ``fit(tol=True)`` stopped at its first evaluation and reported
+    ``converged=True`` with the parameters unfitted."""
+    with pytest.raises(ValueError, match="must be a finite number"):
+        call(_spring_gm())
+
+
+def test_windowed_loss_and_its_fitter_refuse_a_bool_continuity_weight(observed_spring):
+    """``continuity_weight=True`` was a weight of one."""
+    from maddening.sysid import fit_multiple_shooting
+
+    gm, obs, torn = observed_spring
+    with pytest.raises(ValueError, match="continuity_weight must be a finite number"):
+        _shooting_loss(gm, obs, torn, continuity_weight=True)
+    with pytest.raises(ValueError, match="continuity_weight must be a finite number"):
+        fit_multiple_shooting(gm, obs, obs_fn=lambda h: h["s"]["position"], window=4,
+                              continuity_weight=True, n_iter=1)
+    with pytest.raises(ValueError, match="lr_states must be a finite number"):
+        fit_multiple_shooting(gm, obs, obs_fn=lambda h: h["s"]["position"], window=4,
+                              lr_states=True, n_iter=1)
+
+
+@pytest.mark.parametrize("value", [
+    pytest.param(np.float32(0.05), id="numpy-float32"),
+    pytest.param(np.float64(0.05), id="numpy-float64"),
+    pytest.param(jnp.float32(0.05), id="jax-0d"),
+    pytest.param(np.asarray(0.05), id="numpy-0d"),
+    pytest.param(1, id="int"),
+])
+def test_a_real_number_in_any_spelling_is_still_read(value):
+    """Non-vacuity: NumPy and JAX scalars, 0-d arrays and plain ints are
+    numbers and are read as before."""
+    gm = _spring_gm()
+    fit(gm, lambda p: jnp.asarray(0.0), n_iter=1, lr=value)
+    fit_lm(gm, lambda p: jnp.ones(3, jnp.float32), n_iter=1, lam0=value)
+
+
+@pytest.mark.parametrize("value", [
+    pytest.param(3, id="int"),
+    pytest.param(np.int64(3), id="numpy-int64"),
+    pytest.param(np.asarray(3), id="numpy-0d"),
+    pytest.param(jnp.int32(3), id="jax-int32"),
+    pytest.param(jnp.asarray(3), id="jax-0d"),
+])
+def test_an_integer_count_in_any_spelling_is_read(value, observed_spring):
+    """``n_iter`` and ``notify_every`` read an integer in every spelling, as
+    ``lr`` reads a real number in every spelling (SYS-061): a 0-d NumPy array
+    and a JAX integer used to be refused (audit_040_p4_10/fmu-sysid/
+    repro_count_hyper_spellings.py)."""
+    from maddening.sysid import fit_multiple_shooting
+
+    _, obs, _ = observed_spring
+    gm = _spring_gm()
+    events = []
+    gm.add_observer(lambda kind, payload: events.append(payload))
+    res = fit(gm, lambda p: jnp.sum(p["nodes"]["s"]["stiffness"] ** 2), n_iter=value,
+              notify_every=value, hold_undetermined=False)
+    assert res.n_iter == 3 and type(res.n_iter) is int
+    assert [e["iteration"] for e in events] == [3]
+    res = fit_lm(gm, lambda p: jnp.stack([p["nodes"]["s"]["stiffness"] - 31.0]),
+                 n_iter=value, notify_every=value, hold_undetermined=False)
+    assert type(res.n_iter) is int and res.n_iter <= 3
+    res, _ = fit_multiple_shooting(gm, obs, obs_fn=lambda h: h["s"]["position"], window=4,
+                                   n_iter=value, notify_every=value, start_step=value,
+                                   hold_undetermined=False)
+    assert res.n_iter == 3 and type(res.n_iter) is int
+
+
+@pytest.mark.parametrize("value", [
+    pytest.param(3.0, id="float"),
+    pytest.param(np.float32(3.0), id="numpy-float"),
+    pytest.param(jnp.asarray(3.0), id="jax-float-0d"),
+    pytest.param(np.asarray([3]), id="numpy-1d"),
+    pytest.param(True, id="bool"),
+    pytest.param(np.True_, id="numpy-bool"),
+    pytest.param(jnp.asarray(True), id="jax-bool"),
+    pytest.param("3", id="string"),
+])
+def test_a_count_that_is_not_an_integer_is_refused(value):
+    with pytest.raises(ValueError, match="n_iter must be an integer"):
+        fit(_spring_gm(), lambda p: jnp.asarray(0.0), n_iter=value)
+    with pytest.raises(ValueError, match="n_iter must be an integer"):
+        fit_lm(_spring_gm(), lambda p: jnp.ones(3, jnp.float32), n_iter=value)
+
+
+def _a_mask(gm, damping):
+    mask = jax.tree.map(lambda _: False, gm.trainable_mask(gm.params))
+    mask["nodes"]["s"]["stiffness"] = True
+    mask["nodes"]["s"]["damping"] = damping
+    return mask
+
+
+@pytest.mark.parametrize("flag", ["False", "True", 0, 1, np.float32(1.0),
+                                  np.ones(1, dtype=bool)],
+                         ids=["str-False", "str-True", "int-0", "int-1",
+                              "float32", "bool-array-1d"])
+def test_a_mask_leaf_that_is_not_a_bool_is_refused(flag):
+    """A leaf is read by its truthiness, so ``"False"`` -- a non-empty
+    string -- selected its parameter, and ``fit_lm`` moved the damping it
+    named as not to be fitted.  Every caller-mask reader refuses it: the
+    fitters and both FIM paths."""
+    from maddening.sysid import fim_core
+
+    gm = _spring_gm()
+    mask = _a_mask(gm, flag)
+
+    def residual(p):
+        return jnp.stack([p["nodes"]["s"]["stiffness"], p["nodes"]["s"]["damping"]])
+
+    for call in (lambda: fit_lm(gm, residual, mask=mask, n_iter=1),
+                 lambda: fit(gm, lambda p: jnp.sum(residual(p) ** 2), mask=mask, n_iter=1),
+                 lambda: fim(residual, gm.params, mask=mask),
+                 lambda: fim_core(residual, gm.params, mask=mask)):
+        with pytest.raises(ValueError, match="every mask leaf must be a bool"):
+            call()
+
+
+@pytest.mark.parametrize("flag", [False, np.False_, jnp.asarray(False)],
+                         ids=["bool", "numpy-bool", "jax-0d-bool"])
+def test_a_mask_leaf_that_is_a_bool_in_any_spelling_is_read(flag):
+    """Non-vacuity: ``bool``, NumPy ``bool_`` and a 0-d boolean array are
+    flags, and ``False`` in each leaves its parameter alone."""
+    gm = _spring_gm()
+
+    def residual(p):
+        return jnp.stack([p["nodes"]["s"]["stiffness"] - 30.0,
+                          p["nodes"]["s"]["damping"] - 1.0])
+
+    res = fit_lm(gm, residual, mask=_a_mask(gm, flag), n_iter=3)
+    assert float(res.params["nodes"]["s"]["damping"]) == float(
+        gm.params["nodes"]["s"]["damping"])
+    assert fim(residual, gm.params, mask=_a_mask(gm, flag)).param_names == (
+        "['nodes']['s']['stiffness']",)
+
+
+# ---------------------------------------------------------------------------
+# windowed_loss refuses what its fitters refuse
+# (audit_040_p4_4/fmu-sysid/repro_windowed_loss_arguments.py)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def observed_spring():
+    """A spring, its 13-sample record, and window starts torn off it, so the
+    continuity penalty has something to charge."""
+    from maddening.sysid import init_window_states, observations_from_history
+
+    gm = _spring_gm()
+    s0 = gm._user_state(gm._state)  # noqa: SLF001
+    _, hist = gm.run_scan_with_history(12)
+    gm.reset_state()
+    obs = observations_from_history(s0, hist)
+    torn = jax.tree.map(lambda x: x + 0.05, init_window_states(obs, 4))
+    return gm, obs, torn
+
+
+def _shooting_loss(gm, obs, states, **kwargs):
+    from maddening.sysid import windowed_loss
+
+    return float(windowed_loss(gm, gm.params, obs, obs_fn=lambda h: h["s"]["position"],
+                               window=4, window_states=states, **kwargs))
+
+
+@pytest.mark.parametrize("weight", [-1.0, -1e-30, float("nan"), float("inf")])
+def test_windowed_loss_refuses_a_continuity_weight_its_fitter_refuses(observed_spring, weight):
+    """A negative or NaN weight was guarded by ``continuity_weight > 0.0`` and
+    so read as ``0.0``: no penalty, no error -- while
+    ``fit_multiple_shooting`` refused -1.0.  Both now refuse it, with one
+    message."""
+    from maddening.sysid import fit_multiple_shooting
+
+    gm, obs, torn = observed_spring
+    with pytest.raises(ValueError, match="continuity_weight must be") as loss_error:
+        _shooting_loss(gm, obs, torn, continuity_weight=weight)
+    with pytest.raises(ValueError, match="continuity_weight must be") as fit_error:
+        fit_multiple_shooting(gm, obs, obs_fn=lambda h: h["s"]["position"], window=4,
+                              continuity_weight=weight, n_iter=1)
+    assert str(loss_error.value) == str(fit_error.value)
+
+
+def test_windowed_loss_still_takes_every_weight_its_fitter_takes(observed_spring):
+    """Non-vacuity: ``0.0`` is no penalty, a positive weight charges the torn
+    starts, and the charge doubles with the weight."""
+    gm, obs, torn = observed_spring
+    none, one, two = (_shooting_loss(gm, obs, torn, continuity_weight=w)
+                      for w in (0.0, 1.0, 2.0))
+    assert one > none
+    assert two - none == pytest.approx(2.0 * (one - none), rel=1e-4)
+
+
+@pytest.mark.parametrize("flag", ["no", "False", 1, 0, 0.0, np.True_, None,
+                                  jnp.asarray(False)])
+def test_windowed_loss_refuses_a_mask_unconverged_that_is_not_a_bool(observed_spring, flag):
+    """``mask_unconverged="no"`` turned masking *on* -- it was read as a truth
+    value -- which ``fim``'s ``reuse_trace`` and the fitters'
+    ``hold_undetermined`` already refuse through ``_check_flag``."""
+    from maddening.sysid import windowed_loss
+
+    gm, obs, _ = observed_spring
+    with pytest.raises(ValueError, match="mask_unconverged must be a bool"):
+        windowed_loss(gm, gm.params, obs, obs_fn=lambda h: h["s"]["position"],
+                      window=4, mask_unconverged=flag)
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_windowed_loss_takes_a_bool_mask_unconverged(observed_spring, flag):
+    from maddening.sysid import windowed_loss
+
+    gm, obs, _ = observed_spring
+    loss = windowed_loss(gm, gm.params, obs, obs_fn=lambda h: h["s"]["position"],
+                         window=4, mask_unconverged=flag)
+    assert np.isfinite(float(loss))
+
+
+# ---------------------------------------------------------------------------
+# A fit that takes no step returns its input (r10_noop_fit_drift.py)
+# ---------------------------------------------------------------------------
+
+
+def _bits(tree):
+    return {k: np.asarray(v).tobytes() for k, v in tree["nodes"]["s"].items()}
+
+
+@pytest.mark.parametrize("kwargs", [{"n_iter": 0}, {"n_iter": 5, "tol": 1e30}])
+def test_a_fit_that_takes_no_step_returns_its_input_bit_for_bit(kwargs):
+    """``FitResult`` promises that comparing input and output leaf by
+    leaf says exactly which constants the calibration touched.  A masked
+    ``log`` leaf used to come back one ulp off -- ``exp(log(30.0))`` is
+    ``30.000002`` -- although no gradient had been applied to it, so the
+    comparison could not tell "not fitted" from "fitted and barely
+    moved"."""
+    gm = _spring_gm()
+    before = _bits(gm.params)
+    res = fit(gm, lambda p: jnp.asarray(0.0), **kwargs)
+    assert _bits(res.params) == before
+
+
+def test_a_fit_that_does_take_a_step_still_reports_the_leaf_as_moved():
+    """Non-vacuity: the exactness above must not be a blanket copy."""
+    gm = _spring_gm()
+
+    def loss(p):
+        return jnp.sum(jnp.asarray(p["nodes"]["s"]["stiffness"]) ** 2)
+
+    res = fit(gm, loss, n_iter=3, lr=0.1)
+    changed = {k for k, v in _bits(res.params).items() if v != _bits(gm.params)[k]}
+    assert "stiffness" in changed
+    assert "initial_position" not in changed   # frozen by its ParamSpec
+
+
+# ---------------------------------------------------------------------------
+# FIMReport is keyword-only: inserting a field must not reassign the rest
+# ---------------------------------------------------------------------------
+
+
+def test_fim_report_cannot_be_built_positionally():
+    """``rank`` was inserted between ``eigvecs`` and ``cond`` during
+    0.4.0, so positional construction silently shifted every field after
+    it -- no ``TypeError``, no warning, and a wrong ``rank`` is a wrong
+    identifiability verdict.  ``kw_only`` is what stops the next inserted
+    field doing it again."""
+    from maddening.sysid import FIMReport
+
+    kwargs = dict(
+        fim=jnp.eye(2), eigvals=jnp.ones(2), eigvecs=jnp.eye(2),
+        rank=2, cond=1.0, crb=jnp.ones(2), param_names=("a", "b"),
+    )
+    report = FIMReport(**kwargs)
+    assert report.rank == 2 and report.cond == 1.0
+    with pytest.raises(TypeError):
+        FIMReport(*kwargs.values())            # type: ignore[misc]
+
+
+def test_fit_result_cannot_be_built_positionally():
+    """The same guard on the other public dataclass in this module.
+
+    ``FitResult`` has had no field inserted into it, so this assertion
+    is expected to be redundant today -- and it is the only thing that
+    keeps it so.  Its ``converged``/``n_iter`` pair is the worse case of
+    the two: a shift there does not even change the field *types*, so a
+    positional caller of a four-field ``FitResult`` that grew a fifth
+    field would read ``n_iter`` as ``converged`` -- truthy for every
+    run that took a step -- and report an unconverged fit as converged.
+    """
+    from maddening.sysid import FitResult
+
+    kwargs = dict(
+        params={"a": 1.0}, losses=np.zeros(3), converged=False, n_iter=12,
+    )
+    result = FitResult(**kwargs)
+    assert result.converged is False and result.n_iter == 12
+    with pytest.raises(TypeError):
+        FitResult(*kwargs.values())            # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# A rank verdict decided at the float32 noise floor says so
+# ---------------------------------------------------------------------------
+
+
+def _linear_fim(eig_ratio, *, n=2, m=3, seed=0, dtype=jnp.float32, **kw):
+    """``fim`` of a linear residual whose Fisher matrix has a known
+    smallest-to-largest eigenvalue ratio."""
+    rng = np.random.default_rng(seed)
+    # ``geomspace(a, b, 1)`` is ``[a]``, not ``[b]``, so pin the largest
+    # eigenvalue explicitly: ``eig_ratio`` is a ratio to it and the whole
+    # helper is meaningless if it is not 1.0.
+    mid = np.geomspace(1e-2, 1.0, max(n - 1, 1))
+    mid[-1] = 1.0
+    lam = np.sort(np.concatenate([[eig_ratio], mid]))[:n]
+    assert lam[-1] == 1.0 and lam[0] == eig_ratio
+    q, rr = np.linalg.qr(rng.standard_normal((n, n)))
+    V = q * np.sign(np.diag(rr))
+    U = np.linalg.qr(rng.standard_normal((max(m, n), n)))[0]
+    A = jnp.asarray((U * np.sqrt(lam)) @ V.T, dtype=dtype)
+    params = {f"p{i}": jnp.asarray(1.0, dtype=dtype) for i in range(n)}
+    keys = tuple(params)
+
+    def residual_fn(p):
+        return A @ jnp.stack([p[k] for k in keys])
+
+    return fim(residual_fn, params, scale=None, **kw)
+
+
+def test_a_rank_decided_at_the_float32_floor_warns_with_the_numbers():
+    """The case this guard was built from: an eigenvalue ratio of
+    2.08e-07 against a 2.38e-07 cutoff.
+
+    A rank determination resting on a difference smaller than float32
+    epsilon, reported as fact -- ``rank=1``, ``crb=[inf, inf]``, no
+    signal of any kind that the verdict was a coin flip.  The warning
+    has to carry the two numbers, or a reader cannot tell how close the
+    call was, and it has to name ``jax_enable_x64``, which is the whole
+    remedy.
+    """
+    with pytest.warns(PrecisionLimitWarning) as rec:
+        report = _linear_fim(2.08e-07)
+    assert report.rank == 1
+    ev = np.asarray(report.eigvals, dtype=np.float64)
+    ratio = ev[0] / ev[-1]
+    cutoff = 2 * float(np.finfo(np.float32).eps)
+    assert abs(ratio / 2.08e-07 - 1.0) < 0.05, ratio
+    msg = str(rec[0].message)
+    assert f"{ratio:.4g}" in msg and f"{cutoff:.4g}" in msg
+    assert "jax_enable_x64" in msg
+
+
+def test_a_well_conditioned_fim_is_silent():
+    """Non-vacuity, and the property that keeps the warning worth
+    reading: it must not fire on an ordinary problem.  A warning that
+    fires routinely gets suppressed, which is worse than silence."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", PrecisionLimitWarning)
+        report = _linear_fim(1e-3)
+    assert report.rank == 2
+
+
+def test_an_exactly_singular_fim_is_silent_about_precision():
+    """An exactly rank-deficient ``F`` is a real rank deficiency, not a
+    verdict decided by rounding.
+
+    ``scale="relative"`` with a parameter sitting at ``0.0`` produces
+    exactly this -- an exactly zero column, so an exactly zero
+    eigenvalue -- and it is the first thing a user meets on the default
+    scale, since ``SpringDamperNode.initial_velocity`` defaults to
+    ``0.0``.  Warning there would fire on every such report for a
+    verdict float64 agrees with completely.
+    """
+    params = {"a": jnp.float32(1.0), "b": jnp.float32(0.0)}
+
+    def residual_fn(p):
+        return jnp.stack([p["a"] + p["b"], p["a"] - p["b"]])
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", PrecisionLimitWarning)
+        report = fim(residual_fn, params, scale="relative")
+    assert report.zero_scaled == ("['b']",)
+    assert report.rank == 1
+
+
+def test_rank_rtol_zero_leaves_no_threshold_to_sit_near():
+    """``rank_rtol=0`` resolves every positive eigenvalue by request, so
+    there is no cutoff a ratio can be near and nothing to warn about --
+    rather than a division by zero inside the check."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", PrecisionLimitWarning)
+        report = _linear_fim(2.08e-07, rank_rtol=0.0)
+    assert report.rank == 2
+
+
+def test_the_warning_names_the_eigenvalue_nearest_the_cutoff():
+    """Not ``eigvals[0]``.  A spectrum whose smallest eigenvalue is far
+    below the cutoff can still have a *different* one sitting on it, and
+    that one is what a rounding error would carry across.  Reporting the
+    smallest would name a ratio nowhere near the number being compared.
+    """
+    from maddening.sysid import _precision_limited
+
+    eps = float(np.finfo(np.float32).eps)
+    cutoff = 3 * eps
+    # smallest is 1e-4 of the cutoff; the middle one is sitting on it
+    ev = jnp.asarray([1e-4 * cutoff, 1.1 * cutoff, 1.0], dtype=jnp.float32)
+    limited = _precision_limited(ev, cutoff, cutoff)
+    assert limited is not None
+    ratio, cut = limited
+    assert cut == cutoff
+    assert abs(ratio / (1.1 * cutoff) - 1.0) < 1e-3, ratio
+
+
+def test_under_x64_the_message_does_not_send_the_user_round_again():
+    """At float64 the remedy has already been taken and there is no
+    third precision, so the message has to say something else.  Pointing
+    a user who is already at x64 back at x64 is a loop."""
+    with _x64():
+        with pytest.warns(PrecisionLimitWarning) as rec:
+            # sitting on the float64 cutoff, n * 2.22e-16
+            _linear_fim(2.0 * float(np.finfo(np.float64).eps),
+                        dtype=jnp.float64)
+    msg = str(rec[0].message)
+    assert "float64 noise floor" in msg
+    assert "jax_enable_x64" not in msg
+    assert "widest precision" in msg
+
+
+@contextlib.contextmanager
+def _x64():
+    """``jax_enable_x64`` for the duration of the block.
+
+    Process-global and normally set before the first JAX import, which
+    is exactly why the warning recommends it rather than doing it:
+    flipping it changes every library in the process.
+    """
+    prior = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", True)
+    try:
+        yield
+    finally:
+        jax.config.update("jax_enable_x64", prior)
+
+
+def test_the_x64_rerun_the_warning_recommends_actually_settles_the_verdict():
+    """The warning is only actionable if its remedy works.
+
+    The float32 report calls the 2.08e-07 direction unresolved because
+    that ratio is under a 2.38e-07 cutoff.  Under x64 the cutoff drops
+    to ``n * 2.22e-16``, the same direction clears it by nine decades,
+    and the answer is rank 2 with a finite bound -- so the warning's
+    "re-run under x64 to settle it" is a claim this test holds it to,
+    not a form of words.  It is also the non-vacuity check on the
+    warning: the two precisions really do answer differently here.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", PrecisionLimitWarning)
+        f32 = _linear_fim(2.08e-07)
+    assert f32.rank == 1 and not np.isfinite(np.asarray(f32.crb)).any()
+
+    with _x64():
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PrecisionLimitWarning)
+            f64 = _linear_fim(2.08e-07, dtype=jnp.float64)
+    assert f64.rank == 2
+    assert np.isfinite(np.asarray(f64.crb)).all()
+
+
+def test_under_x64_the_warning_stops_recommending_x64():
+    """A verdict at the *float64* floor has no wider precision to
+    escalate to, so repeating the x64 advice would send a reader round a
+    loop they have already finished.  The message has to say what is
+    actually left to do instead."""
+    cutoff = 2 * float(np.finfo(np.float64).eps)
+    with _x64():
+        with pytest.warns(PrecisionLimitWarning) as rec:
+            report = _linear_fim(0.9 * cutoff, dtype=jnp.float64)
+    assert report.rank == 1
+    msg = str(rec[0].message)
+    assert "float64" in msg
+    assert "jax_enable_x64" not in msg
+    assert "widest precision" in msg
+
+
+def test_a_raised_rank_rtol_is_a_modelling_choice_not_a_precision_limit():
+    """Raising ``rank_rtol`` moves the cutoff decades above the noise
+    floor, and a close call there is not a close call about precision.
+
+    ``rank_rtol=1e-3`` says "I call anything below 1e-3 unidentifiable
+    in practice".  An eigenvalue ratio of 7e-4 against that cutoff is
+    *inside* the factor-2 band around it -- and float32 knows both
+    numbers to three further decimal places, so the verdict is exact and
+    warning about rounding would be simply wrong.  The band is anchored
+    to ``n * eps`` as well as to the cutoff, and that second anchor is
+    the only thing stopping this.
+
+    The ratio is deliberately inside the multiplicative band: at 4e-4 it
+    would fall outside anyway and the test would pass with the anchor
+    deleted, which is how the first version of it escaped a mutation.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", PrecisionLimitWarning)
+        report = _linear_fim(7e-4, rank_rtol=1e-3)
+    assert report.rank == 1          # 7e-4 is below the 1e-3 cutoff
+
+
+def test_a_rank_rtol_under_the_noise_floor_still_warns():
+    """The guard cuts one way only.  Lowering ``rank_rtol`` below
+    ``n * eps`` asks for a cutoff finer than the decomposition can
+    resolve, so every verdict at it is rounding -- the case the warning
+    exists for, reached from the other side."""
+    eps = float(np.finfo(np.float32).eps)
+    with pytest.warns(PrecisionLimitWarning):
+        _linear_fim(0.4 * eps, rank_rtol=0.5 * eps)
+
+
+def test_a_negative_eigenvalue_does_not_mask_a_ratio_that_is_on_the_cutoff():
+    """What the "positive ratios only" filter is actually for.
+
+    A PSD matrix whose smallest eigenvalue comes back negative is
+    reporting rounding, and that eigenvalue is *closest* to the cutoff
+    by any distance measure that admits it -- ``log`` of a negative is
+    NaN, and ``argmin`` over an array holding a NaN returns the NaN.  So
+    letting non-positive ratios into the search does not make them warn;
+    it makes them **hijack** the search and hide a genuine in-band ratio
+    sitting further up the spectrum.  Silence on a verdict that really
+    is at the floor, caused by the guard meant to describe it.
+    """
+    from maddening.sysid import _precision_limited
+
+    eps = float(np.finfo(np.float32).eps)
+    cutoff = 3 * eps
+    ev = jnp.asarray([-2.0 * eps, 1.3 * cutoff, 1.0], dtype=jnp.float32)
+    limited = _precision_limited(ev, cutoff, cutoff)
+    assert limited is not None, "the in-band ratio was masked"
+    ratio, _ = limited
+    assert abs(ratio / (1.3 * cutoff) - 1.0) < 1e-3, ratio
+
+
+# ---------------------------------------------------------------------------
+# The rank cutoff has to see the residual length
+# ---------------------------------------------------------------------------
+
+
+_EPS32 = float(np.finfo(np.float32).eps)
+
+
+def _exactly_rank_deficient(n, m, seed):
+    """An ``m x n`` Jacobian with an **exact** null direction.
+
+    Built in float64 from a spectrum whose smallest eigenvalue is
+    literally ``0.0``, so float64 answers ``rank = n - 1`` and
+    ``crb = inf`` by construction and there is nothing to argue about:
+    whatever float32 reports above zero for that direction is its own
+    rounding, and the cutoff either covers it or does not.
+    """
+    rng = np.random.default_rng(seed)
+    lam = np.geomspace(1e-2, 1.0, max(n - 1, 1)).copy()
+    lam[-1] = 1.0
+    lam = np.concatenate([[0.0], lam])[:n]
+    q, r = np.linalg.qr(rng.standard_normal((n, n)))
+    V = q * np.sign(np.diag(r))
+    U = np.linalg.qr(rng.standard_normal((m, n)))[0]
+    return (U * np.sqrt(lam)) @ V.T
+
+
+def _fim_of_matrix(J64, **kw):
+    n = J64.shape[1]
+    A = jnp.asarray(J64, dtype=jnp.float32)
+    params = {f"p{i}": jnp.float32(1.0) for i in range(n)}
+    keys = tuple(params)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", PrecisionLimitWarning)
+        return fim(lambda p: A @ jnp.stack([p[k] for k in keys]), params,
+                   scale=None, **kw)
+
+
+#: The rank-cutoff population: an exactly rank-deficient Jacobian at a
+#: residual length long enough that forming ``F = J.T @ J`` over it is
+#: the dominant float32 error term.  ``n=2, m=4000`` puts the old
+#: ``n * eps`` cutoff at 2 eps, well inside the range a loosely-rounding
+#: backend's floor reaches.
+_CUTOFF_N, _CUTOFF_M, _CUTOFF_SEEDS = 2, 4000, 64
+
+_CutoffSample = collections.namedtuple(
+    "_CutoffSample", "seed jacobian report ratio")
+
+
+@pytest.fixture(scope="module")
+def rank_deficient_population():
+    """``fim`` over 64 exactly-rank-deficient Jacobians, measured once.
+
+    Both tests below read this: one asserts the verdict, the other what
+    the null direction reads and the bound it is held to.
+    """
+    records = []
+    for seed in range(_CUTOFF_SEEDS):
+        jacobian = _exactly_rank_deficient(_CUTOFF_N, _CUTOFF_M, seed)
+        report = _fim_of_matrix(jacobian)
+        ev = np.asarray(report.eigvals, dtype=np.float64)
+        records.append(_CutoffSample(
+            seed, jacobian, report, float(ev[0]) / float(ev[-1])))
+    return records
+
+
+def test_a_long_residual_does_not_make_a_missing_direction_identifiable(
+    rank_deficient_population,
+):
+    """The fail-closed claim, and it holds on every backend.
+
+    ``F = J.T @ J`` is summed over ``m`` residual rows and its error
+    grows with ``m``; ``F`` cannot show that, and a cutoff of
+    ``n * eps`` does not ask.  Where the backend's reduction is loose
+    enough, the null direction's eigenvalue comes back *above* such a
+    cutoff -- and then ``rank`` counts a direction that is not in the
+    data at all and ``crb`` reports a finite variance bound for
+    parameters no estimator can determine.  A false "identifiable",
+    which is the direction :class:`~maddening.sysid.FIMReport` fails
+    safe against everywhere else.
+
+    ``max(n, sqrt(m)) * eps`` is a **widening** of ``n * eps`` by
+    construction (see
+    :func:`test_the_default_cutoff_is_max_of_n_and_sqrt_m`), so a
+    backend that rounds *more* tightly than the model can make the
+    ``sqrt(m)`` term unnecessary but never unsafe.  This test therefore
+    asserts unconditionally, on every lane: sixty-four fixed seeds,
+    float64 says ``rank = 1`` for every one, and so must float32.
+
+    The verdict is read from the singular values of ``J`` (the paragraph
+    above describes the route it used to take), so the null direction now
+    sits at the square of one rounding whatever the backend's reduction
+    does; the test below holds it to that bound.
+    """
+    n = _CUTOFF_N
+    cutoff = max(n, np.sqrt(_CUTOFF_M)) * _EPS32
+    for sample in rank_deficient_population:
+        assert sample.report.rank == n - 1, (
+            f"seed={sample.seed}: rank={sample.report.rank} for a Jacobian "
+            f"that is exactly rank {n - 1} in float64; lam0/lamMax = "
+            f"{sample.ratio / _EPS32:.2f} eps against a cutoff of "
+            f"{cutoff / _EPS32:.2f} eps"
+        )
+        assert not np.isfinite(
+            np.asarray(sample.report.crb)).any(), sample.report.crb
+
+
+def test_a_missing_direction_reads_at_the_square_of_one_rounding_on_every_backend(
+    rank_deficient_population,
+):
+    """What the null direction of these Jacobians reads, and why no term of
+    the cutoff has to cover the backend's reduction any more.
+
+    The verdict used to be read from the eigenvalues of ``F = J.T @ J``, and
+    the null direction came back wherever the backend's float32 sum over the
+    4000 rows left it: up to 10.1 ``eps`` of the largest on jaxlib 0.10.2 and
+    0.11.0 (9 of these 64 seeds above the old ``n * eps`` cutoff) and 1.4
+    ``eps`` on 0.11.2.  The test that stood here could therefore only run
+    where the backend rounded loosely, and skipped elsewhere.  That was for
+    random Jacobians; a constant sensitivity aligned the same rounding and
+    reached 475 ``eps``, past the cutoff as well (MADD-ANO-289,
+    ``tests/core/test_sysid_fim_reads_the_jacobian.py``).
+
+    The verdict is read from the singular values of ``J`` in float64 now, and
+    the reduction is not on that route.  What is left is the one rounding
+    each entry took when the float64 matrix was stored as float32: a relative
+    ``eps / 2`` per entry, so ``||E||_2 <= (eps / 2) * sqrt(n) * sigma_max``
+    and the ratio read is at most ``n * eps**2 / 4`` to first order
+    (:func:`maddening.sysid._resolve_rank_rtol` has the bound).  Asserted
+    with a factor of four to spare, on every backend, with no skip.
+    """
+    n = _CUTOFF_N
+    bound = n * _EPS32 ** 2
+    for sample in rank_deficient_population:
+        assert 0.0 <= sample.ratio <= bound, (
+            f"seed={sample.seed}: lam0/lamMax = {sample.ratio:.3e} for a "
+            f"Jacobian that is exactly rank {n - 1} in float64 and was "
+            f"rounded once into float32; the bound is {bound:.3e}"
+        )
+        # Nine decades under the cutoff: nothing here is a close call.
+        assert sample.ratio < 1e-6 * max(n, np.sqrt(_CUTOFF_M)) * _EPS32
+        # A cutoff of ``n * eps`` alone would decide these the same way: the
+        # ``sqrt(m)`` term is an allowance now, not what holds this verdict.
+        under_old = _fim_of_matrix(sample.jacobian, rank_rtol=n * _EPS32)
+        assert under_old.rank == n - 1 == sample.report.rank
+
+
+def test_the_default_cutoff_is_max_of_n_and_sqrt_m():
+    """The cutoff's two terms, and which one wins where.
+
+    ``eigh``'s error is ``~ n * eps * max(eigvals)`` and forming
+    ``F = J.T @ J`` over ``m`` rows costs ``~ sqrt(m) * eps`` more; the
+    cutoff is the larger, so it reduces *exactly* to the old ``n * eps``
+    whenever ``m <= n**2`` and can never fall below it.  That is what
+    makes this change a widening and not a reweighting.
+    """
+    from maddening.sysid import _resolve_rank_rtol
+
+    for n, m, expected in (
+        (2, 3, 2.0),            # short residual: unchanged
+        (5, 25, 5.0),           # m == n**2: the crossover, still unchanged
+        (5, 24, 5.0),
+        (2, 20, np.sqrt(20)),   # sqrt(m) takes over
+        (2, 4000, np.sqrt(4000)),
+        (25, 4000, np.sqrt(4000)),
+        (25, 100, 25.0),
+    ):
+        got = _resolve_rank_rtol(np.float32, n, None, n_residual=m)
+        assert abs(got / (expected * _EPS32) - 1.0) < 1e-12, (n, m, got)
+        # never below the n-only form: a pure widening
+        assert got >= n * _EPS32 * (1.0 - 1e-12), (n, m, got)
+        # never the worst-case ``max(n, m) * eps``, the same shape taken
+        # literally, which measures 1315x the float32 floor at its loosest
+        assert got <= max(n, m) * _EPS32 * (1.0 + 1e-12), (n, m, got)
+        if m > n * n:
+            assert got < max(n, m) * _EPS32, (n, m, got)
+
+    # monotone non-decreasing in m, for fixed n
+    seq = [_resolve_rank_rtol(np.float32, 3, None, n_residual=m)
+           for m in (1, 4, 9, 16, 64, 256, 1024, 4096)]
+    assert all(b >= a for a, b in zip(seq, seq[1:])), seq
+    # an explicit rank_rtol is still honoured verbatim: the residual
+    # length informs the *default*, it does not override a caller
+    assert _resolve_rank_rtol(np.float32, 2, 1e-3, n_residual=4000) == 1e-3
+    # and with no residual length in hand the n-only form is what is left
+    assert _resolve_rank_rtol(np.float32, 7, None, n_residual=None) \
+        == 7 * _EPS32
+
+
+def test_a_short_residual_verdict_is_bit_for_bit_what_it_was():
+    """The other half of "a widening": everything with ``m <= n**2`` has
+    to be untouched, not merely close.  Most real fits are here -- the
+    spring-damper examples in the user guide fit two or three constants
+    to a few dozen samples only because the samples are cheap; the
+    ratio that matters is ``m`` against ``n**2``.
+    """
+    for n, m in ((3, 9), (4, 16), (5, 20), (6, 30)):
+        J64 = _exactly_rank_deficient(n, m, seed=7)
+        new = _fim_of_matrix(J64)
+        old = _fim_of_matrix(J64, rank_rtol=n * _EPS32)
+        assert new.rank == old.rank, (n, m, new.rank, old.rank)
+        assert np.array_equal(np.asarray(new.crb), np.asarray(old.crb))
+
+
+def test_the_warning_band_is_anchored_to_the_cutoff_that_saw_m():
+    """The warning's second anchor is the *default* cutoff, and it had to
+    move with it.
+
+    :func:`_precision_limited` fires only when the deciding ratio is both
+    near the cutoff and at the precision floor.  Leaving that floor at
+    ``n * eps`` while the cutoff grew would have kept the old blind spot
+    alive inside the warning: at ``n = 2, m = 4000`` the cutoff is 63
+    eps, and a ratio sitting on it would have been rejected for being
+    more than ``factor * 2 eps``.  Silence on precisely the verdicts
+    this branch exists to describe.
+    """
+    n, m = 2, 4000
+    cutoff = max(n, np.sqrt(m)) * _EPS32
+    # a residual whose null direction sits right on the new cutoff
+    rng = np.random.default_rng(11)
+    lam = np.array([cutoff, 1.0])
+    q, r = np.linalg.qr(rng.standard_normal((n, n)))
+    V = q * np.sign(np.diag(r))
+    U = np.linalg.qr(rng.standard_normal((m, n)))[0]
+    J64 = (U * np.sqrt(lam)) @ V.T
+    A = jnp.asarray(J64, dtype=jnp.float32)
+    params = {f"p{i}": jnp.float32(1.0) for i in range(n)}
+    keys = tuple(params)
+    with pytest.warns(PrecisionLimitWarning, match="4000 residual rows"):
+        fim(lambda p: A @ jnp.stack([p[k] for k in keys]), params, scale=None)

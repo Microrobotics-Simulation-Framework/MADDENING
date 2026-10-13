@@ -1,0 +1,112 @@
+Runs (one line per JSON file)
+goal         platform dev  device kind                jax / jaxlib      dry run  checks  commit        verdict
+indivisible  gpu        4  NVIDIA RTX PRO 6000 Blackw 0.11.2 / 0.11.2   no        13/13  c0c6add8a355  PASS
+halo         gpu        4  NVIDIA RTX PRO 6000 Blackw 0.11.2 / 0.11.2   no        52/52  c0c6add8a355  PASS
+coupled      gpu        4  NVIDIA RTX PRO 6000 Blackw 0.11.2 / 0.11.2   no      210/210  c0c6add8a355  PASS
+stencil      gpu        4  NVIDIA RTX PRO 6000 Blackw 0.11.2 / 0.11.2   no      376/376  c0c6add8a355  PASS
+hybrid       gpu        4  NVIDIA RTX PRO 6000 Blackw 0.11.2 / 0.11.2   no        54/54  c0c6add8a355  PASS
+exchange     gpu        4  NVIDIA RTX PRO 6000 Blackw 0.11.2 / 0.11.2   no          6/6  c0c6add8a355  PASS
+forward      gpu        4  NVIDIA RTX PRO 6000 Blackw 0.11.2 / 0.11.2   no        42/42  c0c6add8a355  PASS
+gradient     gpu        4  NVIDIA RTX PRO 6000 Blackw 0.11.2 / 0.11.2   no        72/72  c0c6add8a355  PASS
+
+Checklist (CLOSED needs a PASS from real GPUs, not a dry run, on >= 4 devices, with every check run, every file valid and one commit)
+1  sharded == unsharded, stencil and unstructured wrappers                    CLOSED  [stencil PASS, forward PASS]  commit c0c6add8a355
+2  halo exchange at the shard and global boundaries                           CLOSED  [halo PASS]  commit c0c6add8a355
+3  sharded adjoint == unsharded adjoint                                       CLOSED  [stencil PASS, gradient PASS, coupled PASS]  commit c0c6add8a355
+4  HybridNode(ShardedStencilNode(inner))                                      CLOSED  [hybrid PASS]  commit c0c6add8a355
+5  an indivisible grid is refused                                             CLOSED  [indivisible PASS]  commit c0c6add8a355
+6  a sharded and a replicated member in one coupling group, with its adjoint  CLOSED  [coupled PASS]  commit c0c6add8a355
+
+Indivisible grid: stencil [317, 320] -> ValueError, along spatial axis 1 [316, 321] -> ValueError, pointwise -> ValueError, pencil [16, 17] -> ValueError; unstructured 101441 cells [25361, 25360, 25360, 25360] max_rel 0.0e+00
+
+Halo exchange vs NumPy (max |diff|; must be 0): 24 stencil cases on 1d 4x1, 1d-axis1 1x4, 2d 2x2, 2d-flat 1x4 meshes, forward 0.0e+00, adjoint 0.0e+00; unstructured 1000000 cells all_to_all 0.0e+00/0.0e+00, ppermute 0.0e+00/0.0e+00
+
+Coupled group, sharded vs unsharded (max-rel; model = worst gradient against the float64 model; value+grad = one differentiated rollout)
+           mesh, shape solver    field     avgs      far     grad    limit    model     sh ms   unsh ms  compile  passes pinned
+        1d 4x1 316x320 ift     0.0e+00  7.1e-08  0.0e+00  1.1e-07    1e-04  2.3e-06    432.40     83.56    14.3s     5/5      2
+        1d 4x1 316x320 fori    0.0e+00  7.1e-08  0.0e+00  0.0e+00    1e-05  2.2e-06    101.14     19.46     7.1s     -/-      0
+  1d-axis1 1x4 316x320 ift     1.5e-07  7.1e-08  0.0e+00  1.1e-07    1e-04  2.3e-06    199.85     83.56    12.4s     5/5      2
+  1d-axis1 1x4 316x320 fori    1.5e-07  7.1e-08  0.0e+00  2.1e-07    1e-05  2.2e-06     92.87     19.46     7.2s     -/-      0
+   2d-flat 1x4 316x320 ift     1.5e-07  7.1e-08  0.0e+00  1.1e-07    1e-04  2.3e-06    173.52     83.56    12.5s     5/5      2
+   2d-flat 1x4 316x320 fori    1.5e-07  7.1e-08  0.0e+00  2.1e-07    1e-05  2.2e-06     81.61     19.46     7.7s     -/-      0
+        2d 2x2 316x320 ift     0.0e+00  7.1e-08  0.0e+00  2.1e-07    1e-04  2.3e-06    286.40     83.56    14.2s     5/5      2
+        2d 2x2 316x320 fori    1.5e-07  7.1e-08  9.1e-08  2.1e-07    1e-05  2.2e-06    110.01     19.46     7.8s     -/-      0
+        2d 2x2 548x552 ift     1.5e-07  7.1e-08  9.1e-08  1.1e-07    1e-04  2.2e-07    377.35     92.33    15.0s     6/5      2
+        2d 2x2 548x552 fori    1.5e-07  3.5e-07  9.1e-08  1.7e-07    1e-05  3.0e-07    110.16     23.40     7.8s     -/-      0
+      2d 2x2 1000x1004 ift     1.5e-07  2.8e-07  0.0e+00  5.8e-07    1e-04  3.8e-07    438.84    261.82    18.4s     5/6      2
+      2d 2x2 1000x1004 fori    1.5e-07  7.1e-08  0.0e+00  0.0e+00    1e-05  5.1e-08    148.06     37.90     8.8s     -/-      0
+
+Stencil wrapper, sharded vs unsharded (node, mesh, shape, ends; max-rel; ms per step)
+field 1d 4x1 316x320 periodic      f 0.0e+00  averages 0.0e+00  loss 0.0e+00  grad f0 2.1e-07  grad diffusivity 0.0e+00  fwd 0.362 vs 0.083 ms/step  grad 6.21 vs 1.02 ms
+field 1d 4x1 316x320 edge          f 0.0e+00  averages 7.3e-08  loss 6.2e-08  grad f0 2.1e-07  grad diffusivity 7.1e-08  fwd 0.363 vs 0.074 ms/step  grad 7.14 vs 1.40 ms
+field 1d 4x1 316x320 dirichlet     f 0.0e+00  averages 2.2e-07  loss 0.0e+00  grad f0 2.1e-07  grad diffusivity 1.1e-07  fwd 0.428 vs 0.066 ms/step  grad 6.40 vs 1.28 ms
+lbm 1d 4x1 316x320 periodic        f 0.0e+00  velocity 0.0e+00  loss 0.0e+00  grad f0 2.1e-06  grad viscosity 1.6e-06  fwd 0.386 vs 0.264 ms/step  grad 7.32 vs 4.45 ms
+field-halo2 1d 4x1 316x320 periodic f 0.0e+00  averages 1.9e-07  loss 6.2e-08  grad f0 2.8e-07  grad diffusivity 7.0e-08  fwd 0.366 vs 0.079 ms/step  grad 6.58 vs 1.36 ms
+field-halo2 1d 4x1 316x320 edge    f 0.0e+00  averages 6.4e-07  loss 0.0e+00  grad f0 2.4e-07  grad diffusivity 0.0e+00  fwd 0.365 vs 0.089 ms/step  grad 6.44 vs 1.45 ms
+field-halo2 1d 4x1 316x320 dirichlet f 0.0e+00  averages 1.9e-07  loss 0.0e+00  grad f0 2.4e-07  grad diffusivity 7.5e-08  fwd 0.466 vs 0.120 ms/step  grad 6.57 vs 1.39 ms
+field-shares 1d 4x1 316x320 zero   f 1.4e-07  averages 4.4e-07  shares 3.4e-08  strips 5.5e-08  loss 1.2e-07  grad f0 7.0e-07  grad diffusivity 6.5e-08  fwd 0.405 vs 0.106 ms/step  grad 6.89 vs 1.61 ms
+field 1d-axis1 1x4 316x320 periodic f 0.0e+00  averages 1.5e-07  loss 1.2e-07  grad f0 2.8e-07  grad diffusivity 0.0e+00  fwd 0.360 vs 0.083 ms/step  grad 8.31 vs 1.02 ms
+field 1d-axis1 1x4 316x320 edge    f 0.0e+00  averages 7.3e-08  loss 0.0e+00  grad f0 2.8e-07  grad diffusivity 7.1e-08  fwd 0.396 vs 0.074 ms/step  grad 6.69 vs 1.40 ms
+field 1d-axis1 1x4 316x320 dirichlet f 0.0e+00  averages 3.6e-07  loss 6.2e-08  grad f0 2.8e-07  grad diffusivity 0.0e+00  fwd 0.362 vs 0.066 ms/step  grad 6.80 vs 1.28 ms
+lbm 1d-axis1 1x4 316x320 periodic  f 0.0e+00  velocity 0.0e+00  loss 0.0e+00  grad f0 2.1e-06  grad viscosity 1.6e-06  fwd 0.383 vs 0.264 ms/step  grad 7.59 vs 4.45 ms
+field-halo2 1d-axis1 1x4 316x320 periodic f 0.0e+00  averages 5.7e-07  loss 6.2e-08  grad f0 2.1e-07  grad diffusivity 7.0e-08  fwd 0.452 vs 0.079 ms/step  grad 6.42 vs 1.36 ms
+field-halo2 1d-axis1 1x4 316x320 edge f 0.0e+00  averages 6.4e-07  loss 0.0e+00  grad f0 2.1e-07  grad diffusivity 0.0e+00  fwd 0.370 vs 0.089 ms/step  grad 6.60 vs 1.45 ms
+field-halo2 1d-axis1 1x4 316x320 dirichlet f 0.0e+00  averages 1.3e-07  loss 0.0e+00  grad f0 2.1e-07  grad diffusivity 0.0e+00  fwd 0.376 vs 0.120 ms/step  grad 6.02 vs 1.39 ms
+field-shares 1d-axis1 1x4 316x320 zero f 1.4e-07  averages 3.3e-07  shares 2.3e-07  strips 5.5e-08  loss 1.2e-07  grad f0 6.6e-07  grad diffusivity 6.4e-08  fwd 0.383 vs 0.119 ms/step  grad 7.21 vs 1.60 ms
+field 2d-flat 1x4 316x320 periodic f 0.0e+00  averages 1.5e-07  loss 1.2e-07  grad f0 2.8e-07  grad diffusivity 0.0e+00  fwd 0.384 vs 0.083 ms/step  grad 6.81 vs 1.02 ms
+field 2d-flat 1x4 316x320 edge     f 0.0e+00  averages 7.3e-08  loss 0.0e+00  grad f0 2.8e-07  grad diffusivity 7.1e-08  fwd 0.351 vs 0.074 ms/step  grad 6.50 vs 1.40 ms
+field 2d-flat 1x4 316x320 dirichlet f 0.0e+00  averages 3.6e-07  loss 6.2e-08  grad f0 2.8e-07  grad diffusivity 0.0e+00  fwd 0.355 vs 0.066 ms/step  grad 6.72 vs 1.28 ms
+lbm 2d-flat 1x4 316x320 periodic   f 0.0e+00  velocity 0.0e+00  loss 0.0e+00  grad f0 2.1e-06  grad viscosity 1.6e-06  fwd 0.403 vs 0.264 ms/step  grad 7.85 vs 4.45 ms
+field-halo2 2d-flat 1x4 316x320 periodic f 0.0e+00  averages 5.7e-07  loss 6.2e-08  grad f0 2.1e-07  grad diffusivity 7.0e-08  fwd 0.411 vs 0.079 ms/step  grad 5.94 vs 1.36 ms
+field-halo2 2d-flat 1x4 316x320 edge f 0.0e+00  averages 6.4e-07  loss 0.0e+00  grad f0 2.1e-07  grad diffusivity 0.0e+00  fwd 0.354 vs 0.089 ms/step  grad 6.58 vs 1.45 ms
+field-halo2 2d-flat 1x4 316x320 dirichlet f 0.0e+00  averages 1.3e-07  loss 0.0e+00  grad f0 2.1e-07  grad diffusivity 0.0e+00  fwd 0.371 vs 0.120 ms/step  grad 6.18 vs 1.39 ms
+field-shares 2d-flat 1x4 316x320 zero f 1.4e-07  averages 3.3e-07  shares 2.3e-07  strips 2.4e-07  loss 0.0e+00  grad f0 4.7e-07  grad diffusivity 6.3e-08  fwd 0.355 vs 0.102 ms/step  grad 7.41 vs 2.29 ms
+field 2d 2x2 316x320 periodic      f 0.0e+00  averages 0.0e+00  loss 0.0e+00  grad f0 1.8e-07  grad diffusivity 0.0e+00  fwd 0.432 vs 0.083 ms/step  grad 6.81 vs 1.02 ms
+field 2d 2x2 316x320 edge          f 0.0e+00  averages 7.3e-08  loss 6.2e-08  grad f0 1.8e-07  grad diffusivity 7.1e-08  fwd 0.417 vs 0.074 ms/step  grad 7.10 vs 1.40 ms
+field 2d 2x2 316x320 dirichlet     f 0.0e+00  averages 2.2e-07  loss 0.0e+00  grad f0 1.8e-07  grad diffusivity 0.0e+00  fwd 0.424 vs 0.066 ms/step  grad 6.87 vs 1.28 ms
+lbm 2d 2x2 316x320 periodic        f 0.0e+00  velocity 0.0e+00  loss 1.3e-07  grad f0 2.1e-06  grad viscosity 1.8e-06  fwd 0.465 vs 0.264 ms/step  grad 7.96 vs 4.45 ms
+field-halo2 2d 2x2 316x320 periodic f 0.0e+00  averages 3.8e-07  loss 0.0e+00  grad f0 2.1e-07  grad diffusivity 0.0e+00  fwd 0.423 vs 0.079 ms/step  grad 6.89 vs 1.36 ms
+field-halo2 2d 2x2 316x320 edge    f 0.0e+00  averages 4.5e-07  loss 0.0e+00  grad f0 1.4e-07  grad diffusivity 0.0e+00  fwd 0.432 vs 0.089 ms/step  grad 7.05 vs 1.45 ms
+field-halo2 2d 2x2 316x320 dirichlet f 0.0e+00  averages 1.9e-07  loss 0.0e+00  grad f0 2.1e-07  grad diffusivity 7.5e-08  fwd 0.455 vs 0.120 ms/step  grad 6.54 vs 1.39 ms
+field-shares 2d 2x2 316x320 zero   f 1.4e-07  averages 4.4e-07  shares 7.9e-08  strips 9.0e-08  loss 0.0e+00  grad f0 5.1e-07  grad diffusivity 0.0e+00  fwd 0.515 vs 0.144 ms/step  grad 5.98 vs 1.71 ms
+field-mask1 2d 2x2 316x320 periodic f 0.0e+00  averages 0.0e+00  loss 0.0e+00  grad f0 1.8e-07  grad diffusivity 0.0e+00  fwd 0.451 vs 0.083 ms/step  grad 7.04 vs 1.40 ms
+field 2d-crossed 2x2 316x320 periodic f 0.0e+00  averages 0.0e+00  loss 0.0e+00  grad f0 1.8e-07  grad diffusivity 0.0e+00  fwd 0.426 vs 0.083 ms/step  grad 7.06 vs 1.02 ms
+field 2d 2x2 548x552 periodic      f 0.0e+00  averages 0.0e+00  loss 0.0e+00  grad f0 2.1e-07  grad diffusivity 0.0e+00  fwd 0.415 vs 0.077 ms/step  grad 7.09 vs 1.16 ms
+field 2d 2x2 1000x1004 periodic    f 0.0e+00  averages 1.9e-06  loss 0.0e+00  grad f0 2.6e-07  grad diffusivity 8.7e-08  fwd 0.495 vs 0.154 ms/step  grad 7.71 vs 2.34 ms
+
+HybridNode(ShardedStencilNode(inner)) vs HybridNode(inner) (max-rel)
+1d 4x1 316x320         f 0.0e+00  averages 1.5e-07  loss 1.2e-07  grad 0.0e+00  correction 7.2e-03 of |f|  value+grad 9.10 vs 1.52 ms
+1d-axis1 1x4 316x320   f 0.0e+00  averages 1.5e-07  loss 0.0e+00  grad 7.5e-08  correction 7.2e-03 of |f|  value+grad 9.58 vs 1.52 ms
+2d-flat 1x4 316x320    f 0.0e+00  averages 1.5e-07  loss 0.0e+00  grad 7.5e-08  correction 7.2e-03 of |f|  value+grad 9.20 vs 1.52 ms
+2d 2x2 316x320         f 0.0e+00  averages 0.0e+00  loss 6.1e-08  grad 7.5e-08  correction 7.2e-03 of |f|  value+grad 10.98 vs 1.52 ms
+2d 2x2 548x552         f 0.0e+00  averages 5.3e-07  loss 0.0e+00  grad 1.1e-07  correction 7.2e-03 of |f|  value+grad 10.87 vs 2.74 ms
+2d 2x2 1000x1004       f 0.0e+00  averages 2.3e-07  loss 0.0e+00  grad 1.2e-07  correction 7.2e-03 of |f|  value+grad 11.26 vs 2.65 ms
+
+Exchange ranking (all_to_all vs ppermute), median / min ms per exchange
+    cells     asked  dev  hw   a2a med   ppm med   a2a min   ppm min  speedup   a2a MB   ppm MB  same decides
+   100489    100000    4 gpu     3.529     3.342     2.610     2.002     1.06     0.03     0.01   yes     yes
+   300304    300000    4 gpu     3.899     3.745     2.930     2.777     1.04     0.06     0.02   yes     yes
+  1000000   1000000    4 gpu     3.148     3.780     2.334     2.823     0.83     0.11     0.03   yes     yes
+Recommendation: all_to_all -- all_to_all is faster at at least one deciding point; keep it the default
+
+Forward run (ms per step; wrapper = public update(), device = compiled step)
+   100489 cells grid                     all_to_all wrapper     8.709  device     4.394  compile   0.45 s  max|dx| 0.00e+00  finite=True
+   100489 cells grid                     ppermute   wrapper     8.932  device     4.030  compile   0.26 s  max|dx| 0.00e+00  finite=True
+   300304 cells grid                     all_to_all wrapper    14.271  device     3.473  compile   0.37 s  max|dx| 4.77e-07  finite=True
+   300304 cells grid                     ppermute   wrapper    22.319  device     4.409  compile   0.31 s  max|dx| 4.77e-07  finite=True
+  1000000 cells grid                     all_to_all wrapper    25.926  device     3.794  compile   0.51 s  max|dx| 7.15e-07  finite=True
+  1000000 cells grid                     ppermute   wrapper    25.110  device     4.004  compile   0.27 s  max|dx| 7.15e-07  finite=True
+
+Gradient parity (sharded vs unsharded, max-abs / max-rel; jitted grads, compile apart)
+   100489 cells rollout   unsharded         -          -  grad     1.14 ms  compile   0.67 s
+   100489 cells rollout   all_to_all 5.96e-07 / 1.80e-07  grad     5.72 ms  compile   2.96 s
+   100489 cells rollout   ppermute   7.15e-07 / 2.16e-07  grad     6.86 ms  compile   1.51 s
+   100488 dof   sharded_cg grad     7.93e-04 / 4.49e-07  jvp 1.53e-05 / 5.34e-07
+   300304 cells rollout   unsharded         -          -  grad     1.93 ms  compile   1.73 s
+   300304 cells rollout   all_to_all 1.43e-06 / 2.45e-07  grad     6.31 ms  compile   4.23 s
+   300304 cells rollout   ppermute   1.19e-06 / 2.04e-07  grad     6.70 ms  compile   3.90 s
+   300304 dof   sharded_cg grad     1.10e-03 / 6.84e-07  jvp 1.72e-05 / 5.34e-07
+  1000000 cells rollout   unsharded         -          -  grad     2.49 ms  compile   4.41 s
+  1000000 cells rollout   all_to_all 1.91e-06 / 3.12e-07  grad     6.29 ms  compile   5.47 s
+  1000000 cells rollout   ppermute   2.38e-06 / 3.90e-07  grad     6.97 ms  compile   5.76 s
+  1000000 dof   sharded_cg grad     9.77e-04 / 5.78e-07  jvp 1.53e-05 / 4.90e-07

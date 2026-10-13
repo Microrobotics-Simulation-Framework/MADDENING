@@ -34,6 +34,7 @@ Tests:
 
 from __future__ import annotations
 
+import functools
 import os
 
 # Force CPU for these small graphs — much faster than warming up CUDA.
@@ -43,10 +44,8 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from maddening.core.graph_manager import (
-    GraphManager,
-    _fixed_point_while,
-)
+from maddening.core.graph_manager import GraphManager
+from maddening.core.coupling._fixed_point import _fixed_point_while
 from maddening.nodes.spring import SpringDamperNode
 
 
@@ -86,13 +85,24 @@ def _make_gm(solver: str, acceleration: str,
 # ----------------------------------------------------------------------
 
 
+@functools.lru_cache(maxsize=None)
+def _after_one_step(solver: str, acceleration: str):
+    """``(graph, state it returned)`` after one step of ``_make_gm(...)``.
+
+    Once per configuration for the module: the forward-parity tests read
+    the state and the backward-parity test differentiates the compiled
+    step at it, so the configurations the two kinds share are built and
+    compiled once.  Nothing steps the graph again, so ``gm._state`` stays
+    the state after that one step.
+    """
+    gm = _make_gm(solver, acceleration)
+    return gm, gm.step()
+
+
 def test_forward_parity_ift_iqn_imvj_vs_fori_iqn_imvj():
     """Converged ``x*`` agrees between ift+iqn-imvj and fori+iqn-imvj."""
-    gm_fori = _make_gm("fori", "iqn-imvj")
-    gm_ift = _make_gm("ift", "iqn-imvj")
-
-    s_fori = gm_fori.step()
-    s_ift = gm_ift.step()
+    _, s_fori = _after_one_step("fori", "iqn-imvj")
+    _, s_ift = _after_one_step("ift", "iqn-imvj")
 
     for nn in ("spring_a", "spring_b"):
         for fld, v_fori in s_fori[nn].items():
@@ -109,11 +119,8 @@ def test_forward_parity_ift_iqn_imvj_vs_ift_none():
     Acceleration is a forward-pass technique; ``x*`` is intrinsic to
     the contraction map.  Both should converge to the same answer.
     """
-    gm_none = _make_gm("ift", "none")
-    gm_iqn = _make_gm("ift", "iqn-imvj")
-
-    s_none = gm_none.step()
-    s_iqn = gm_iqn.step()
+    _, s_none = _after_one_step("ift", "none")
+    _, s_iqn = _after_one_step("ift", "iqn-imvj")
 
     for nn in ("spring_a", "spring_b"):
         for fld, v_none in s_none[nn].items():
@@ -134,7 +141,8 @@ def _loss_from_state(state, nodes=("spring_a", "spring_b")):
 
 
 def _grad_through_compiled_step(gm: GraphManager, pert_node="spring_a"):
-    _ = gm.step()
+    """``d(loss)/d(position of pert_node)`` at the state *gm*'s warm-up
+    step left (see :func:`_after_one_step`)."""
     compiled = gm._compiled_step
     assert compiled is not None, "gm._compiled_step must be set after step()"
 
@@ -163,10 +171,10 @@ def test_backward_parity_ift_iqn_imvj_through_jit():
     acceleration-agnostic — wrapping ``F`` in IQN-IMVJ inside the
     forward while_loop does not perturb the cotangent that flows out.
     """
-    g_fori_none = _grad_through_compiled_step(_make_gm("fori", "none"))
-    g_ift_none = _grad_through_compiled_step(_make_gm("ift", "none"))
-    g_ift_ait = _grad_through_compiled_step(_make_gm("ift", "aitken"))
-    g_ift_iqn = _grad_through_compiled_step(_make_gm("ift", "iqn-imvj"))
+    g_fori_none = _grad_through_compiled_step(_after_one_step("fori", "none")[0])
+    g_ift_none = _grad_through_compiled_step(_after_one_step("ift", "none")[0])
+    g_ift_ait = _grad_through_compiled_step(_after_one_step("ift", "aitken")[0])
+    g_ift_iqn = _grad_through_compiled_step(_after_one_step("ift", "iqn-imvj")[0])
 
     assert jnp.allclose(g_ift_iqn, g_ift_none, atol=1e-3, rtol=1e-3), (
         f"ift backward is not acceleration-agnostic: "
@@ -242,8 +250,13 @@ def test_convergence_rate_iqn_imvj_beats_aitken_on_stiff_scene():
     x_star = {}
     for acc in ("none", "aitken", "iqn-imvj"):
         accel_init = (zeros_vw, zeros_vw) if acc == "iqn-imvj" else ()
-        xs, nit, _res, _vw = _fixed_point_while(
-            step, x0, consts, accel_init, tol, max_iter, acc, 1.0, 0, None,
+        xs, nit, _res, _amp, _vw = _fixed_point_while(
+            # ``first_res`` -- the residual of the pass before the loop,
+            # which seeds the two-consecutive-passes streak.  ``inf``
+            # says "this run did not start out converged", the honest
+            # seed for a driver that starts the loop itself.
+            step, x0, consts, accel_init, jnp.inf, tol, max_iter, acc,
+            1.0, 0, None,
         )
         n_iters[acc] = int(nit)
         x_star[acc] = xs
@@ -314,6 +327,11 @@ def _make_chain_gm(n: int, solver: str, acceleration: str,
     return gm
 
 
+# Slow-marked (still run by slow-tests.yml): a 50-node chain, its gradient and
+# ten finite-difference solves, 33-48 s on the CI runner.  IQN-IMVJ backward
+# parity is checked on every push at small scale above.
+# Per push: tests/core/test_coupling_ift_iqn_imvj.py::test_backward_parity_ift_iqn_imvj_through_jit
+@pytest.mark.slow
 def test_atscale_fd_matches_autodiff_ift_iqn_imvj():
     """N=50 chain: autodiff gradient agrees with FD on sampled inputs."""
     n = 50

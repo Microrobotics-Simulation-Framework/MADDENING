@@ -11,24 +11,19 @@ Setup:
 - Ball starts at height 3 with an unknown initial velocity.
 - Spring anchored to ball position, starts at height 2.
 - Goal: find the ball's initial velocity such that the spring's
-  position equals a target value (1.5) after 200 steps.
+  position after 50 steps is 0.3 above where it ends up when the ball
+  starts at rest (the target is computed from that baseline run, so it
+  is reachable whatever the node constants are).
 
 The optimization uses simple gradient descent with jax.grad, which
-differentiates through the entire compiled graph step function.
+differentiates through a ``jax.lax.scan`` of the graph's step function.
 
 Usage
 -----
-    cd /home/nick/MSF/MADDENING
-    source ../venvs/.maddening/bin/activate
-    python maddening/examples/differentiable_optimization.py
+    python -m maddening.examples.advanced.differentiable_optimization
 """
 
-import sys
 import os
-
-_project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
-if _project_root not in sys.path:
-    sys.path.insert(0, _project_root)
 
 import jax
 import jax.numpy as jnp
@@ -98,6 +93,10 @@ def main() -> None:
 
         final_state, _ = jax.lax.scan(scan_body, state, None, length=n_sim_steps)
         return final_state["spring"]["position"]
+
+    # One compiled forward pass, reused for reporting below.  (Left
+    # unjitted, every call would retrace the scan.)
+    simulate = jax.jit(simulate)
 
     baseline_pos = float(simulate(jnp.array(0.0)))
     # Set target slightly above baseline so gradient descent can reach it
@@ -193,7 +192,7 @@ def main() -> None:
 
         plt.suptitle("Differentiable Optimization through MADDENING Graph", fontsize=13)
         plt.tight_layout()
-        out_path = os.path.join(_project_root, "differentiable_optimization_result.png")
+        out_path = os.path.join(os.getcwd(), "differentiable_optimization_result.png")
         plt.savefig(out_path, dpi=150)
         print(f"Plot saved to {out_path}")
     except ImportError:

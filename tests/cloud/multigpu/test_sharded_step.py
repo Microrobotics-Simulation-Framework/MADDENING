@@ -1,10 +1,5 @@
 """Tests for sharded Jacobi coupling step."""
 
-import os
-
-# Try to force 2 CPU devices — only effective if set before JAX import.
-os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=2")
-
 import jax
 import jax.numpy as jnp
 import pytest

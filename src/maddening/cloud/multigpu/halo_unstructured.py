@@ -1,6 +1,6 @@
 """Sparse halo exchange for unstructured / graph-partitioned sharding.
 
-v0.3.0 §A6 substrate.  Sibling of
+Added in v0.3.0.  Sibling of
 :mod:`maddening.cloud.multigpu.halo` (Cartesian, stencil-based) —
 they share the same job (deliver neighbour-cell values inside a
 ``shard_map`` call) but the data structures are different:
@@ -30,10 +30,9 @@ This module provides:
 Differentiability: ``lax.all_to_all`` is differentiable; gradients
 flow through.
 
-Scope (v0.3.0): toy-mesh sized (up to ~10⁴ cells).  Production-grade
+Scope: toy-mesh sized (up to ~10⁴ cells).  Production-grade
 performance (batched send/recv, NCCL fast-path, real-mesh sized) is
-v0.4.0 work — see ``plans/MADDENING_v0.3.0_PLAN.md`` §A6 v0.4.0
-commitment.
+not implemented.
 """
 
 from __future__ import annotations
@@ -124,9 +123,9 @@ class UnstructuredPartitionLayout:
     def local_index_of(self, device: int, global_id: int) -> int:
         """Look up where global cell ``global_id`` lives on ``device``.
 
-        Useful for the partition-assignment handoff contract documented
-        in ``plans/MADDENING_v0.3.0_PLAN.md`` §A6 — the experiment-setup
-        code can use this to translate global cell IDs into the local
+        Useful for the partition-assignment handoff documented in
+        :mod:`maddening.cloud.multigpu.sharded_unstructured` — the
+        experiment-setup code can use this to translate global cell IDs into the local
         layout the node sees.
 
         Returns
@@ -317,20 +316,24 @@ def exchange_unstructured(
     jax.Array, shape ``(n_local_max + n_ghost_max, ...)``
         The local slab concatenated with the ghost slab (in
         ``layout.ghost_global_ids[<this device>]`` order).  Trailing
-        unused ghost slots are zero-filled.
+        unused ghost slots are zero-filled.  When the layout has no ghost
+        cell at all (``n_ghost_max == 0``: one device, or shards no edge
+        joins) that is ``local`` itself, under either method.
     """
+    if method not in ("all_to_all", "ppermute"):
+        raise ValueError(f"method must be 'all_to_all' or 'ppermute', got {method!r}")
+    if layout.n_ghost_max == 0:
+        # No shard needs any ghost cell (one device, or edge-disjoint
+        # shards): the slab is the local block.  Returned as it is, not
+        # joined to a zero-size ghost tail: on jaxlib 0.11.2 the transpose
+        # of that concatenate inside a ``lax.scan`` -- reverse mode through
+        # ``run_scan`` -- crashed XLA's compiler with a segfault (0.10.2 and
+        # 0.11.0 compiled it).  Both methods built that tail.
+        return local
     if method == "ppermute":
         return _exchange_ppermute(local, layout=layout, mesh_axis=mesh_axis)
-    if method != "all_to_all":
-        raise ValueError(f"method must be 'all_to_all' or 'ppermute', got {method!r}")
     n_devices = layout.n_devices
     n_ghost_max = layout.n_ghost_max
-    if n_ghost_max == 0:
-        # No shard needs any ghost cell (one device, or edge-disjoint
-        # shards): the slab is the local block plus an empty ghost tail.
-        return jnp.concatenate(
-            [local, jnp.zeros((0,) + local.shape[1:], dtype=local.dtype)], axis=0,
-        )
     # Convert tracing-safe numpy arrays to traced jnp arrays.
     send_indices = jnp.asarray(layout.send_indices)   # (D, D, n_ghost_max)
     send_counts = jnp.asarray(layout.send_counts)     # (D, D)
@@ -536,13 +539,33 @@ def partition_value(
     Parameters
     ----------
     value : np.ndarray
-        First axis is the global cell axis.
+        First axis is the global cell axis: exactly one row per cell of
+        the layout.
     layout : UnstructuredPartitionLayout
         Pre-computed partition layout.
     pad_value : scalar
         Fill value for padding slots beyond a shard's actual cell count.
+
+    Raises
+    ------
+    ValueError
+        If ``value`` is 0-d, or its first axis does not have one row per
+        cell of the layout (``layout.partition_assignment.size``).  Until
+        0.4.0 the length was not checked: a longer array lost the rows
+        past the layout's count without a word, and a shorter one failed
+        with a bare ``IndexError``.
     """
     value = np.asarray(value)
+    n_global = int(np.asarray(layout.partition_assignment).size)
+    if value.ndim == 0 or value.shape[0] != n_global:
+        rows = f"{value.shape[0]} rows" if value.ndim else "no cell axis (0-d)"
+        raise ValueError(
+            f"partition_value: value has shape {value.shape}, {rows}, but the "
+            f"layout partitions {n_global} cells.  The first axis of a value "
+            "to partition is the global cell axis, one row per cell of the "
+            "layout; rows past the layout's count would be dropped.  Build "
+            "the layout from the same cells as the array."
+        )
     trailing = value.shape[1:]
     out = np.full(
         (layout.n_devices, layout.n_local_max) + trailing,

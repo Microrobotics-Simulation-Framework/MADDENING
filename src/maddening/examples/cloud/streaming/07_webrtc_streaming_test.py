@@ -3,21 +3,42 @@
 
 Launches a VM, installs GStreamer + MADDENING, starts a simulation
 server with SelkiesRenderer wrapping ServerFrameRenderer (matplotlib),
-verifies the GStreamer pipeline is running and the signaling WebSocket
-is reachable, then prints the URL for manual browser testing.
+checks that the session reports itself alive and that the signaling
+WebSocket's port answers, then prints the URL for manual browser
+testing.  It connects no viewer, so it checks neither the WebRTC
+negotiation nor the stream; those are tested on CPU, with no cloud, by
+``tests/cloud/test_webrtc_loopback.py`` (a GStreamer peer, not a
+browser; no NAT).  The stream is encoded in software (``x264enc``) on
+every host, a GPU VM included: there is no GPU encoder.  A browser
+outside the provider's network also needs the media to get through:
+WebRTC sends it over UDP, which a pod may not expose, so it may need a
+TURN server (``StreamConfig.ice_servers``).
 
 Also profiles rendering performance (matplotlib render time vs
 GStreamer encode/push overhead) to quantify streaming cost.
 
+Interpreter note (read before running).  The server script imports JAX
+and the gi (GStreamer) bindings in one process.  On ``runpod/base`` the
+system ``python3`` is 3.10 and owns the apt ``python3-gi`` bindings, but
+MADDENING requires Python >= 3.12 and the ``jax>=0.10,<0.13`` range
+reaches 0.11, which requires >= 3.12 too, so the install command cannot
+resolve under 3.10 or 3.11.  The
+example therefore runs under ``PYTHON`` (3.12, the interpreter the pod's
+``pip`` targets) and builds PyGObject for it with pip (``< 3.51``: 3.51+
+needs girepository-2.0, which the 22.04-based image lacks) against the
+apt ``libgirepository1.0-dev`` headers; the apt ``python3-gi`` package is
+kept only for the GIR typelibs it pulls in.
+
 Usage:
-    python 07_webrtc_streaming_test.py
-    python 07_webrtc_streaming_test.py --gpu RTX4090
-    python 07_webrtc_streaming_test.py --keep
+    python -m maddening.examples.cloud.streaming.07_webrtc_streaming_test
+    python -m maddening.examples.cloud.streaming.07_webrtc_streaming_test --gpu RTX4090
+    python -m maddening.examples.cloud.streaming.07_webrtc_streaming_test --keep
 """
 
 import argparse
 import json
 import os
+import secrets
 import shlex
 import sys
 import time
@@ -32,11 +53,17 @@ from maddening.cloud.launcher import (
 )
 
 
-# GStreamer system packages (from 06_selkies_test.py findings)
+# The interpreter that runs JAX + MADDENING + the gi bindings on the VM
+# (see the module docstring: 3.10 and 3.11 cannot install either).
+PYTHON = "python3.12"
+
+# GStreamer system packages (from 06_selkies_test.py findings), plus the
+# headers and compiler a pip build of PyGObject for PYTHON needs
 GSTREAMER_INSTALL = (
     "export DEBIAN_FRONTEND=noninteractive"
     " && apt-get update -qq"
     " && apt-get install -y -qq"
+    f" {PYTHON}-dev build-essential pkg-config libcairo2-dev"
     " gstreamer1.0-plugins-base"
     " gstreamer1.0-plugins-good"
     " gstreamer1.0-plugins-bad"
@@ -52,14 +79,14 @@ GSTREAMER_INSTALL = (
     " && echo GST_INSTALL_DONE"
 )
 
-# Python deps (must use python3 = python3.10 for gi bindings)
+# Python deps, all into PYTHON (PyGObject is built from source for it)
 PIP_INSTALL = (
-    "python3 -m pip install -q --root-user-action=ignore"
-    ' "jax[cuda12]>=0.4,<0.6"'
+    f"{PYTHON} -m pip install -q --root-user-action=ignore"
+    ' "jax[cuda12]>=0.10,<0.13"'
     ' "fastapi>=0.100" "uvicorn>=0.20" "websockets>=11.0"'
     ' "numpy>=1.24" "pyyaml>=6.0" "rich>=12.0" "matplotlib>=3.5" "pyzmq>=25.0"'
-    ' "PyGObject>=3.42" "Pillow>=9.0"'
-    " && [ -d ~/sky_workdir/src ] && python3 -m pip install -q --root-user-action=ignore -e ~/sky_workdir"
+    ' "pycairo>=1.20" "PyGObject>=3.42,<3.51" "Pillow>=9.0"'
+    f" && [ -d ~/sky_workdir/src ] && {PYTHON} -m pip install -q --root-user-action=ignore -e ~/sky_workdir"
     " ; echo PIP_INSTALL_DONE"
 )
 
@@ -67,8 +94,13 @@ PIP_INSTALL = (
 # Server script that runs on the VM.
 # Uses SelkiesRenderer wrapping ServerFrameRenderer for WebRTC streaming.
 # Also profiles performance.
+# The VM's API binds 0.0.0.0, which is not loopback, so it requires a
+# bearer token.  This script chooses it, hands it to the remote process
+# in MADDENING_API_TOKEN, and presents it on every request.
+API_TOKEN = secrets.token_urlsafe(32)
+
 SERVER_SCRIPT = r'''
-import sys, time, warnings, json
+import sys, time, json
 import jax
 import jax.numpy as jnp
 print(f"JAX: {jax.devices()}")
@@ -100,9 +132,7 @@ gm.add_edge("table", "ball", "position", "table_position")
 gm.add_edge("ball", "spring", "position", "anchor_position")
 gm.add_edge("ball", "heat_rod", "velocity", "left_temperature",
     transform=lambda v: jnp.clip(jnp.abs(v) * 10.0, 0.0, 100.0))
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore")
-    gm.compile()
+gm.compile()
 print(f"Graph: {gm.node_names}")
 
 # --- Build matplotlib frame renderer ---
@@ -194,7 +224,10 @@ adapter = FrameRendererAdapter(frame_renderer)
 # --- Build SelkiesSession + SelkiesRenderer ---
 print("\n--- Starting SelkiesSession ---")
 selkies = SelkiesSession(secret="perf-test-secret", signaling_port=8443)
-stream_config = StreamConfig.from_preset(QualityPreset.STANDARD)
+# PREVIEW is 854x480, the frame renderer's size: the session refuses a
+# frame of another size than its stream's (STANDARD, 1280x720, was used
+# here and could never have encoded these frames).
+stream_config = StreamConfig.from_preset(QualityPreset.PREVIEW)
 
 selkies_renderer = SelkiesRenderer(adapter, selkies, config=stream_config)
 
@@ -258,13 +291,16 @@ server = SimulationServer(
     },
     graph_manager=gm,
     frame_renderer=frame_renderer,
+    # The bind address has to be handed to the server: it turns on the
+    # bearer token, and the app cannot see the socket uvicorn opens.
+    bind_host="0.0.0.0",
 )
 app = server.create_app()
 
 # Auto-start simulation
 runner.start()
 print(f"Simulation running. Server on :8000, Signaling on :8443")
-uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
+uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning", proxy_headers=False)
 '''
 
 
@@ -294,6 +330,10 @@ def main():
         ),
         run="echo 'VM ready'; sleep 7200",
         workdir=project_root,
+        # JobConfig.ports is empty by default so a launch does not open
+        # the API in the provider's firewall.  This demo needs the public
+        # NAT mapping for both the API and the signaling port.
+        ports=[8000, 8443],
     )
 
     launcher = CloudLauncher()
@@ -315,14 +355,14 @@ def main():
     result = job.ssh_run(GSTREAMER_INSTALL, timeout=120, capture=True)
     print(f"  {(result.stdout or '').strip().split(chr(10))[-1]}")
 
-    print("Installing Python deps (python3.10 for gi bindings)...")
+    print(f"Installing Python deps into {PYTHON} (PyGObject built for it)...")
     result = job.ssh_run(PIP_INSTALL, timeout=300, capture=True)
     print(f"  {(result.stdout or '').strip().split(chr(10))[-1]}")
 
     # --- Verify GPU + imports ---
     print("\nVerifying GPU + imports...")
     result = job.ssh_run(
-        'python3 -c "import jax; print(jax.devices()); '
+        f'{PYTHON} -c "import jax; print(jax.devices()); '
         'from maddening.cloud.selkies_session import SelkiesSession; '
         'from maddening.api.frame_renderer import ServerFrameRenderer; '
         'print(\'ALL OK\')"',
@@ -338,7 +378,12 @@ def main():
     # --- Upload and run server script ---
     print("\nStarting WebRTC server (with performance profiling)...")
     job.ssh_run(f"echo {shlex.quote(SERVER_SCRIPT)} > /tmp/webrtc_server.py", check=True)
-    job.ssh_run_background("python3 /tmp/webrtc_server.py")
+    # The token goes over ssh's stdin, not in the command string, where it
+    # would sit in /proc/<pid>/cmdline (see 04_server_test.py).
+    job.ssh_run_background(
+        f"{PYTHON} /tmp/webrtc_server.py",
+        env={"MADDENING_API_TOKEN": API_TOKEN},
+    )
 
     # --- Wait for perf results (server profiles before starting uvicorn) ---
     print("Waiting for profiling to complete...")
@@ -398,7 +443,10 @@ def main():
     print("\nWaiting for FastAPI server...")
     for _ in range(30):
         try:
-            req = urllib.request.Request(f"{base_url}/graph", method="GET")
+            req = urllib.request.Request(
+                f"{base_url}/graph", method="GET",
+                headers={"Authorization": f"Bearer {API_TOKEN}"},
+            )
             with urllib.request.urlopen(req, timeout=5):
                 break
         except Exception:
@@ -406,10 +454,13 @@ def main():
     else:
         print("  WARNING: FastAPI server not responding")
 
-    # --- Verify server-rendered WS works alongside WebRTC ---
-    print("\nVerifying /ws/render endpoint (server-side rendering)...")
+    # --- Check the FastAPI server answers alongside WebRTC ---
+    print("\nChecking the FastAPI server alongside WebRTC (GET /graph)...")
     try:
-        req = urllib.request.Request(f"{base_url}/graph", method="GET")
+        req = urllib.request.Request(
+            f"{base_url}/graph", method="GET",
+            headers={"Authorization": f"Bearer {API_TOKEN}"},
+        )
         with urllib.request.urlopen(req, timeout=5) as resp:
             graph = json.loads(resp.read())
             nodes = [n["name"] for n in graph["nodes"]] if isinstance(graph["nodes"], list) else list(graph["nodes"])
@@ -427,7 +478,7 @@ def main():
     print(f"  and enter the signaling URL:")
     print(f"\n    Signaling: {signaling_url or 'unknown'}")
     print(f"\n  Or use the server-rendered viewer (JPEG over WS):")
-    print(f"    {base_url}/viz/render")
+    print(f"    {base_url}/viz/render#token={API_TOKEN}")
     print(f"\n  REST API:")
     print(f"    {base_url}/graph")
     print(f"    {base_url}/graph/state")

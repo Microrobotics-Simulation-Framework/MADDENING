@@ -23,7 +23,7 @@ Usage::
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 
@@ -178,7 +178,7 @@ class HistoryViewer3D:
         title: str = "MADDENING -- History Viewer",
         playback_fps: int = 30,
         autoplay: bool = True,
-    ):
+    ) -> None:
         self._history = history
         self._dt = dt
         self._window_size = window_size
@@ -240,7 +240,7 @@ class HistoryViewer3D:
         clim: tuple[float, float] | None = None,
         opacity: float = 0.92,
         show_colorbar: bool = True,
-    ):
+    ) -> None:
         """Add a cross-section slice coloured by a scalar or vector field."""
         self._slices.append(_SliceDef(
             node, field, component, normal, origin_frac,
@@ -257,7 +257,7 @@ class HistoryViewer3D:
         scale: float = 200.0,
         cmap: str = "coolwarm",
         clim: tuple[float, float] | None = None,
-    ):
+    ) -> None:
         """Add velocity arrow glyphs on a cross-section."""
         self._arrows.append(_ArrowDef(
             node, field, normal, origin_frac, stride, scale, cmap, clim,
@@ -276,7 +276,7 @@ class HistoryViewer3D:
         tube_radius: float = 0.06,
         cmap: str = "coolwarm",
         interval: int = 15,
-    ):
+    ) -> None:
         """Add streamlines (recomputed every *interval* frames during playback)."""
         self._streamlines.append(_StreamlineDef(
             node, field, dims, n_lines, source_center, source_radius,
@@ -291,7 +291,7 @@ class HistoryViewer3D:
         color: str = "#4488CC",
         opacity: float = 0.6,
         smooth_n_iter: int = 30,
-    ):
+    ) -> None:
         """Add an isosurface of a scalar field (e.g. liquid surface)."""
         self._isosurfaces.append(_IsosurfaceDef(
             node, field, threshold, color, opacity, smooth_n_iter,
@@ -299,11 +299,11 @@ class HistoryViewer3D:
 
     def add_static_mesh(
         self,
-        mesh,
+        mesh: Any,
         color: str = "#BBBBBB",
         opacity: float = 0.1,
         smooth_shading: bool = True,
-    ):
+    ) -> None:
         """Add a static mesh (pipe wall, bounding box, etc.)."""
         self._static_meshes.append(_StaticMeshDef(
             mesh, color, opacity, smooth_shading,
@@ -311,13 +311,13 @@ class HistoryViewer3D:
 
     def add_rotating_mesh(
         self,
-        mesh,
+        mesh: Any,
         axis: str = "x",
         speed: float = 5.0,
         center: tuple[float, float, float] = (0.0, 0.0, 0.0),
         color: str = "#DD5533",
         opacity: float = 0.85,
-    ):
+    ) -> None:
         """Add a mesh that rotates each frame (propeller, rotor, gear, etc.).
 
         Parameters
@@ -344,7 +344,7 @@ class HistoryViewer3D:
         clamp_y: tuple[float, float] | None = None,
         clamp_z: tuple[float, float] | None = None,
         periodic_x: float | None = None,
-    ):
+    ) -> None:
         """Add a particle advected by a vector field.
 
         Parameters
@@ -370,7 +370,7 @@ class HistoryViewer3D:
         clim: tuple[float, float] | None = None,
         opacity: float = 1.0,
         label: str = "",
-    ):
+    ) -> None:
         """Add a 3D tube along a centerline, colored by a scalar field.
 
         Useful for pipe/vessel visualizations where the node's state
@@ -412,7 +412,7 @@ class HistoryViewer3D:
         color: str = "#2244AA",
         line_width: float = 3.0,
         label: str = "",
-    ):
+    ) -> None:
         """Add a 1D line plot of a scalar field rendered in 3D space.
 
         The field values are plotted as height (z-axis) vs spatial
@@ -981,7 +981,7 @@ class HistoryViewer3D:
     # Show
     # ------------------------------------------------------------------
 
-    def show(self):
+    def show(self) -> None:
         """Open the interactive viewer window."""
         pv = _import_pyvista()
 

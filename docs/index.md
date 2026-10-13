@@ -15,7 +15,7 @@ MADDENING is the base framework on which
 :class-card: msf-card
 
 Every {term}`Graph step` compiles into a single {term}`XLA` op. Take
-`jax.grad` through 1000-step rollouts; vmap across initial conditions for free.
+`jax.grad` through 1000-step rollouts; {term}`vmap` across initial conditions for free.
 :::
 
 :::{grid-item-card} Node-graph composition
@@ -53,8 +53,8 @@ MADDENING is split into a small **core** ({term}`node <SimulationNode>` ABC,
 typed edges, {term}`graph manager <GraphManager>`), a **scheduler** that
 resolves coupling and multi-rate timing, an **{term}`XLA`-compilation** path,
 a **surrogate** training subsystem, a **multi-GPU** layer (Cartesian and
-graph-partitioned sharding plus sharded sparse Krylov solvers), an
-**FMI 3.0 export** path, and a **cloud** layer for distributing all of it.
+graph-partitioned {term}`sharding <Sharding>` plus {term}`sharded <Sharded>` sparse Krylov solvers), an
+**{term}`FMI` 3.0 export** path, and a **cloud** layer for distributing all of it.
 MIME plugs in at the node level — same runtime, microrobotics-specific
 physics + metadata.
 
@@ -72,7 +72,7 @@ nodes:
   Swap:     Hot-swap registry — at runtime a physics node can be replaced by a trained surrogate without restarting the graph.
   Sky:      SkyPilot orchestration provisions GPU VMs (RunPod, Lambda, AWS, GCP) and tears them down when the job ends.
   ZMQ:      ZeroMQ rendezvous wires distributed graph fragments and streams state to clients.
-  WRTC:     WebRTC streams rendered viewport frames from the remote VM to the local browser or IDE.
+  WRTC:     WebRTC streams rendered viewport frames from the remote VM to the local browser or IDE. Tested end to end on CPU (a GStreamer WebRTC peer decodes the frames over a container-internal link, x264enc encoding), including the cloud container's entry point streaming the simulation it runs. The stream is encoded in software (x264enc) on every host; there is no GPU encoder in 0.4.0. Tested from a GPU host with the simulation on CUDA on 2026-10-12, and the same day over the internet, from a four-GPU cloud host to a laptop through a TURN relay over TCP, by a scripted viewer and in a real browser (the shipped client page, set to use the relay). Media over UDP across a provider's network without a relay (NAT traversal) is not tested.
   API:      FastAPI + WebSocket server — remote control of the graph and live state subscriptions.
   USD:      Codeless USD schemas + a serialiser turn the graph and its trajectory into a USD stage MICROROBOTICA can render.
   MIM:      MIME extends SimulationNode with biocompatibility, anatomical regime, and SOUP classification — same coupling, same autodiff.
@@ -158,6 +158,12 @@ user_guide/quickstart
 user_guide/parameters
 user_guide/fmu_export
 user_guide/cloud_resume
+user_guide/inspection
+user_guide/geometry_dependent_mappings
+user_guide/moving_a_sampling_onto_an_edge
+user_guide/upgrading_from_0_3_1
+user_guide/serving_the_rest_api
+user_guide/zeromq_transports
 glossary
 ```
 
@@ -169,6 +175,7 @@ glossary
 algorithm_guide/nodes/*
 algorithm_guide/coupling/*
 algorithm_guide/uq/*
+algorithm_guide/solvers/*
 ```
 
 ```{toctree}
@@ -186,6 +193,13 @@ developer_guide/sharded_static_data
 developer_guide/sharding_topology
 developer_guide/stability_report
 developer_guide/versioned_docs
+developer_guide/adaptive_node
+developer_guide/typing
+developer_guide/coupling_algorithm_guide
+developer_guide/deprecation_policy
+developer_guide/api_freeze_proposal
+developer_guide/wavelet_adaptive_node
+developer_guide/verification
 ```
 
 ```{toctree}
@@ -195,6 +209,7 @@ developer_guide/versioned_docs
 validation/cou_template
 validation/framework_verification
 validation/soup_package
+validation/development_record_v0.4.0
 ```
 
 ```{toctree}

@@ -325,8 +325,11 @@ class _ShardInfoProbe(SimulationNode):
         if shard_info is None:
             return state_padded
         # Return one output per axis: offset_<axis> and extent_<axis>.
+        # Integer keys only, as update_padded's docstring says: the
+        # unstructured wrapper adds the one str key "n_local" (a scalar).
         out = dict(state_padded)
-        for sax, (off, ext) in shard_info.items():
+        for sax in (k for k in shard_info if isinstance(k, int)):
+            off, ext = shard_info[sax]
             out[f"_shardinfo_offset_{sax}"] = jnp.asarray(off, dtype=jnp.int32)
             out[f"_shardinfo_extent_{sax}"] = jnp.asarray(ext, dtype=jnp.int32)
         return out

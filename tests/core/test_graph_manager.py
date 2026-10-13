@@ -6,6 +6,7 @@ import jax.numpy as jnp
 
 from maddening.core.graph_manager import GraphManager, ExternalInputSpec
 from maddening.core.edge import EdgeSpec
+from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.nodes.ball import BallNode
 from maddening.nodes.table import TableNode
 
@@ -469,6 +470,81 @@ class TestExternalInputs:
         assert spec.target_field == "force"
 
 
+class TestExternalInputsAreCompletedAndValidated:
+    """``external_inputs`` is as strict as ``params`` on the same call.
+
+    ``_validate_params`` rejects an unknown node, an unknown key, a
+    missing key and a missing node, each with a paragraph of
+    explanation.  ``external_inputs`` used to accept anything: a typo'd
+    node or field name was dropped in silence, and an omitted input was
+    not zero-filled but simply absent from ``boundary_inputs``, so the
+    node fell back to its own default.
+    """
+
+    @staticmethod
+    def _graph():
+        class _Reader(SimulationNode):
+            def initial_state(self):
+                return {"y": jnp.array(0.0)}
+
+            def update(self, state, boundary_inputs, dt):
+                f = boundary_inputs.get("f", jnp.array(100.0))
+                g = boundary_inputs.get("g", jnp.array(200.0))
+                return {"y": f + g}
+
+            def boundary_input_spec(self):
+                return {"f": BoundaryInputSpec(shape=(), description="f"),
+                        "g": BoundaryInputSpec(shape=(), description="g")}
+
+        gm = GraphManager()
+        gm.add_node(_Reader(name="s", timestep=0.01))
+        gm.add_external_input("s", "f", shape=())
+        gm.add_external_input("s", "g", shape=())
+        gm.compile()
+        return gm
+
+    def test_an_omitted_input_is_zero_filled_like_the_none_case(self):
+        gm = self._graph()
+        assert float(gm.step()["s"]["y"]) == 0.0
+        assert float(gm.step({})["s"]["y"]) == 0.0
+        assert float(gm.step({"s": {"f": jnp.array(1.0)}})["s"]["y"]) == 1.0
+
+    @pytest.mark.parametrize("bad", [
+        {"s": {"force": jnp.array(1.0)}},       # field typo
+        {"spring": {"f": jnp.array(1.0)}},      # node typo
+        {"s": {"undeclared": jnp.array(1.0)}},  # never declared
+    ])
+    def test_an_unknown_name_is_refused_and_the_declared_ones_named(self, bad):
+        gm = self._graph()
+        with pytest.raises(ValueError) as excinfo:
+            gm.step(bad)
+        message = str(excinfo.value)
+        assert "s.f" in message and "s.g" in message
+
+    def test_every_run_method_validates_the_same_way(self):
+        gm = self._graph()
+        bad = {"s": {"force": jnp.array(1.0)}}
+        for call in (
+            lambda: gm.step(bad),
+            lambda: gm.run(2, external_inputs=bad),
+            lambda: gm.run_scan(2, bad),
+            lambda: gm.run_scan_with_history(2, bad),
+            lambda: gm.run_sweep(2, {"s": {"y": jnp.zeros(2)}},
+                                 external_inputs=bad),
+            lambda: gm.run_adaptive(0.05, external_inputs=bad),
+            lambda: gm.run_adaptive_scan(0.05, external_inputs=bad),
+        ):
+            with pytest.raises(ValueError, match="does not declare"):
+                call()
+
+    def test_a_graph_declaring_nothing_still_refuses_a_stray_name(self):
+        gm = GraphManager()
+        gm.add_node(BallNode(name="b", timestep=0.01))
+        gm.compile()
+        with pytest.raises(ValueError, match="does not declare"):
+            gm.step({"b": {"force": jnp.array(1.0)}})
+
+
 # ------------------------------------------------------------------
 # State access
 # ------------------------------------------------------------------
@@ -494,6 +570,97 @@ class TestStateAccess:
     def test_set_nonexistent_node_raises(self, bouncing_ball_graph):
         with pytest.raises(KeyError):
             bouncing_ball_graph.set_node_state("ghost", {})
+
+
+class TestTheCallerCannotWriteIntoTheRunningSimulation:
+    """``step`` and ``get_node_state`` hand back copies, not the state.
+
+    ``_user_state`` used to return ``self._state`` itself for a graph
+    with no ``_meta`` -- the common uncoupled, uniform-rate case -- and
+    the per-node dicts even when it copied the outer one, so a caller
+    clamping a value in the dict it was given rewrote the simulation.
+    """
+
+    def test_the_dict_step_returns_is_not_the_internal_one(
+        self, bouncing_ball_graph,
+    ):
+        gm = bouncing_ball_graph
+        returned = gm.step()
+        assert returned is not gm._state
+        assert returned["ball"] is not gm._state["ball"]
+
+        returned["ball"]["position"] = jnp.array(999.0)
+        assert float(gm.get_node_state("ball")["position"]) != 999.0
+
+    def test_get_node_state_hands_back_a_copy(self, bouncing_ball_graph):
+        gm = bouncing_ball_graph
+        fields = gm.get_node_state("ball")
+        fields["position"] = jnp.array(-42.0)
+        assert float(gm.get_node_state("ball")["position"]) != -42.0
+
+    def test_set_node_state_is_still_the_way_in(self, bouncing_ball_graph):
+        gm = bouncing_ball_graph
+        gm.set_node_state("ball", {"position": jnp.array(3.0),
+                                   "velocity": jnp.array(0.0)})
+        assert float(gm.get_node_state("ball")["position"]) == 3.0
+
+
+class TestEscapedTracers:
+    """Differentiating through a run must not brick the graph.
+
+    ``step`` / ``run`` / ``run_scan`` assign their result into
+    ``self._state``, so a loss that calls one -- the recipe the
+    quickstart shows -- left the graph holding tracers when ``jax.grad``
+    returned, and every later call died with JAX's
+    ``UnexpectedTracerError``, pointing at JAX rather than here.
+    """
+
+    @staticmethod
+    def _graph():
+        gm = GraphManager()
+        gm.add_node(BallNode(name="ball", timestep=0.01, initial_position=5.0))
+        gm.compile()
+        return gm
+
+    def test_the_graph_is_usable_after_differentiating_through_run_scan(self):
+        gm = self._graph()
+
+        def loss(v0):
+            gm.set_node_state("ball", {"position": jnp.array(5.0),
+                                       "velocity": v0})
+            return gm.run_scan(n_steps=10)["ball"]["position"]
+
+        grad = float(jax.grad(loss)(jnp.array(0.0)))
+        assert grad == pytest.approx(0.1, rel=1e-3)   # 10 steps of 0.01 s
+
+        with pytest.warns(RuntimeWarning, match="tracers"):
+            gm.step()
+        # ... and only once: the graph is clean again.
+        gm.step()
+        gm.run_scan(2)
+        assert not gm._state_traced
+
+    def test_a_python_loop_of_steps_inside_a_trace_still_works(self):
+        """The write-back is what a traced loop depends on; keep it."""
+        gm = self._graph()
+
+        def loss(v0):
+            gm.set_node_state("ball", {"position": jnp.array(5.0),
+                                       "velocity": v0})
+            for _ in range(3):
+                gm.step()
+            return gm.get_node_state("ball")["position"]
+
+        assert float(jax.grad(loss)(jnp.array(0.0))) == pytest.approx(
+            0.03, rel=1e-3
+        )
+
+    def test_an_ordinary_run_never_warns(self, recwarn):
+        gm = self._graph()
+        gm.step()
+        gm.run_scan(3)
+        gm.step()
+        assert not [w for w in recwarn if "tracers" in str(w.message)]
 
 
 # ------------------------------------------------------------------

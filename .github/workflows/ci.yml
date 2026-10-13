@@ -2,19 +2,177 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "release/**"]
   pull_request:
-    branches: [main]
+    branches: [main, "release/**"]
+
+# One run per branch or PR at a time.  The organisation's plan runs sixty
+# jobs at once across its repositories and every run of this workflow
+# costs about nineteen, so a run nobody will read holds up everyone's CI.
+#
+# * Pull requests: a new push cancels the run in progress.  Only the head's
+#   result decides a merge.
+# * main / release/**: a running run is never cancelled -- it may be the
+#   one saving the compilation caches -- but a *queued* run is replaced by
+#   a newer merge's, so back-to-back merges verify (and cache) the tip once
+#   instead of once per merge.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Decide which lanes a change needs.  A pull request that touches only
+  # documentation (docs/, Markdown, plans/, .claude/, LICENSE) runs the
+  # compliance job alone: that job owns the docs checks (citations,
+  # implementation mapping, anomaly registry) and the only tests that read
+  # docs/ (tests/compliance; tests/compliance/test_ci_workflows.py fails if
+  # a test elsewhere names a docs path).  Anything else, including this
+  # workflow, runs every lane.  A pull request with no merge base and an
+  # empty diff (a commit and its revert) count as code: the safe side.
+  #
+  # A push (a merge to main / release/**) always runs every lane.  Diffing
+  # it against `github.event.before` is not safe: the concurrency group
+  # below replaces a *pending* push run with the next one, so for merges
+  # A (code), B (code), C (docs) in quick succession B's run can be
+  # replaced while it waits, and C's diff B..C is docs only -- C would then
+  # skip every lane, the combined A+B tree would never be tested on the
+  # branch, and no compilation cache would be saved for it.
+  #
+  # Pattern semantics, on purpose: POSIX `case` `*` matches `/`,
+  # so `docs/*` covers every nested path under docs/ and `*.md` / `*.rst`
+  # match anywhere in the tree, including a README inside src/maddening
+  # (package content, but nothing the test lanes read).  Renames are not
+  # detected, so a rename out of a code path lists the source path too.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+      cold: ${{ steps.classify.outputs.cold }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed files
+        id: classify
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -eu
+          if [ "$EVENT" != "pull_request" ]; then
+            # See the job comment: a push's own diff can miss a merge whose
+            # run was replaced while pending.
+            echo "$EVENT: running every lane"
+            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          git fetch --no-tags --depth=1 origin "$BASE_REF" 2>/dev/null || true
+          base="$(git merge-base "origin/$BASE_REF" HEAD || true)"
+          if [ -z "$base" ]; then
+            echo "no diff base; running every lane, cold"
+            echo "code=true" >> "$GITHUB_OUTPUT"; echo "cold=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          changed="$(git -c core.quotePath=false diff --name-only --no-renames "$base" HEAD)"
+          if [ -z "$changed" ]; then
+            echo "empty diff vs $base (nothing changed in the tree); running every lane"
+            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "changed files vs $base:"
+          code=false
+          while IFS= read -r f; do
+            case "$f" in
+              docs/*|plans/*|.claude/*|*.md|*.rst|LICENSE|LICENSE.*|CITATION.cff)
+                echo "  $f  (docs)" ;;
+              *)
+                echo "  $f  (code)"; code=true ;;
+            esac
+          done <<< "$changed"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "code lanes needed: $code"
+          # A cold test run (see "Compilation cache mode") when the diff can
+          # move a compile cost onto another test: a slow mark added or
+          # removed, a test function removed (deleted, renamed or moved),
+          # or the allowlist or the shard assignment edited.
+          cold=false
+          if grep -qxE 'tests/duration_allowlist\.txt|tests/_sharding\.py' <<< "$changed" \
+              || git diff -U0 --no-renames "$base" HEAD -- 'tests/*.py' \
+                 | grep -qE '^[-+][^-+].*mark\.slow|^-[[:space:]]*(async[[:space:]]+)?def[[:space:]]+test'; then
+            cold=true
+          fi
+          echo "cold=$cold" >> "$GITHUB_OUTPUT"
+          echo "cold test run needed: $cold"
+
   test:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     strategy:
+      # Two lanes: every supported interpreter crossed with every JAX
+      # minor the declared range can reach.
+      #
+      # Interpreters: one.  `requires-python = ">=3.12"`, so 3.12 is the
+      # floor and there is nothing below it to test.
+      #
+      # JAX: two, and that is the whole declared range.
+      # `jax>=0.10,<0.13` looks like three minors but there is no 0.12
+      # series, so 0.10 and 0.11 are all of it.  Pinning only 0.10 left
+      # half the range claimed and never installed -- a support claim
+      # with no evidence behind it, which is the thing this matrix is
+      # for.  Both pins are exact: a floating pin makes a red build
+      # unreproducible and silently re-defines what the evidence in
+      # docs/validation/soup_package.md was generated against.
+      #
+      # These two values are read by scripts/generate_soup_tables.py
+      # (`read_ci`) and become the "verified on" half of the Python and
+      # JAX rows of the SOUP package.  Changing the matrix moves those
+      # rows; removing it makes them say "unknown" rather than quietly
+      # falling back to the permitted range.
+      # A lane that fails must not take the other lane's evidence with
+      # it.  Without this, one red leg cancels the other and the log
+      # cannot distinguish "this JAX version broke it" from "it is
+      # broken on both" -- a CANCELLED sibling has already been misread
+      # as a passing one once in this release.  slow-tests.yml has said
+      # `fail-fast: false` all along; this matrix did not.
+      fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.12"]
+        # 0.10.2 is the oldest jax the package supports, and the lane
+        # that holds that floor.  It used to carry one more thing: it
+        # was the only lane on which the `sqrt(m)` term of `rank_rtol`'s
+        # default cutoff (`maddening.sysid._resolve_rank_rtol`) could be
+        # shown to be load-bearing, because `fim` read the eigenvalues
+        # of `F = J.T @ J` and only this backend's float32 reduction was
+        # loose enough to push a null direction over the older `n * eps`
+        # cutoff (10.1 eps here against 1.4 eps on 0.11.2, 64 seeds at
+        # n=2, m=4000).  `fim` reads the singular values of `J` now, the
+        # reduction is not on that route, and the test that depended on
+        # the lane was replaced by one that asserts on every backend
+        # (`test_a_missing_direction_reads_at_the_square_of_one_rounding_on_every_backend`
+        # in tests/core/test_sysid_degenerate_inputs.py).
+        jax-version: ["0.10.2", "0.11.2"]
+        # Each lane runs as six jobs, each on its own runner and each
+        # running its share one test at a time.  The split is by test file
+        # and stable (tests/_sharding.py): a file's shard is a hash of its
+        # path, or an explicit pin for the heaviest files, never a function
+        # of the test list -- so shard i of a pull request holds the same
+        # files as shard i of the base branch.  One process per runner
+        # keeps per-test times comparable to the budget and memory at a
+        # sixth of the suite's; xdist on one runner did neither (four
+        # workers stretched every test's wall time, and memory grew to
+        # 14 GB of 16 before a runner died, PR #133).  Changing the count
+        # means changing MADDENING_TEST_SHARD, the cache key and the
+        # artifact name below, the three counts in the test-durations
+        # job, and PINS_FOR with its pins in tests/_sharding.py.
+        shard: [1, 2, 3, 4, 5, 6]
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # A pull request checks out GitHub's merge commit; two deep also
+          # fetches its parents, one of them the head commit whose message
+          # "Compilation cache mode" reads.
+          fetch-depth: 2
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
@@ -24,27 +182,235 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # Pin JAX to known-good version to avoid jaxlib segfaults
-          pip install "jax==0.10.2" "jaxlib==0.10.2"
+          # Exact JAX pin per lane; jaxlib tracks jax version-for-version.
+          pip install "jax==${{ matrix.jax-version }}" "jaxlib==${{ matrix.jax-version }}"
           pip install -e ".[ci]"
 
       - name: Install C toolchain for the FMU wrapper tests
-        # gcc + clang ship on ubuntu-latest; valgrind does not.  tests/fmi/
-        # test_c_unit.py builds the wrapper plain, with ASan/UBSan, runs the
-        # unit + fuzz binaries under both and under valgrind, and a short
-        # libFuzzer campaign with clang; each part self-skips if its tool is
-        # missing, so this step is what makes CI actually exercise them.
+        # gcc + clang ship on ubuntu-latest; valgrind does not.  Per push,
+        # tests/fmi/test_c_unit.py builds the wrapper with the default `cc`
+        # (gcc), plain and with ASan/UBSan, and runs the fuzz binary under
+        # valgrind (test_fuzz_under_valgrind), which self-skips without it:
+        # that is what this step is for.  The unit binary under valgrind and
+        # the libFuzzer campaign -- the only use of clang -- are slow-marked
+        # and run in slow-tests.yml, which installs both itself.
+        # A package mirror that stops answering leaves apt-get waiting with no
+        # output: on 2026-10-07 this step hung for 1 h 50 min in one shard
+        # while the other eleven jobs were green.  The install takes under a
+        # minute; ten is the limit, and a rerun of the job is the remedy.
+        timeout-minutes: 10
         run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind clang
 
+      - name: Compilation cache mode
+        # Pull requests run WARM: they restore the base branch's XLA
+        # compilation cache and never save one.  A program a PR adds or
+        # changes is not in the base cache, so it compiles from scratch on
+        # every push and the time budget sees what it costs.  (If PRs saved,
+        # a second push would read the first push's cache and a new 25 s
+        # test would pass at 8 s.)  A cost that MOVES is another matter: the
+        # first test to compile a shared program pays for every later test
+        # that reuses it, so when a PR slow-marks, deletes or moves that
+        # test the next one inherits the compile, reads it from the base
+        # cache here and looks fast, and the cold run after the merge fails
+        # it.  So a PR whose diff does that runs COLD (the `changes` job's
+        # `cold` output).  Not seen: a new test placed before an existing
+        # one that shares its program.  Pushes to main / release/** -- i.e.
+        # after a merge -- run COLD: start empty, compile each program in
+        # full the first time the run needs it, and save the result as the
+        # cache the next PRs restore.  `[cold-ci]` in a PR's head commit
+        # message forces a cold run, for before/after numbers.  A message
+        # that cannot be read runs cold too, with a warning: a `[cold-ci]`
+        # request cannot be ruled out.
+        id: cc
+        env:
+          COLD_DIFF: ${{ needs.changes.outputs.cold }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          mode=warm
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            mode=cold
+          elif msg=$(git log -1 --format=%B "$HEAD_SHA"); then
+            case "$msg" in *"[cold-ci]"*) mode=cold ;; esac
+            if [ "$COLD_DIFF" = "true" ]; then mode=cold; fi
+          else
+            echo "::warning title=Compilation cache::could not read the message of head commit '$HEAD_SHA' (git's error is above), so running cold: a [cold-ci] request cannot be ruled out"
+            mode=cold
+          fi
+          # XLA:CPU compiles for the host's instruction set.  What keeps an
+          # executable off a host it was not built for is JAX's own cache
+          # key, which includes the CPU's features; the CPU model here only
+          # raises the hit rate.  Runners reporting one model can still
+          # differ in features, and then the restored cache goes unused:
+          # the lane summary labels each shard from its hits, not this.
+          model=$(grep -m1 '^model name' /proc/cpuinfo | cut -d: -f2- | xargs)
+          cpu=$(printf '%s' "$model" | sha256sum | cut -c1-12)
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          # One cache per shard: shard i holds the same test files on every
+          # branch (tests/_sharding.py), so it compiles the same programs.
+          echo "key=jaxcc-v1-${{ runner.os }}-$cpu-py${{ matrix.python-version }}-jax${{ matrix.jax-version }}-shard${{ matrix.shard }}of6" >> "$GITHUB_OUTPUT"
+          echo "compilation cache: $mode on '$model'"
+
+      - name: Restore compilation cache
+        id: cc-restore
+        if: steps.cc.outputs.mode == 'warm'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/jax-cache
+          key: ${{ steps.cc.outputs.key }}-${{ github.sha }}
+          restore-keys: ${{ steps.cc.outputs.key }}-
+
       - name: Run tests
+        id: tests
         env:
           JAX_PLATFORMS: cpu
           XLA_FLAGS: "--xla_gpu_autotune_level=0"
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          # Persistent XLA compilation cache (see "Compilation cache mode").
+          # Minimum compile time 0 and no minimum entry size: most of this
+          # suite's compiles are well under JAX's 1 s default threshold.
+          JAX_COMPILATION_CACHE_DIR: ${{ runner.temp }}/jax-cache
+          JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS: "0"
+          JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES: "-1"
+          # No JAX_COMPILATION_CACHE_MAX_SIZE, on purpose.  A size cap makes
+          # every cache write glob the whole directory and read one atime
+          # file per entry to decide what to evict -- quadratic over a cold
+          # run of tens of thousands of compiles, and it pushed the first
+          # trial of this lane past 95 minutes.  The cap's other effect is a
+          # file lock.  Without it, more than one process can still write
+          # here: each lane runs one pytest process, but a test that starts
+          # a Python subprocess passes this variable on, and the child reads
+          # and writes the same directory.  JAX writes an entry in place
+          # (no temp file and rename) and never rewrites one that exists, so
+          # a child killed mid-write leaves a truncated entry for good; the
+          # "Drop unreadable compilation-cache entries" step below removes
+          # those before a cache is saved.  A cold run starts empty, so the
+          # cache is bounded by one suite's worth.
+          # Record each test's JAX trace / lower / compile / cache-read
+          # time into the JUnit XML (tests/_jax_timing.py), so the budget
+          # step can say why a slow test is slow.
+          MADDENING_TEST_JAX_TIMING: "1"
+          # tests/test_packaging_py_typed.py builds a wheel and asserts the
+          # PEP 561 marker is in it.  It skips when the build backend is
+          # absent; here the backend is installed (`hatchling` in the ci
+          # extra), so a skip would mean the environment changed and the
+          # proof stopped running -- fail instead.
+          MADDENING_REQUIRE_PACKAGING_TESTS: "1"
+          # This job's share of the suite (tests/_sharding.py).
+          MADDENING_TEST_SHARD: "${{ matrix.shard }}/6"
         run: |
-          python -m pytest tests/ -v --tb=short --ignore=tests/viz
+          # -rs prints every skip's reason.  A skip whose reason nobody
+          # reads is indistinguishable from a test that never existed,
+          # and at least one skip here is a *measurement* the log is
+          # meant to carry (see the jax-version matrix comment above).
+          #
+          # --durations prints every test over 1 s at the end of the log;
+          # the JUnit XML carries every test's time to the budget step
+          # below.  xunit1 is the JUnit family that records file and line.
+          python -m pytest tests/ -v -rs --tb=short --ignore=tests/viz \
+            --durations=0 --durations-min=1.0 \
+            --junitxml=test-results-shard${{ matrix.shard }}.xml -o junit_family=xunit1
+
+      - name: Test time budget
+        # Runs after a red test step too.  The gate half only: warns on any
+        # test over 5 s that is not on tests/duration_allowlist.txt and
+        # fails on one over 20 s.  The summary is written once per lane,
+        # from all six shards, by the "Test durations" job below.  The
+        # budget is in docs/developer_guide/testing_standards.md.
+        if: ${{ !cancelled() }}
+        run: |
+          # What this shard's cache was, for the lane summary: warm only if a
+          # cache was actually restored.  Written first: this runs under
+          # `bash -e`, so a line after a failing gate would never run and the
+          # lane summary would label the lane from the other shards alone.
+          echo "${{ (steps.cc.outputs.mode == 'warm' && steps.cc-restore.outputs.cache-matched-key != '') && 'warm' || 'cold' }}" \
+            > cache-mode-shard${{ matrix.shard }}.txt
+          python scripts/report_test_durations.py test-results-shard${{ matrix.shard }}.xml \
+            --allowlist tests/duration_allowlist.txt --markdown /dev/null
+
+      - name: Drop unreadable compilation-cache entries
+        # A truncated entry (see "No JAX_COMPILATION_CACHE_MAX_SIZE" above)
+        # would be restored by every later pull request, and reading it
+        # raises there (JAX warns; pytest's filterwarnings=error makes that
+        # a test error).  Every entry must decompress whole before a save.
+        id: prune-cache
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.tests.outcome == 'success' }}
+        run: python scripts/prune_jax_cache.py "${{ runner.temp }}/jax-cache"
+
+      - name: Save compilation cache
+        # Only after a merge (a push to main / release/**), whose run
+        # started from an empty cache: the saved cache then holds exactly
+        # the base branch's programs.  Only when the test step passed: a
+        # failed or crashed run may have killed a writer mid-entry.  Pull
+        # requests never save.
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.tests.outcome == 'success' && steps.prune-cache.outcome == 'success' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/jax-cache
+          key: ${{ steps.cc.outputs.key }}-${{ github.sha }}
+
+      - name: Upload test durations
+        # Kept 90 days so a regression can be traced to the run that
+        # introduced it without re-running anything.
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-durations-py${{ matrix.python-version }}-jax${{ matrix.jax-version }}-shard${{ matrix.shard }}of6
+          path: |
+            test-results-shard${{ matrix.shard }}.xml
+            cache-mode-shard${{ matrix.shard }}.txt
+          retention-days: 90
+          if-no-files-found: warn
+
+  test-durations:
+    # One summary per lane from all six shards' JUnit XML: band counts,
+    # slowest tests and files, and allowlist entries that may be
+    # removable -- which only a view of the whole lane can say, since an
+    # entry absent from one shard is simply on another.  Report only; the
+    # shards gate themselves.  The one failure: no shard report at all.
+    # This job runs only when the change needs the test lanes, so no report
+    # means no shard ran -- and GitHub reports a job skipped by `if:` as a
+    # success, even to a required check.
+    name: Test durations
+    needs: [changes, test]
+    if: ${{ !cancelled() && needs.changes.outputs.code == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        jax-version: ["0.10.2", "0.11.2"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: test-durations-py3.12-jax${{ matrix.jax-version }}-shard*
+          path: results
+          merge-multiple: true
+      - name: Summarise the lane
+        run: |
+          n=$(ls results/test-results-shard*.xml 2>/dev/null | wc -l)
+          if [ "$n" -eq 0 ]; then
+            echo "::error title=Test durations::no shard report for JAX ${{ matrix.jax-version }}: no test shard of this lane ran, and this job runs only when the change needs the test lanes"
+            exit 1
+          fi
+          extra=""
+          if [ "$n" -ne 6 ]; then
+            echo "::warning title=Test durations::only $n of 6 shard reports for JAX ${{ matrix.jax-version }}; the summary covers those shards and lists no removable allowlist entries"
+            extra="--no-removable"
+          fi
+          # warm, cold, or mixed when the shards differ (a shard whose CPU
+          # model had no cache yet runs cold) -- or when a shard's mode file
+          # is missing, since that shard's mode is then unknown.
+          modes=$(cat results/cache-mode-shard*.txt 2>/dev/null | sort -u)
+          case "$modes" in warm|cold) mode=$modes ;; *) mode=mixed ;; esac
+          nmodes=$(ls results/cache-mode-shard*.txt 2>/dev/null | wc -l)
+          [ "$nmodes" -eq 6 ] || mode=mixed
+          python3 scripts/report_test_durations.py results/test-results-shard*.xml \
+            --allowlist tests/duration_allowlist.txt --fail-over 0 $extra --cache-mode "$mode" \
+            --title "Test durations (Python 3.12, JAX ${{ matrix.jax-version }}, $n of 6 shards)"
 
   test-usd:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -61,13 +427,94 @@ jobs:
           pip install -e ".[ci,usd]"
 
       - name: Run USD tests
+        # tests/usd/, plus every test elsewhere that needs usd-core: the
+        # sharded lanes install .[ci] without it, so these skip there, and
+        # this is the only job that runs them.  A file that imports pxr or
+        # maddening.usd must be listed here, or in the exemptions of
+        # tests/compliance/test_ci_workflows.py with the reason it runs
+        # without usd-core.
         env:
           JAX_PLATFORMS: cpu
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: |
-          python -m pytest tests/usd/ -v --tb=short
+          python -m pytest -v -rs --tb=short \
+            tests/usd/ \
+            tests/property/test_round_trips.py \
+            tests/cloud/multigpu/test_property_sharded_round_trips.py \
+            tests/nodes/test_builtin_node_round_trip.py \
+            tests/nodes/test_lbm_wall_mask_round_trip.py \
+            tests/test_examples_smoke.py::test_example_imports_resolve_against_the_library \
+            tests/test_examples_smoke.py::test_usd_example_runs_headless
 
-  compliance:
+  test-streaming:
+    # The loopback WebRTC tests (tests/cloud/test_webrtc_loopback.py): a
+    # SelkiesSession and a GStreamer webrtcbin peer that signals as the
+    # browser client does, negotiating and decoding real H.264 on CPU; and
+    # the cloud entry point run as the container runs it, its simulation
+    # built over REST and watched by that peer
+    # (tests/cloud/test_entrypoint_streams.py); and the local WebRTC viewer
+    # example, its --self-check and its viewer page
+    # (tests/cloud/test_local_webrtc_viewer_example.py).  They
+    # need GStreamer, its WebRTC plugins and PyGObject from apt, which the
+    # sharded lanes do not install (the module skips there, and their
+    # selection is held whole by tests/compliance/test_ci_sharding.py), so
+    # this is the only job that runs them: inside the image built from
+    # docker/Dockerfile.streaming-test, with no network (--network none).
+    # NET_ADMIN (the only capability left by --cap-drop ALL) lets the
+    # image's entry point add a veth pair inside that network-less
+    # container, because libnice never gathers ICE candidates on the
+    # loopback interface, which is all --network none leaves; the entry
+    # point then runs pytest with every capability set cleared and
+    # no_new_privs set (docker/README.md says why).
+    # MADDENING_REQUIRE_STREAMING_TESTS=1 makes a missing dependency fail
+    # the job: a skip here would mean the tests ran nowhere.
+    #
+    # No layer cache: the image is about 2 GB, and caching it would compete
+    # with the per-shard JAX compilation caches for the repository's Actions
+    # cache.  Measured on a laptop: a cold build in about 100 s, the tests in
+    # about 30 s.
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the streaming test image
+        # The build runs apt and pip: a mirror that stops answering must
+        # cost minutes, not the job's whole limit.
+        timeout-minutes: 15
+        run: docker build -f docker/Dockerfile.streaming-test -t maddening-streaming-test:ci .
+
+      - name: Run the loopback WebRTC tests
+        timeout-minutes: 10
+        run: |
+          docker run --rm --network none --cap-drop ALL --cap-add NET_ADMIN \
+            -e MADDENING_REQUIRE_STREAMING_TESTS=1 \
+            -v "$PWD":/src:ro maddening-streaming-test:ci \
+            python3 -m pytest tests/cloud/test_webrtc_loopback.py tests/cloud/test_entrypoint_streams.py tests/cloud/test_local_webrtc_viewer_example.py -v -rs --tb=short -p no:cacheprovider
+
+  typecheck:
+    # Phase 2 of the typing policy (docs/developer_guide/typing.md): the
+    # pyright run is BLOCKING, in two tiers defined by typing_tiers.json.
+    # Tier 1 (the package root module __init__.py, core, nodes, fmi,
+    # cloud, sysid, serialization, testing, compliance) is at zero errors
+    # and must stay there.  Tier 2 (viz,
+    # usd, api, surrogates -- all sitting on untyped or optional
+    # third-party libraries) has every public signature annotated but its
+    # bodies only ratcheted: each package has a committed ceiling that
+    # the count may not exceed.
+    #
+    # Three steps, so that a broken tool never looks like a clean tier.
+    # The first runs pyright once over the whole package and FAILS THE
+    # JOB when the run cannot be trusted (pyright missing, exit code
+    # other than 0/1, no JSON, zero files analysed, core imports
+    # unresolved, or a pyright release other than the one the ceilings
+    # were measured with: exit 2 from scripts/typing_baseline.py).  The
+    # other two read that stored run and gate one tier each, so the two
+    # verdicts are independent and both are visible in the summary.
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -78,13 +525,99 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
+        # Same JAX pin and extra as the test job so pyright resolves the
+        # optional imports (matplotlib, zmq, fastapi, skypilot, ...) the
+        # way the tests see them; pyright itself comes from the ci extra.
+        # `environment` in typing_tiers.json records this exact set --
+        # installing more (usd-core, pyvista) resolves more and RAISES
+        # the counts, so the ceilings would no longer apply.  The
+        # interpreter is part of that set: it is 3.12 because that is
+        # the floor, and pyrightconfig.json's `pythonVersion` says the
+        # same.  The lane pins the lower of the two JAX versions the
+        # test matrix runs; pyright reads stubs, not behaviour, and the
+        # ceilings were measured against this one.
         run: |
           python -m pip install --upgrade pip
           pip install "jax==0.10.2" "jaxlib==0.10.2"
           pip install -e ".[ci]"
 
+      - name: Run pyright (infrastructure; fails the job)
+        id: pyright
+        run: |
+          set -o pipefail
+          pyright --version
+          pyright --outputjson > pyright.json || rc=$?
+          case "${rc:-0}" in
+            0|1) ;;
+            *) echo "::error title=pyright::pyright exited ${rc} (3 = pyrightconfig.json could not be parsed); see the log"
+               exit "$rc" ;;
+          esac
+          # Whole-tree summary, and the environment guard: this step
+          # fails the job on exit 2 (the run cannot be trusted).
+          python scripts/typing_baseline.py --json pyright.json \
+            --markdown --top 15 > typing_summary.md
+          cat typing_summary.md
+          {
+            echo "## pyright $(pyright --version)"
+            cat typing_summary.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Tier 1 must be at zero errors
+        run: |
+          rc=0
+          python scripts/typing_baseline.py --json pyright.json \
+            --tier tier1 --markdown --top 10 > tier1.md || rc=$?
+          # Always publish the table: a failing gate is exactly when
+          # the per-package numbers need to be readable.
+          cat tier1.md
+          { echo "## Tier 1 (must be zero)"; cat tier1.md; } \
+            >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - name: Tier 2 may not grow past its committed ceiling
+        run: |
+          rc=0
+          python scripts/typing_baseline.py --json pyright.json \
+            --tier tier2 --markdown --top 10 > tier2.md || rc=$?
+          # Always publish the table: a failing gate is exactly when
+          # the per-package numbers need to be readable.
+          cat tier2.md
+          { echo "## Tier 2 (ratcheted)"; cat tier2.md; } \
+            >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+  compliance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The whole history: check_anomalies reads a retired anomaly's
+          # last committed status from git (the tree no longer holds the
+          # entry), and refuses the retirement in a shallow clone, whose
+          # history may stop before the commit that removed it.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The `usd` extra is here so the gates can actually see what they
+      # verify: an anomaly or an algorithm guide may name a
+      # `maddening.usd.*` symbol, and without usd-core the resolver can only
+      # report it as unchecked.  `test-usd` installs the same extra in this
+      # workflow, so the wheel is proven here.  The gates still degrade
+      # gracefully without it -- see the NOTE path in
+      # maddening.compliance._validate -- which is what a contributor
+      # running them locally relies on.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "jax==0.10.2" "jaxlib==0.10.2"
+          pip install -e ".[ci,usd]"
+
       - name: Validate anomaly registry
-        run: python scripts/check_anomalies.py
+        run: python scripts/check_anomalies.py --prefix MADD-ANO-
 
       - name: Check implementation mapping
         run: python scripts/check_impl_mapping.py
@@ -95,6 +628,46 @@ jobs:
       - name: Check transform registry
         run: python scripts/check_transforms.py
 
+      - name: Check HeatNode configurations are constructible
+        run: python scripts/check_heat_stability.py
+
+      - name: Check small numeric constants say what units they are in
+        run: python scripts/check_numeric_constants.py
+
+      - name: Check STABLE API signatures
+        # A @stability(STABLE) surface promises its signature until the next
+        # major version (docs/developer_guide/deprecation_policy.md).  This
+        # compares every STABLE signature against the committed snapshot
+        # docs/developer_guide/stable_api.json; an intended change is accepted
+        # with `python scripts/check_stable_signatures.py --update` in the same
+        # commit.  This job installs .[ci,usd], so every module imports; the
+        # script tolerates a module skipped for a missing optional extra only
+        # while no STABLE surface lives in it, and exits 2 if one ever does.
+        env:
+          JAX_PLATFORMS: cpu
+        run: python scripts/check_stable_signatures.py
+
+      - name: Run the docstring examples
+        # Every `>>>` in src/maddening, executed.  This is a documentation
+        # gate -- an example that no longer works is a false claim in the
+        # API reference -- so it belongs in this job rather than in `test`:
+        # feedback in ~2 minutes instead of ~40, which is what makes it
+        # useful to a change that is rewriting the shapes those examples
+        # use.  The script also fails if the collection shrinks; see its
+        # module docstring.
+        #
+        # This job installs .[ci,usd], a superset of the .[ci] the test
+        # matrix installs, so the two would disagree about an example that
+        # needs an optional extra.  `usd` is the only difference, and the
+        # only modules that need it (maddening.usd.*) already refuse to
+        # import without it -- so an example there is gated by the module,
+        # not by this job's choice of extras.  Adding a further extra here
+        # would reopen that gap: keep new examples inside .[ci].
+        env:
+          JAX_PLATFORMS: cpu
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+        run: python scripts/check_doctests.py -v --tb=short
+
       - name: Run compliance tests
         env:
           JAX_PLATFORMS: cpu
@@ -103,6 +676,8 @@ jobs:
           python -m pytest tests/compliance/ -v --tb=short
 
   verify-hypothesis:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -118,9 +693,42 @@ jobs:
           pip install "jax==0.10.2" "jaxlib==0.10.2"
           pip install -e ".[ci]"
 
-      - name: Run hypothesis property tests
+      # Restore the Hypothesis example database so a falsifying example found
+      # by an earlier run is replayed first here.  Without it a shallow
+      # property test can pass for months and then fail once, unreproducibly.
+      # The key is unique per run (cache entries are immutable), so every run
+      # saves the database it ends with and restore-keys picks up the most
+      # recent previous one.  A miss is not an error: actions/cache reports
+      # "cache not found" and the job continues with an empty database.
+      - name: Restore Hypothesis example database
+        uses: actions/cache@v4
+        with:
+          path: .hypothesis
+          key: hypothesis-examples-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            hypothesis-examples-${{ runner.os }}-
+
+      # Run through the draw-rejection audit rather than pytest directly.
+      # It is a pytest plugin, so this runs exactly the tests the plain
+      # invocation ran, at the same cost, and additionally fails the job if
+      # any property test throws away more of its draws than
+      # scripts/audit_property_rejection.py's measured gate allows.  A test
+      # that filters most of its input searches a fraction of what its
+      # max_examples claims and is one unrelated strategy change away from
+      # a FailedHealthCheck; see docs/developer_guide/testing_standards.md.
+      #
+      # ``-m "slow or not slow"``: this job exists to search deeper than
+      # the default lane, so it runs the whole directory, including the
+      # properties marked slow to keep the default lane inside its time
+      # budget.  Without it the addopts' ``-m 'not slow'`` would drop them
+      # from the one job that runs them at ``ci`` depth.
+      - name: Run hypothesis property tests (with draw-rejection audit)
         env:
           JAX_PLATFORMS: cpu
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          MADDENING_HYPOTHESIS_PROFILE: ci
         run: |
-          python -m pytest tests/verification/hypothesis/ -v --tb=short
+          python scripts/audit_property_rejection.py \
+            tests/verification/hypothesis/ \
+            --check --pytest-arg=-v --pytest-arg=--tb=short \
+            --pytest-arg=-m "--pytest-arg=slow or not slow"

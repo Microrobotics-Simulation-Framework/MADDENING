@@ -1,0 +1,52 @@
+### mutation round 1 (codec only), re-run for the record
+==================================================================
+MUTATION: M1 encode: stop recursing into tuples (list only)
+   applied to src/maddening/serialization/json_codec.py
+.............................................                            [100%]
+45 passed in 3.68s
+==================================================================
+MUTATION: M2 encode: drop the ambiguous-string refusal
+   applied to src/maddening/serialization/json_codec.py
+FAILED tests/core/test_non_finite_json_tokens.py::test_any_tree_dumps_to_a_document_a_strict_parser_accepts
+FAILED tests/fmi/test_binary_frames_properties.py::test_a_header_string_spelling_a_non_finite_token_is_refused
+5 failed, 40 passed in 4.56s
+==================================================================
+MUTATION: M3 decode: do not decode inside lists
+   applied to src/maddening/serialization/json_codec.py
+FAILED tests/core/test_non_finite_json_tokens.py::test_a_reloaded_non_finite_config_serialises_to_the_same_document
+FAILED tests/usd/test_usd_params.py::test_a_non_finite_array_param_round_trips_beside_a_zero_size_one
+4 failed, 41 passed in 3.80s
+==================================================================
+MUTATION: M4 dumps: allow_nan=True (bare tokens back)
+   applied to src/maddening/serialization/json_codec.py
+FAILED tests/fmi/test_non_finite_json_tokens.py::test_any_values_array_survives_the_json_wire_exactly
+FAILED tests/fmi/test_binary_frames_properties.py::test_a_header_string_spelling_a_non_finite_token_is_refused
+9 failed, 36 passed in 4.48s
+==================================================================
+MUTATION: M5 SIGN FLIP: Infinity decodes to -inf
+   applied to src/maddening/serialization/json_codec.py
+FAILED tests/fmi/test_non_finite_json_tokens.py::test_a_non_finite_get_reply_is_strict_json
+FAILED tests/fmi/test_non_finite_json_tokens.py::test_any_values_array_survives_the_json_wire_exactly
+10 failed, 35 passed in 4.01s
+==================================================================
+MUTATION: M6 SIGN FLIP: -inf encodes as Infinity
+   applied to src/maddening/serialization/json_codec.py
+FAILED tests/fmi/test_non_finite_json_tokens.py::test_send_message_writes_a_non_finite_payload_as_strict_json
+FAILED tests/fmi/test_binary_frames_properties.py::test_encode_then_decode_is_the_identity_for_any_json_header
+7 failed, 38 passed in 3.97s
+==================================================================
+MUTATION: M7 encode: NaN encodes as the inf token
+   applied to src/maddening/serialization/json_codec.py
+FAILED tests/fmi/test_non_finite_json_tokens.py::test_any_values_array_survives_the_json_wire_exactly
+FAILED tests/fmi/test_non_finite_json_tokens.py::test_the_compiled_wrapper_reads_a_diverged_get_over_json
+10 failed, 35 passed in 3.87s
+==================================================================
+MUTATION: M8 decode: drop the token table entirely (identity)
+   applied to src/maddening/serialization/json_codec.py
+FAILED tests/core/test_non_finite_json_tokens.py::test_a_reloaded_non_finite_config_serialises_to_the_same_document
+FAILED tests/usd/test_usd_params.py::test_a_non_finite_array_param_round_trips_beside_a_zero_size_one
+5 failed, 40 passed in 3.74s
+==================================================================
+final git status (must be clean):
+.........................................................                [100%]
+57 passed, 1 deselected in 43.62s

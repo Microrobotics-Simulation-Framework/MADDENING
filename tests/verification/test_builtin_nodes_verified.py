@@ -8,6 +8,12 @@ them is finite.  Nodes that have not migrated to ``params`` get ``SKIP``
 on the params checks; a node listed in ``MIGRATED`` must not skip them —
 that list is the ledger of the params migration.
 
+A battery over the 5 s test budget runs in the slow lane
+(``slow-tests.yml``: scheduled three times a week on ``main`` only, and on
+a release branch only when dispatched by hand) rather than on every push;
+the cheap ones keep the full battery, params checks included, on every
+push.
+
 The sampling envelopes are the nodes' validated regimes, not the
 ``(-1e4, 1e4)`` default: the checks are about the update's structure,
 not about whether a 1D heat cell survives a 1e4 K temperature jump in
@@ -19,6 +25,7 @@ import os
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from hypothesis import given, settings
 
@@ -35,6 +42,18 @@ from maddening.testing.verification import DEFAULT_CHECKS, make_inputs, verify_n
 KW = dict(max_examples=100, derandomize=True)
 
 N_CELLS = 8
+
+
+def _unit_orientation(state):
+    """``constrain_state`` for the rigid body: its orientation on the unit
+    sphere.  Normalised in float64 (the square of a tiny float32 draw
+    underflows); the zero quaternion has no direction, so the identity
+    stands in for it."""
+    q = np.asarray(state["orientation"], dtype=np.float64)
+    norm = np.linalg.norm(q)
+    q = q / norm if norm > 0 else np.array([1.0, 0.0, 0.0, 0.0])
+    return {**state, "orientation": jnp.asarray(q, dtype=state["orientation"].dtype)}
+
 
 CASES = {
     "spring": dict(
@@ -58,17 +77,36 @@ CASES = {
             "heat_source": (-100.0, 100.0),
         },
     ),
+    # The shipped non-uniform configuration: ``length`` is declared
+    # ``trainable=False`` here because the geometry is ``grid_points`` and
+    # no path reads it -- the battery failed this configuration on a dead
+    # trainable leaf until it did.
+    "heat_nonuniform": dict(
+        node=lambda: HeatNode("hn", 1e-4, n_cells=N_CELLS, thermal_diffusivity=0.1,
+                              grid_points=[0.05, 0.12, 0.25, 0.33, 0.5, 0.6, 0.8, 0.95]),
+        bounds={"temperature": (250.0, 400.0)},
+        boundary_bounds={
+            "left_temperature": (250.0, 400.0),
+            "right_temperature": (250.0, 400.0),
+            "heat_source": (-100.0, 100.0),
+        },
+    ),
     "rigid_body": dict(
         node=lambda: RigidBodyNode("r", 0.01, mass=2.0, inertia=(1.0, 2.0, 3.0)),
         bounds={
             "position": (-10.0, 10.0),
             "velocity": (-10.0, 10.0),
-            # Away from the zero quaternion: ``quat_normalize`` divides
-            # by the norm and the physical state is unit-norm anyway.
-            "orientation": (0.25, 1.0),
+            # A unit quaternion of any sign pattern: drawn in a box round
+            # the origin, put on the sphere by ``constrain_state``.  Before
+            # the battery could be given a constraint this was the box
+            # (0.25, 1.0) -- kept off the zero quaternion, which
+            # ``quat_normalize`` cannot divide by -- so every orientation
+            # had four positive components and a norm between 0.5 and 2.
+            "orientation": (-1.0, 1.0),
             "angular_velocity": (-5.0, 5.0),
         },
         boundary_bounds={"force": (-50.0, 50.0), "torque": (-50.0, 50.0)},
+        kwargs=dict(constrain_state=_unit_orientation),
     ),
     "rigid_body_2d": dict(
         node=lambda: RigidBody2DNode("r2", 0.01, mass=2.0, inertia=0.5),
@@ -119,12 +157,27 @@ CASES = {
 # (except ``params_gradient_finite`` / ``params_effective`` on a node
 # whose ``params_pytree()`` is empty or all non-trainable).
 MIGRATED = {
-    "spring", "ball", "heat", "rigid_body",
+    "spring", "ball", "heat", "heat_nonuniform", "rigid_body",
     "rigid_body_2d", "heart_pump", "table", "health_check",
 }
 
 
-@pytest.mark.parametrize("name", sorted(CASES))
+#: Batteries over 5 s on the CI runner (6-46 s: ``verify_node`` runs its
+#: 100 examples per check eagerly).  They run in the slow lane; ``table``
+#: and ``health_check`` keep the full battery, params checks included, on
+#: every push.
+_SLOW_BATTERIES = {
+    "ball", "heart_pump", "heat", "heat_nonuniform", "rigid_body",
+    "rigid_body_2d", "spring",
+}
+
+
+# Per push: tests/verification/test_builtin_nodes_verified.py::test_builtin_node_passes_battery[table] and [health_check] (the full battery,
+# params checks included).
+@pytest.mark.parametrize("name", [
+    pytest.param(n, marks=pytest.mark.slow) if n in _SLOW_BATTERIES else n
+    for n in sorted(CASES)
+])
 def test_builtin_node_passes_battery(name):
     case = CASES[name]
     node = case["node"]()
@@ -160,9 +213,53 @@ _HEAT_INPUTS = make_inputs(
 
 
 @given(_HEAT_INPUTS.strategy())
-@settings(max_examples=5, deadline=None)
 def test_heat_source_sampled_with_declared_shape(args):
     """The battery samples ``heat_source`` at its declared ``(n,)`` shape,
     so the check exercised the real stencil path, not a broadcast scalar."""
     _, bi, _ = args
     assert jnp.shape(bi["heat_source"]) == (N_CELLS,)
+
+
+# Per push: tests/verification/test_builtin_nodes_verified.py::test_params_effective_names_the_solver_paths_it_checked (its ball case).
+@pytest.mark.parametrize(
+    "name, paths, unused",
+    [
+        # Every path is probed on its own: a flux producer's fluxes and a
+        # node with interface DOFs' correction are paths of their own.  The
+        # spring's force has no use for ``mass`` -- reported, not failed.
+        # All but ``ball`` are over 5 s on the CI runner (5-20 s, the
+        # check's 100 examples per path run eagerly): slow lane.  ``ball``
+        # keeps the not-consumed report on every push.
+        pytest.param(
+            "spring", "update, compute_boundary_fluxes, derivatives, implicit_residual",
+            "not consumed by compute_boundary_fluxes(): ['mass']",
+            marks=pytest.mark.slow),
+        pytest.param(
+            "heat", "update, compute_boundary_fluxes, derivatives, implicit_residual, "
+                    "compute_interface_correction", None,
+            marks=pytest.mark.slow),
+        pytest.param(
+            "heat_nonuniform", "update, compute_boundary_fluxes, derivatives, "
+                               "implicit_residual, compute_interface_correction", None,
+            marks=pytest.mark.slow),
+        pytest.param(
+            "heart_pump", "update, compute_boundary_fluxes, derivatives, implicit_residual",
+            None, marks=pytest.mark.slow),
+        pytest.param("rigid_body", "update, derivatives, implicit_residual", None,
+                     marks=pytest.mark.slow),
+        # The collision-free right-hand side has no use for ``elasticity``:
+        # reported, not failed -- the case that separates "not consumed"
+        # from "read from self.params".
+        ("ball", "update, derivatives", "not consumed by derivatives(): ['elasticity']"),
+    ],
+)
+def test_params_effective_names_the_solver_paths_it_checked(name, paths, unused):
+    case = CASES[name]
+    res = verify_node(
+        case["node"](), case["bounds"], boundary_bounds=case["boundary_bounds"],
+        checks=["params_effective"], **case.get("kwargs", {}), **KW,
+    )["params_effective"]
+    assert res.passed, res.detail
+    assert f"paths checked: {paths}" in res.detail, res.detail
+    if unused:
+        assert unused in res.detail, res.detail

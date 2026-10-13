@@ -52,6 +52,8 @@ propeller_force : scalar, optional
 
 from __future__ import annotations
 
+import operator
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -59,6 +61,7 @@ import numpy as np
 from maddening.core.node import SimulationNode
 from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
 from maddening.core.compliance.stability import stability
+from maddening.core._size_estimate import AllocationEstimate, as_count
 from maddening.core.params import ParamSpec
 
 # ── D3Q19 lattice constants ─────────────────────────────────────────
@@ -154,8 +157,12 @@ def _equilibrium(density, velocity):
     -------
     f_eq : (nx, ny, nz, 19) float32
     """
+    # Every lattice product in this module passes precision=HIGHEST: an NVIDIA
+    # GPU runs a float32 matrix product at reduced precision under JAX's
+    # default (MADD-ANO-290).  tests/nodes/test_lbm_matmul_precision.py holds
+    # each product here to it; do not write them with @.
     # e_dot_u: (nx, ny, nz, 19)  —  velocity @ E^T
-    e_dot_u = velocity @ _E.astype(np.float32).T
+    e_dot_u = jnp.matmul(velocity, _E.astype(np.float32).T, precision=jax.lax.Precision.HIGHEST)
     u_sq = jnp.sum(velocity ** 2, axis=-1, keepdims=True)  # (..., 1)
 
     # f_eq_q = w_q * rho * (1 + e·u/cs2 + (e·u)^2/(2*cs4) - u·u/(2*cs2))
@@ -182,7 +189,7 @@ def _compute_macroscopic(f):
     """
     density = jnp.sum(f, axis=-1)
     # momentum = sum_q f_q * e_q  —  f @ E
-    momentum = f @ _E.astype(np.float32)
+    momentum = jnp.matmul(f, _E.astype(np.float32), precision=jax.lax.Precision.HIGHEST)
     # Avoid division by zero for empty cells (shouldn't happen in practice)
     velocity = momentum / jnp.maximum(density[..., None], 1e-10)
     return density, velocity
@@ -242,7 +249,7 @@ def _guo_forcing(density, velocity, force, tau):
     # (e_q - u): broadcast to (nx, ny, nz, 19, 3)
     e_minus_u = e_f[None, None, None, :, :] - velocity[..., None, :]
     # (e_q · u): (nx, ny, nz, 19)  —  velocity @ E^T
-    e_dot_u = velocity @ e_f.T
+    e_dot_u = jnp.matmul(velocity, e_f.T, precision=jax.lax.Precision.HIGHEST)
     # e_q scaled by e·u / cs4: (nx, ny, nz, 19, 3)
     e_scaled = e_f[None, None, None, :, :] * (e_dot_u / (_CS2 ** 2))[..., None]
 
@@ -268,7 +275,7 @@ def _tracer_equilibrium(tracer, velocity):
     -------
     g_eq : (nx, ny, nz, 7) float32
     """
-    e_dot_u = velocity @ _E7.astype(np.float32).T  # (nx, ny, nz, 7)
+    e_dot_u = jnp.matmul(velocity, _E7.astype(np.float32).T, precision=jax.lax.Precision.HIGHEST)  # (nx, ny, nz, 7)
     return _W7 * tracer[..., None] * (1.0 + e_dot_u / _CS2)
 
 
@@ -414,14 +421,20 @@ class LBMPipeNode(SimulationNode):
     nx, ny, nz : int
         Grid dimensions.  ``nx`` is the pipe length (flow direction).
     tau : float
-        BGK relaxation time.  Must be > 0.5 for stability.
+        BGK relaxation time.  Must be finite and > 0.5 for stability.
         Kinematic viscosity: ``nu = (tau - 0.5) / 3``.
     pipe_radius : float
         Pipe radius as fraction of ``min(ny, nz) / 2`` (0-1).
     propeller_x : int
-        Axial position of the propeller disc (grid index).
+        Axial position of the propeller disc (grid index,
+        ``0 <= propeller_x < nx``).  The default, 10, therefore needs
+        ``nx > 10``; a position outside the grid is refused (until 0.4.0 it
+        built no disc, and the pipe ran with no propeller).
     propeller_radius : float
-        Propeller disc radius as fraction of pipe radius (0-1).
+        Propeller disc radius as fraction of pipe radius, in ``(0, 1]``.  A
+        value above 1 is refused (until 0.4.0 the disc reached into the
+        wall cells), and so is a disc that covers no cell of the
+        cross-section.
     propeller_strength : float
         Body force magnitude applied at the propeller disc.
     initial_velocity : float
@@ -442,18 +455,46 @@ class LBMPipeNode(SimulationNode):
         Recommended range: -4.2 to -5.0 (higher magnitude = larger
         density ratio, but harder to stabilise).
     rho_liquid : float
-        Initial liquid-phase density (multiphase mode).  Default 1.0.
-        Should be close to the EOS coexistence density for the chosen G
-        (roughly 0.8-1.5 for G in [-4.2, -5.0] with rho_0=1).
+        Liquid-phase density (multiphase mode).  Default 1.0.  Should be
+        close to the EOS coexistence density for the chosen G (roughly
+        0.8-1.5 for G in [-4.2, -5.0] with rho_0=1).  The step reads it
+        as the liquid reference of the phase indicator ``tracer``, and
+        it is a trainable parameter there.  It also supplies the
+        defaults of ``initial_rho_liquid`` and ``rho_wall``, resolved
+        once, here.
     rho_gas : float
-        Initial gas-phase density (multiphase mode).  Default 0.25.
-        Should be close to the EOS coexistence density for the chosen G
-        (roughly 0.15-0.45 for G in [-4.2, -5.0] with rho_0=1).
+        Gas-phase density (multiphase mode).  Default 0.25.  Should be
+        close to the EOS coexistence density for the chosen G (roughly
+        0.15-0.45 for G in [-4.2, -5.0] with rho_0=1).  The gas
+        reference of ``tracer`` (trainable), and the default of
+        ``initial_rho_gas``.
     rho_0 : float
         Pseudopotential reference density.  Default 1.0.
     rho_wall : float or None
         Wall pseudopotential density for wetting control.  ``None``
-        defaults to ``rho_liquid`` (fully wetted / hydrophilic wall).
+        defaults to ``rho_liquid`` (fully wetted / hydrophilic wall).  The
+        default is resolved at construction and stored, so a later change
+        to ``rho_liquid`` through the graph's params does not move it.
+    initial_rho_liquid, initial_rho_gas : float or None
+        The liquid and gas densities of the initial condition (multiphase
+        mode): the two ends of the ``tanh`` fill profile, and the density
+        of wall cells (``initial_rho_gas``).  ``None`` takes
+        ``rho_liquid`` / ``rho_gas``.  Initial conditions, not dynamics
+        constants: ``initial_state`` reads them, the step never does, and
+        they are not trainable.
+
+    Notes
+    -----
+    Why the initial densities are separate leaves.  ``initial_state``
+    runs when the graph compiles, from the constructor's values; a value
+    set later through ``GraphManager.params`` reaches the step only.
+    When ``rho_liquid`` / ``rho_gas`` were both the initial-condition
+    recipe and a trainable step constant, a graph calibrated through
+    ``params`` and the graph its saved config rebuilt started from
+    different initial densities (0.30 apart after three steps, with no
+    warning).  The initial condition now reads only the ``initial_*``
+    leaves, which ``to_dict`` saves alongside the calibrated constants, so
+    the two graphs are the same graph.
     """
 
     meta = NodeMeta(
@@ -462,7 +503,17 @@ class LBMPipeNode(SimulationNode):
         stability=StabilityLevel.EXPERIMENTAL,
         description="D3Q19 Lattice Boltzmann in cylindrical pipe with propeller actuator disc",
         governing_equations="BGK collision: f_i = f_i - (f_i - f_eq_i)/τ; streaming: f_i(x+e_i, t+1) = f_i(x, t)",
-        discretization="Lattice Boltzmann (D3Q19, explicit, 2nd-order in space and time for low Ma)",
+        # No order is claimed.  The only convergence study (MADD-VER-013)
+        # is outside the asymptotic range -- its two triples measure 1.49
+        # and 3.35 -- and bounce-back on the staircased circular wall is
+        # 1st-order, so "2nd-order in space and time", which this said
+        # until 0.4.0, was the bulk scheme's textbook order and not a
+        # property anything measured of this node.
+        discretization=(
+            "Lattice Boltzmann (D3Q19, BGK, explicit; one lattice step per "
+            "timestep).  No order of accuracy is claimed: the one "
+            "convergence study (MADD-VER-013) is not in the asymptotic range"
+        ),
         assumptions=(
             "Incompressible flow (Mach number << 1)",
             "BGK single-relaxation-time collision operator",
@@ -474,20 +525,58 @@ class LBMPipeNode(SimulationNode):
             "Compressibility errors at high Mach number (Ma > 0.1)",
             "BGK is less stable than MRT for high Reynolds numbers",
             "No turbulence model — results unreliable above Re ~2000",
-            "CUDA 12.2 + jaxlib 0.5.1 causes segfault on GPU (MADD-ANO-001)",
             "Wall bounce-back is 1st-order at curved boundaries",
+            "No accuracy verdict: the one convergence study (MADD-VER-013) "
+            "is not in the asymptotic range, and no test compares the node "
+            "against an analytical solution with a pass criterion",
+            "The verified configuration is single-phase, fully filled and "
+            "uniformly forced (MADD-VER-013).  No verification benchmark "
+            "covers the Shan-Chen multiphase mode, the passive tracer, "
+            "partial fill, gravity or a localised actuator disc",
         ),
         validated_regimes=(
-            ValidatedRegime("tau", 0.501, 2.0, notes="tau > 0.5 required for stability; tau >> 1 causes numerical diffusion"),
-            ValidatedRegime("Reynolds number", 0, 100, notes="Validated against Poiseuille analytical solution"),
-            ValidatedRegime("grid", 8, 128, notes="Per-dimension; convergence verified up to 128³"),
+            ValidatedRegime(
+                "tau", 0.8, 0.8,
+                notes=(
+                    "The only value any verification runs at: MADD-VER-013 "
+                    "uses tau = 0.8 (nu = 0.1).  The constructor accepts any "
+                    "tau > 0.5, which BGK needs to be stable, but nothing "
+                    "verifies the node at another value; tau near 0.5 is "
+                    "prone to instability and tau >> 1 adds numerical "
+                    "diffusion.  0.501 to 2.0, the range this declared "
+                    "until 0.4.0, was never run"
+                ),
+            ),
+            ValidatedRegime(
+                "Reynolds number", 0, 0.03,
+                notes=(
+                    "Re = u_mean * 2R / nu.  The only verification runs, "
+                    "MADD-VER-013's uniformly forced pipe flow (tau = 0.8, "
+                    "body force 1e-6), are in the Stokes regime: Re <= 0.013 "
+                    "on the 12/16/24 ladder and 0.030 at 32.  The shape "
+                    "factor u_max/u_mean approaches the Hagen-Poiseuille "
+                    "value 2 from below (1.79, 1.86, 1.92, 1.93), but no "
+                    "test holds the node to an analytical solution"
+                ),
+            ),
+            ValidatedRegime(
+                "grid", 12, 32,
+                notes=(
+                    "Cross-section cells per side (ny = nz, nx = 1) of "
+                    "MADD-VER-013.  The 12/16/24 ladder converges "
+                    "monotonically (observed order 1.49, GCI 10.7% at "
+                    "Fs = 3.0); adding 32 shows it is not in the asymptotic "
+                    "range (per-triple orders 1.49 and 3.35), so this is a "
+                    "convergence statement, not an accuracy one.  No "
+                    "convergence study runs above 32 per side"
+                ),
+            ),
         ),
         hazard_hints=(
-            "Behaviour uncharacterised at Re > 100; validated only for laminar flow",
+            "Behaviour uncharacterised above Re ~0.03 and at any tau but 0.8; verified only in the Stokes regime, at tau = 0.8, on 12 to 32 cells per side (MADD-VER-013), not across the laminar range",
             "No turbulence model — do not use above laminar-turbulent transition (Re ~2000)",
             "Wall bounce-back assumes rigid, impermeable walls; deformable or porous walls not modelled",
             "Gravity applied uniformly — no spatially varying body forces",
-            "CUDA 12.2 + jaxlib 0.5.1 causes segfault on GPU (MADD-ANO-001); CPU unaffected",
             "Passive scalar tracer uses D3Q7 with separate tau — accuracy degrades at high Peclet number",
         ),
     )
@@ -513,11 +602,21 @@ class LBMPipeNode(SimulationNode):
         rho_gas: float = 0.25,
         rho_0: float = 1.0,
         rho_wall: float | None = None,
+        initial_rho_liquid: float | None = None,
+        initial_rho_gas: float | None = None,
     ):
+        # ``tau <= 0.5`` alone let a non-finite value through: inf passes
+        # it (no collision at all) and nan passes every comparison.
+        if not np.isfinite(tau):
+            raise ValueError(f"tau must be a finite number > 0.5 (got {tau}).")
         if tau <= 0.5:
             raise ValueError(
                 f"tau must be > 0.5 for stability (got {tau}). "
                 f"nu = (tau - 0.5) / 3 = {(tau - 0.5) / 3:.4f}"
+            )
+        if not np.isfinite(tau_tracer):
+            raise ValueError(
+                f"tau_tracer must be a finite number > 0.5 (got {tau_tracer})."
             )
         if tau_tracer <= 0.5:
             raise ValueError(
@@ -527,14 +626,57 @@ class LBMPipeNode(SimulationNode):
             raise ValueError(
                 f"fill_fraction must be in (0, 1] (got {fill_fraction})."
             )
+        # The actuator disc is one x-plane of the grid.  An index outside
+        # it used to build no disc at all (see the mask check below); the
+        # default, 10, is outside any pipe of 10 cells or fewer.
+        try:
+            prop_plane = operator.index(propeller_x)
+        except TypeError:
+            raise ValueError(
+                f"propeller_x must be an integer grid index along x (got "
+                f"{propeller_x!r})."
+            ) from None
+        if not 0 <= prop_plane < nx:
+            raise ValueError(
+                f"propeller_x={propeller_x} is outside the grid: the pipe has "
+                f"nx={nx} planes along x, indexed 0 to {nx - 1}, so the "
+                "propeller disc would cover no cell and exert no force.  Pass "
+                f"a propeller_x in [0, {nx})"
+                + (" (the default, 10, needs nx > 10)." if propeller_x == 10
+                   else ".")
+            )
+        # The disc radius is a fraction of the pipe radius.  Above 1 the
+        # disc reaches past the pipe wall and applies its force in wall
+        # cells: propeller_radius=1.5 on a 12x12 cross-section put 64 of its
+        # 140 cells in the wall and moved the mean fluid u_x by 1.9%, with
+        # no error.  At 1 it covers the whole cross-section and no wall
+        # cell.  A radius <= 0 (or nan) builds an empty disc, which the
+        # mask check below refuses.
+        if propeller_radius > 1.0:
+            raise ValueError(
+                f"propeller_radius={propeller_radius} is above 1: it is a "
+                "fraction of the pipe radius, so a disc wider than the pipe "
+                "would apply its force in the wall cells.  Pass a "
+                "propeller_radius in (0, 1]; 1 covers the pipe's whole "
+                "cross-section."
+            )
+        if initial_rho_liquid is None:
+            initial_rho_liquid = rho_liquid
+        if initial_rho_gas is None:
+            initial_rho_gas = rho_gas
         if G != 0.0:
-            if rho_liquid <= rho_gas:
-                raise ValueError(
-                    f"rho_liquid must be > rho_gas "
-                    f"(got {rho_liquid} <= {rho_gas})."
-                )
-            if rho_gas <= 0.0:
-                raise ValueError(f"rho_gas must be > 0 (got {rho_gas}).")
+            for liquid_name, liquid, gas_name, gas in (
+                ("rho_liquid", rho_liquid, "rho_gas", rho_gas),
+                ("initial_rho_liquid", initial_rho_liquid,
+                 "initial_rho_gas", initial_rho_gas),
+            ):
+                if liquid <= gas:
+                    raise ValueError(
+                        f"{liquid_name} must be > {gas_name} "
+                        f"(got {liquid} <= {gas})."
+                    )
+                if gas <= 0.0:
+                    raise ValueError(f"{gas_name} must be > 0 (got {gas}).")
             if rho_0 <= 0.0:
                 raise ValueError(f"rho_0 must be > 0 (got {rho_0}).")
 
@@ -559,6 +701,8 @@ class LBMPipeNode(SimulationNode):
             rho_gas=rho_gas,
             rho_0=rho_0,
             rho_wall=rho_wall,
+            initial_rho_liquid=initial_rho_liquid,
+            initial_rho_gas=initial_rho_gas,
         )
 
         # Pre-compute masks and store as JAX arrays
@@ -566,6 +710,20 @@ class LBMPipeNode(SimulationNode):
         self._propeller_mask = self._build_propeller_mask(
             nx, ny, nz, propeller_x, propeller_radius, pipe_radius,
         )
+        # The disc must cover a cell.  ``mask.at[propeller_x]`` drops an
+        # index outside the grid without a word, and a radius that takes in
+        # no cell centre builds an empty disc, so either ran a pipe with no
+        # propeller at all: propeller_x=99 on nx=8 left max|u| at 3.7e-9
+        # after 10 steps, where propeller_x=4 reached 5.2e-3.
+        if not bool(jnp.any(self._propeller_mask)):
+            raise ValueError(
+                f"LBMPipeNode {name!r}: the propeller disc (propeller_radius="
+                f"{propeller_radius} of the pipe radius, pipe_radius="
+                f"{pipe_radius}) covers no cell of the {ny}x{nz} cross-section, "
+                "so the propeller would exert no force.  Increase "
+                "propeller_radius (a fraction of the pipe radius, 0-1) or use "
+                "a larger cross-section."
+            )
         self._nx = nx
         self._ny = ny
         self._nz = nz
@@ -574,8 +732,11 @@ class LBMPipeNode(SimulationNode):
         self._gravity = gravity
         self._fill_fraction = fill_fraction
         self._G = G
-        self._rho_liquid = rho_liquid
-        self._rho_gas = rho_gas
+        # The initial condition's densities.  ``rho_liquid`` / ``rho_gas``
+        # themselves are read by the step (from the injected params) and
+        # never by ``initial_state``.
+        self._initial_rho_liquid = initial_rho_liquid
+        self._initial_rho_gas = initial_rho_gas
         self._rho_0 = rho_0
         self._rho_wall = rho_wall
 
@@ -606,6 +767,40 @@ class LBMPipeNode(SimulationNode):
         mask = jnp.zeros((nx, ny, nz), dtype=jnp.bool_)
         mask = mask.at[prop_x, :, :].set(prop_cross)
         return mask
+
+    @property
+    def static_data(self) -> dict:
+        """The two geometry masks :meth:`update` reads, built in ``__init__``.
+
+        Published so that :meth:`static_data_deps` can name the parameters
+        they are built from.  Nothing rebuilds them when those parameters
+        are written later.
+        """
+        from maddening.core.static_data import StaticArray
+        return {
+            "wall_mask": StaticArray(value=self._wall_mask, replication="replicate"),
+            "propeller_mask": StaticArray(value=self._propeller_mask,
+                                          replication="replicate"),
+        }
+
+    def static_data_deps(self) -> dict[str, tuple[str, ...]]:
+        """The geometry each mask is built from, when the node is constructed.
+
+        Declared because :meth:`initial_state` reads ``pipe_radius`` again
+        (the fill mask, when ``fill_fraction < 1``), and a parameter the
+        running node reads anywhere used to pass ``PUT /graph/params`` as
+        "takes effect at the next reset": the write answered 200 and the
+        reset rebuilt the fill for the new radius while the step kept the
+        wall mask of the old one, and ``to_dict()`` saved a pipe the server
+        was not running (MADD-ANO-024).  A declared dependency is refused
+        outright on every write surface.  All three are
+        ``ParamSpec(trainable=False)`` or structural, so ``compile()`` has
+        nothing to object to.
+        """
+        return {
+            "wall_mask": ("pipe_radius",),
+            "propeller_mask": ("pipe_radius", "propeller_x", "propeller_radius"),
+        }
 
     def _compute_fill_mask(self):
         """Compute a boolean mask for the initially-filled liquid region.
@@ -663,6 +858,29 @@ class LBMPipeNode(SimulationNode):
         """
         return {0: 1, 1: 1, 2: 1}
 
+    @classmethod
+    def _allocation_estimate(cls, args: dict) -> AllocationEstimate | None:
+        """What the constructor and :meth:`initial_state` would allocate with
+        constructor arguments *args*, told without building anything.
+
+        Private on purpose (see :mod:`maddening.core._size_estimate`): a
+        convention between the built-in nodes, the REST server and
+        ``GraphManager.from_dict``, not yet part of the node contract.
+
+        Per cell the state holds 19 D3Q19 populations, a density, three
+        velocity components, a tracer and 7 D3Q7 tracer populations: 31
+        values.  Building it peaks at about three times the state's float32
+        bytes (measured up to 200 x 50 x 50, single- and multiphase, jaxlib
+        0.11.0); four times is counted.
+        """
+        cells = 1
+        for axis in ("nx", "ny", "nz"):
+            n = as_count(args.get(axis))
+            if n is None:
+                return None
+            cells *= n
+        return AllocationEstimate(state_elements=31 * cells, peak_bytes=31 * cells * 4 * 4)
+
     def initial_state(self) -> dict:
         nx = self.params["nx"]
         ny = self.params["ny"]
@@ -709,19 +927,17 @@ class LBMPipeNode(SimulationNode):
             phase_3d = jnp.broadcast_to(
                 phase[None, None, :], (nx, ny_val, nz_val),
             )
-            density = (
-                self._rho_gas
-                + (self._rho_liquid - self._rho_gas) * phase_3d
-            )
-            # Wall cells: use rho_gas for well-formed bounce-back
-            density = jnp.where(self._wall_mask, self._rho_gas, density)
+            rho_l0, rho_g0 = self._initial_rho_liquid, self._initial_rho_gas
+            density = rho_g0 + (rho_l0 - rho_g0) * phase_3d
+            # Wall cells: use the gas density for well-formed bounce-back
+            density = jnp.where(self._wall_mask, rho_g0, density)
 
             f = _equilibrium(density, velocity)
 
-            # Tracer derived from density
+            # Tracer: the initial phase fraction, from the same recipe (so
+            # the initial state reads no trainable leaf).
             tracer = jnp.clip(
-                (density - self._rho_gas)
-                / (self._rho_liquid - self._rho_gas),
+                (density - rho_g0) / (rho_l0 - rho_g0),
                 0.0, 1.0,
             )
             tracer = jnp.where(self._wall_mask, 0.0, tracer)

@@ -3,9 +3,10 @@
 Subcycling demo: mixed-timestep coupling groups.
 
 **The problem**: different physics run at different timescales.  A stiff
-spring needs a small dt (0.001s) for numerical stability, but a soft
-spring can use a larger dt (0.01s).  Without subcycling, you can't put
-them in the same coupling group (different timesteps are rejected).
+spring wants a small dt (0.001s) to resolve its fast oscillation, but a
+soft spring can use a larger dt (0.01s).  Without subcycling, you can't
+put them in the same coupling group (``compile()`` rejects a group with
+mixed timesteps).
 
 **The solution**: ``subcycling=True`` lets fast and slow nodes coexist
 in one coupling group.  The fast node takes 10 sub-steps per coupling
@@ -19,6 +20,11 @@ staggering may actually be more accurate because it communicates more
 frequently.  Subcycling's advantage is that it CONVERGES the coupling
 within each macro step (via iteration), which matters for strongly
 coupled or marginally stable problems.
+
+The two springs are the two ends of one spring-like pair: each is
+anchored to the other, with rest lengths +1 and -1, so a state where
+both are at rest exists (``stiff - soft = 1``).  With rest lengths of
+the same sign there is none, and the pair drifts off together.
 
 Usage
 -----
@@ -37,20 +43,22 @@ from maddening.nodes.spring import SpringDamperNode
 def build_coupled(dt, coupling=True, subcycling=False):
     """Build a bidirectional spring graph."""
     gm = GraphManager()
+    # Damping above stiffness * dt keeps the coupled explicit pair stable
+    # at the coarse dt as well (200 * 0.01 = 2 < 4).
     gm.add_node(SpringDamperNode(
         name="stiff", timestep=0.001 if subcycling else dt,
-        stiffness=200.0, damping=2.0, mass=0.5,
+        stiffness=200.0, damping=4.0, mass=0.5,
         rest_length=1.0, initial_position=0.0,
     ))
     gm.add_node(SpringDamperNode(
         name="soft", timestep=dt,
         stiffness=20.0, damping=1.0, mass=2.0,
-        rest_length=1.0, initial_position=4.0,
+        rest_length=-1.0, initial_position=4.0,
     ))
     gm.add_edge("stiff", "soft", "position", "anchor_position")
     gm.add_edge("soft", "stiff", "position", "anchor_position")
     if coupling:
-        kwargs = dict(max_iterations=20, tolerance=1e-10)
+        kwargs = dict(max_iterations=20, tolerance=1e-6)
         if subcycling:
             kwargs["subcycling"] = True
         gm.add_coupling_group(["stiff", "soft"], **kwargs)
@@ -69,7 +77,7 @@ def main() -> None:
     print("Subcycling Demo: Mixed-Timestep Coupling")
     print("=" * 65)
     print()
-    print("  Stiff spring: k=200, c=2, m=0.5")
+    print("  Stiff spring: k=200, c=4, m=0.5")
     print("  Soft spring:  k=20,  c=1, m=2")
     print(f"  Subcycle ratio: {ratio}x (stiff takes {ratio} sub-steps")
     print(f"  for every 1 step of soft)")
@@ -84,7 +92,7 @@ def main() -> None:
     ref_stiff = float(s_ref["stiff"]["position"])
     ref_soft = float(s_ref["soft"]["position"])
     print(f"   Stiff={ref_stiff:.6f}  Soft={ref_soft:.6f}")
-    print(f"   (Ground truth: both nodes at fast rate, coupling converged)")
+    print(f"   (Reference: both nodes at the fast rate, coupling converged)")
     print()
 
     # 2. Both at slow rate, with coupling (the baseline subcycling improves on)
@@ -97,7 +105,6 @@ def main() -> None:
     diff_coarse = abs(coarse_stiff - ref_stiff) + abs(coarse_soft - ref_soft)
     print(f"   Stiff={coarse_stiff:.6f}  Soft={coarse_soft:.6f}")
     print(f"   Diff from reference: {diff_coarse:.4f}")
-    print(f"   (The stiff spring loses accuracy at the slow dt)")
     print()
 
     # 3. Subcycled: stiff at fast dt, soft at slow dt
@@ -110,7 +117,7 @@ def main() -> None:
     diff_sub = abs(sub_stiff - ref_stiff) + abs(sub_soft - ref_soft)
     print(f"   Stiff={sub_stiff:.6f}  Soft={sub_soft:.6f}")
     print(f"   Diff from reference: {diff_sub:.4f}")
-    print(f"   (Stiff node uses its own small dt via sub-stepping)")
+    print(f"   (The stiff node takes {ratio} sub-steps of its own dt per macro step)")
     print()
 
     # Summary

@@ -27,6 +27,7 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 
 try:
     from hypothesis import strategies as st
@@ -38,6 +39,8 @@ except ImportError as e:
     ) from e
 
 import jax.numpy as jnp
+from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.stability import stability
 
 
 def _representable(lo: float, hi: float, dtype: np.dtype) -> tuple[float, float]:
@@ -57,6 +60,7 @@ def _representable(lo: float, hi: float, dtype: np.dtype) -> tuple[float, float]
     return float(lo_r), float(hi_r)
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 def node_states(
     node,
     bounds: dict[str, tuple[float, float]] | None = None,
@@ -66,7 +70,11 @@ def node_states(
     """Strategy that generates valid state dicts for a node.
 
     Reads the node's ``initial_state()`` to determine field names and
-    shapes, then generates arrays within the declared bounds.
+    shapes, then generates arrays within the declared bounds.  Every field
+    is drawn on its own: for a field with a constraint (a unit quaternion,
+    positive populations, an index) ``.map()`` the strategy through a
+    function that restores it, which is what ``verify_node``'s
+    ``constrain_state=`` does on every draw of the battery.
 
     Parameters
     ----------
@@ -89,7 +97,9 @@ def node_states(
     field_strategies = {}
     for field, arr in initial.items():
         shape = tuple(int(d) for d in arr.shape)
-        init_dtype = np.dtype(getattr(arr, "dtype", np.float32))
+        # `Any`: the branches below select on it with `np.issubdtype`,
+        # which the checker cannot use to narrow a `dtype[...]` union.
+        init_dtype: Any = np.dtype(getattr(arr, "dtype", np.float32))
         if init_dtype == np.bool_:
             # Flags (a health monitor's status bits): sample both values.
             field_strategies[field] = arrays(
@@ -128,6 +138,7 @@ def node_states(
     return strategy()
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 def bounded_dt(
     min_value: float = 1e-6,
     max_value: float = 0.1,
@@ -147,11 +158,12 @@ def bounded_dt(
     )
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 def boundary_inputs_for(
     node,
     bounds: dict[str, tuple[float, float]] | None = None,
     *,
-    dtype: np.dtype = np.float64,
+    dtype: npt.DTypeLike = np.float64,
 ) -> st.SearchStrategy:
     """Strategy that generates boundary inputs matching a node's spec.
 

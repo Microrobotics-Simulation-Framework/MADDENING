@@ -520,9 +520,20 @@ CI enforces the budget in the `Test time budget` step of each test lane
   log (`--durations=0 --durations-min=1.0`). The XML is uploaded as the
   `test-durations-*` artifact and kept for 90 days.
 - An unlisted test over **5 s** gets a warning annotation on the run.
-- An unlisted test over **20 s** fails the job. An allowlisted one passes
-  (the allowlist has no ceiling), but gets a warning annotation, so a kept
-  test that regresses is still seen.
+- An unlisted test over **20 s** fails the job, after one re-run. The step
+  runs the test again, once, alone, in a fresh pytest with an **empty
+  compilation cache** (`--retry-outliers`); it stops failing only if the
+  re-run passes under the line, and a warning names both times. A test over
+  the line twice, one that fails on the re-run and one the re-run cannot find
+  still fail; so does a report with more than five tests over the line (a
+  regression is not an outlier, and none is re-run). The empty cache is the
+  point: a test whose time is a real compile pays it again instead of reading
+  back what its first run wrote. A test that is quick in its file only
+  because an earlier test built its fixture pays for that itself on the
+  re-run. The case that prompted it: 23.9 s on one runner for a test that
+  reads 1.07 to 1.61 s everywhere else (2026-10-13). An allowlisted test over
+  the line passes (the allowlist has no ceiling), but gets a warning
+  annotation, so a kept test that regresses is still seen.
 - GitHub shows at most ten annotations per step, and the script emits no
   more than that: the summary table is the complete list. The `Test
   durations` job emits the 5 s warnings again for the whole lane, so each
@@ -538,19 +549,24 @@ another's time. Judge a test on more than one run.
 ### Sharded lanes
 
 Each JAX lane runs as six jobs on six runners, each running its share of
-the suite one test at a time (`MADDENING_TEST_SHARD=i/6`,
-`tests/_sharding.py`). The split is by test file, and it is stable. A file's
-shard is a hash of its path, or an explicit pin in `PINS` for the heaviest
-files, never a function of the test list. So:
+the suite one test at a time (`MADDENING_TEST_SHARD=i/6:weighted-push`,
+`tests/_sharding.py`). The split is by test file, by measured time, and it is
+stable. The files of `tests/per_push_weights.json` (seconds per file, the
+median of several cold push runs) are dealt longest first, each onto the shard
+with the least time so far; a file the table does not list (a new one, or one
+under ten seconds) goes by the hash of its path. The deal is a function of the
+committed table alone, never of the test list. So:
 
 - adding or removing tests, or whole files, moves no other file;
 - a file's tests stay together, so its fixtures build once;
 - shard *i* of a pull request holds the same files as shard *i* of the base
-  branch, which is what lets a shard reuse that shard's compilation cache.
+  branch, which is what lets a shard reuse that shard's compilation cache,
+  until the table changes: a pull request that edits it (or `_sharding.py`)
+  runs cold, and the cache key's version (`jaxcc-v2`) moves with a re-deal.
 
-`slow-tests.yml` is split by file too, but on ten runners per lane and by
-measured time, not by hash (`MADDENING_TEST_SHARD=i/10:weighted`). It
-restores no compilation cache, so nothing there needs a file to stay on its
+`slow-tests.yml` is split by file too, on ten runners per lane and by its own
+table (`MADDENING_TEST_SHARD=i/10:weighted`, `tests/slow_lane_weights.json`).
+It restores no compilation cache, so nothing there needs a file to stay on its
 shard, and its files are far from equal: the heaviest takes 48 minutes, and
 by hash one shard of four held nearly half of the lane (166 to 172 minutes
 against a 175-minute timeout, with the others at 50 to 85). The weighted
@@ -581,41 +597,56 @@ it would in a single process, and deselects the other shards' files. The
 per-shard `Test time budget` step gates. The `Test durations` job writes
 one summary per lane from all six shards' reports.
 
-The lane ran four shards until 2026-10-11. On three cold push runs the
-slowest of the four jobs took 43 to 48 minutes. Six shards are predicted
-at 28 to 30 with six files pinned (33 to 37 by hash alone), and at
-33.7 at most if every compiled program that files on one shard shared in
-a cold run had to be compiled again. That prediction is for the runners
+The lane ran four shards until 2026-10-11 (the slowest job 43 to 48 minutes),
+then six by hash with six hand-picked pins (33 to 36 minutes on eight cold push
+runs of 2026-10-13, shard 3 the slowest in every one: 32 minutes of tests
+against 27 for the others). On the median of five of those runs the weighted
+split of the table predicts 27.6 minutes of test time on the slowest of six
+shards (hash and pins: 30.9), 23.4 on seven and 20.8 on eight. Six was kept:
+a push is 19 jobs, so three runs at once fit the organisation's plan (60),
+and under saturation more shards do not shorten the queue, only a single run.
+Each job adds about 80 seconds of setup. The prediction is for the runners
 those runs drew: the same files take up to 1.6 times as long on one hosted
-runner as on another.
+runner as on another, which is why the table is the *median* of several runs.
 
-To rebalance, edit `PINS`, which moves only the files you pin, and take the
-per-file totals from the lane summary. Changing the job count re-deals
-every file, and the count is written in several places that must move
-together:
+To rebalance, regenerate `tests/per_push_weights.json` from the artifacts of
+cold push runs (the `test-durations-*` artifacts are kept 90 days):
+
+```bash
+for id in <run id> <run id> <run id>; do
+  gh run download $id --dir /tmp/push/$id --pattern 'test-durations-*'
+done
+python scripts/slow_lane_weights.py --lane per-push --aggregate median --write \
+    --run <run id>=/tmp/push/<run id> --run <run id>=/tmp/push/<run id> ...
+```
+
+Take only runs whose shards all ran cold (a push to `main` or `release/**`): a
+warm run's compile times are the cache's. Changing the job count re-deals every
+file, and the count is written in several places that must move together:
 
 - in `ci.yml`: `shard:` and `MADDENING_TEST_SHARD` in the `test` job, the
   `of6` in the compilation cache's key and in the durations artifact's
   name, and the `-ne 6`, `-eq 6` and "of 6" in the `Test durations` job's
   "Summarise the lane" step;
-- `PINS_FOR` in `tests/_sharding.py`, and the pins themselves.
+- `PER_PUSH_SHARDS` in `tests/_sharding.py`, and `scheduled-checks.yml`'s six
+  shards.
 
 The slow lane's count is separate (`SLOW_LANE_SHARDS` in
 `tests/_sharding.py`) and is written in `slow-tests.yml` as `shard:`,
 `MADDENING_TEST_SHARD`, the artifact name's `of10`, the "of 10" in the step
-title and the `/10` in the three issue titles. No pin depends on it: the
-table is dealt for whatever count the spec names. Twelve shards are
-predicted at 56 minutes for the slowest and fit what the organisation's plan
-runs at once (60 jobs; the lane would be 24): the next step after ten.
+title and the `/10` in the three issue titles. The table is dealt for whatever
+count the spec names. Twelve shards are predicted at 56 minutes for the
+slowest and fit what the organisation's plan runs at once (60 jobs; the lane
+would be 24): the next step after ten.
 
 The compliance tests pin these counts, so a change to one fails them until
 each place is updated: `test_ci_sharding.py` (`shard:`,
 `MADDENING_TEST_SHARD` and every other mention of the count, in both
-workflows, against `PINS_FOR` and `SLOW_LANE_SHARDS`), `test_ci_workflows.py`
-and `test_report_test_durations.py` (the cache key, and the lane summary
-run on six shards' reports and on five).
+workflows, against `PER_PUSH_SHARDS` and `SLOW_LANE_SHARDS`),
+`test_ci_workflows.py` and `test_report_test_durations.py` (the cache key, and
+the lane summary run on six shards' reports and on five).
 
-To rebalance the slow lane, regenerate the table from a run's artifacts.
+To rebalance the slow lane, regenerate its table from a run's artifacts.
 The script prints the heaviest files and the minutes it predicts per shard,
 before and after, on each JAX lane:
 
@@ -645,6 +676,51 @@ summary lists entries that may now be removable: ones no longer in the lane,
 or that passed under 5 s (a skipped or failed test says nothing about its
 cost, so it is never listed).
 
+### The dependencies CI installs
+
+Every install of the project in `ci.yml` resolves against
+`ci/constraints.txt` (`PIP_CONSTRAINT`): an exact `name==version` for
+every distribution a resolution of the base dependencies and the `ci`,
+`usd` and `viz3d` extras pulls in, resolved on CPython 3.12 on Linux x86-64
+for both JAX versions of the test matrix (which pin their own `jax` and
+`jaxlib`, so they are not in the file). A run is then reproducible, and a new
+release of a dependency changes nothing in per-push CI until the file is
+regenerated, on purpose:
+
+```bash
+python scripts/generate_ci_constraints.py          # needs network; writes ci/constraints.txt
+python scripts/generate_ci_constraints.py --check  # offline: is the file current?
+```
+
+The file records the digest of the requirement strings of `pyproject.toml`
+it was resolved from; `tests/compliance/test_ci_dependency_jobs.py` fails when
+a declared range or extra changes without a regeneration, and when a pin lies
+outside its range. It cannot see a newer release of a transitive dependency.
+That is the job of `scheduled-checks.yml`, on Mondays (and on demand): it
+installs the same extras **without** the file, at the newest versions the
+ranges allow, runs the per-push suite in the same six weighted shards and
+says, in the step summary, which installed versions are newer than the
+file's. A red run is a bound in `pyproject.toml` or a fix, then a
+regeneration. (lineax 0.1.1 was found this way, by luck, in 0.4.0.)
+
+Two jobs of `ci.yml` close ends of declared ranges nothing else installs.
+`lineax-floor` installs `lineax==0.0.7` (the floor `pyproject.toml` allows;
+the other jobs install the newest) on both JAX versions and runs every test
+file that names lineax; the compliance tests read the floor from
+`pyproject.toml` and fail when a file that names lineax is not listed.
+`viz3d` installs the `viz3d` extra and runs `tests/api/test_frame_renderer_3d.py`
+under `xvfb-run` (VTK's OpenGL needs a display; Mesa's software rasteriser
+draws it); `MADDENING_REQUIRE_VIZ3D_TESTS=1` turns a missing PyVista from a
+skip into a failure, so the 14 tests cannot silently run nowhere again.
+
+The same workflow's other schedule, Thursdays (and on demand), explores. The
+slow lane's targeted searches run under fixed seeds, so its verdict on a tree
+is the same twice; `explore-searches` runs each search file once with
+`MADDENING_SEARCH_ENTROPY=fresh`, one file per process, so every hunt draws
+examples no earlier run drew. A red job is a find, never a failed merge check:
+the step summary names the entropy of the run and the command that replays it.
+See *Targeted searches* for what to do with a find.
+
 ### The compilation cache: warm and cold runs
 
 The test lanes use JAX's persistent XLA compilation cache, and whether a
@@ -653,7 +729,7 @@ run reads it decides what its times mean:
 | Run | Cache | Times mean |
 |---|---|---|
 | Pull request | **warm**: restores the base branch's cache, never saves one | Fast. A program the PR adds or changes is not in the base cache, so it still compiles from scratch and a new slow test is caught on the PR that adds it. A cost that *moves* is not: see below. |
-| Pull request whose diff adds or removes a slow mark, removes a test function, or edits `tests/duration_allowlist.txt` or `tests/_sharding.py` | **cold**, not saved | Accurate for the tests the change moved a compile onto (see below). |
+| Pull request whose diff adds or removes a slow mark, removes a test function, or edits `tests/duration_allowlist.txt`, `tests/_sharding.py` or `tests/per_push_weights.json` | **cold**, not saved | Accurate for the tests the change moved a compile onto (see below). |
 | Push to `main` / `release/**` (after a merge) | **cold**: starts empty, saves the result for the next PRs | Accurate: each program compiles in full the first time the run needs it. A later test that needs the same program reads it back from the cache the run is writing (17-25% of lookups on CI), so it can look fast because an earlier test paid. |
 | `slow-tests.yml`: scheduled Mon/Wed/Fri on `main` only; on a release branch only when dispatched by hand | **off**, one process per shard | A cold, uncontended timing of the whole suite, for the commit it ran on. Triage and allowlist edits are based on these runs, so check that commit: on a release branch the last run is the last dispatch, which may be well behind the tip. |
 | Pull request with `[cold-ci]` in its head commit message | **cold**, not saved | For before/after numbers while optimising tests. The job reads the message from its checkout; if it cannot, it runs cold and says so in a warning. |

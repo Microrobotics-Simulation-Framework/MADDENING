@@ -67,6 +67,7 @@ _DURATIONS = "tests/compliance/test_report_test_durations.py"
 _COLLECTS = f"{_DURATIONS}::test_every_shipped_allowlist_entry_is_a_node_id_pytest_collects"
 _REASONS = f"{_DURATIONS}::test_the_shipped_allowlist_names_real_tests_with_reasons"
 _SHARDING = "tests/compliance/test_ci_sharding.py"
+_DEPS = "tests/compliance/test_ci_dependency_jobs.py"
 _WORKFLOWS = "tests/compliance/test_ci_workflows.py"
 _PRUNE = "tests/compliance/test_prune_jax_cache.py"
 _COMPILE_CACHE = "tests/core/test_compile_cache.py"
@@ -77,6 +78,7 @@ _SLOW_RULE = "tests/compliance/test_slow_only_rule.py"
 #: mutants need it.
 DUR = (_DURATIONS, "--deselect", _COLLECTS)
 SHARD = (_SHARDING,)
+DEPS = (_DEPS,)
 WF = (_WORKFLOWS,)
 PRUNE = (_PRUNE,)
 CC = (_COMPILE_CACHE,)
@@ -125,7 +127,7 @@ CI_ALL = DUR + SHARD + WF
 _HUNTS = "tests/property/test_targeted_search.py"
 
 #: Every guard file, run whole on the unmutated copy before any mutant.
-GUARD_FILES = (_DURATIONS, _SHARDING, _WORKFLOWS, _PRUNE, _COMPILE_CACHE, _SLOW_RULE, _PLAN_SCAN,
+GUARD_FILES = (_DURATIONS, _SHARDING, _WORKFLOWS, _DEPS, _PRUNE, _COMPILE_CACHE, _SLOW_RULE, _PLAN_SCAN,
                _HUNTS)
 
 
@@ -153,6 +155,11 @@ CI = ".github/workflows/ci.yml"
 SL = ".github/workflows/slow-tests.yml"
 SWT = "tests/slow_lane_weights.json"
 PWT = "tests/per_push_weights.json"
+GEN = "scripts/generate_ci_constraints.py"
+DRIFT = "scripts/report_constraint_drift.py"
+CONS = "ci/constraints.txt"
+SC = ".github/workflows/scheduled-checks.yml"
+VIZ = "tests/api/test_frame_renderer_3d.py"
 SLW = "scripts/slow_lane_weights.py"
 PP = "pyproject.toml"
 AL = "tests/duration_allowlist.txt"
@@ -378,6 +385,46 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("G4", SLW, "            lanes[lane][path] += float(case.get(\"time\") or 0.0)",
        "            lanes[lane][path] = float(case.get(\"time\") or 0.0)", SHARD,
        "a file weighs what its last test took"),
+    # --- D: the dependency jobs and the constraints file ------------------------
+    _M("D1", GEN, "        if differing:\n", "        if False:\n", DEPS,
+       "one constraints file written for two JAX versions that resolved to different numpy: one lane installs a pin it was not resolved with"),
+    _M("D2", GEN, '[*requirement_strings(pyproject), "jax-versions: " + ",".join(JAX_VERSIONS)]',
+       "requirement_strings(pyproject)", DEPS, "a new JAX version in the matrix does not make the file stale"),
+    _M("D3", GEN, '    for extra in EXTRAS:\n        out += [', '    for extra in EXTRAS[:1]:\n        out += [', DEPS,
+       "an edit to the usd or viz3d requirements does not make the file stale"),
+    _M("D4", CONS, "hypothesis==6.169.0\n", "hypothesis==7.0.0\n", DEPS, "a pin outside the range pyproject declares"),
+    _M("D5", CONS, "\nlineax==0.1.1\n", "\n", DEPS, "a requirement CI installs that the file does not pin"),
+    _M("D6", PP, '    "lineax>=0.0.7",\n', '    "lineax>=0.0.8",\n', DEPS,
+       "a range edited and the constraints file, and the floor job, not regenerated"),
+    _M("D7", CI, '          pip install "jax==${{ matrix.jax-version }}" "jaxlib==${{ matrix.jax-version }}" "lineax==0.0.7"',
+       '          pip install "jax==${{ matrix.jax-version }}" "jaxlib==${{ matrix.jax-version }}" "lineax==0.0.8"', DEPS,
+       "the floor job installs something above the floor"),
+    _M("D8", CI, "            tests/core/test_solver_ift_lineax_is_core.py \\\n", "", DEPS,
+       "a test that names lineax is not run at its floor"),
+    _M("D9", CI, '          MADDENING_REQUIRE_VIZ3D_TESTS: "1"\n', "", DEPS,
+       "the viz3d job passes by skipping its 14 tests if PyVista does not install"),
+    _M("D10", VIZ, 'if os.environ.get("MADDENING_REQUIRE_VIZ3D_TESTS") == "1":', "if False:", DEPS,
+       "the switch is set and read by nothing"),
+    _M("D11", CI, "      - name: Install dependencies\n        env:\n          # The versions CI installs against (ci/constraints.txt, written by\n"
+                  "          # scripts/generate_ci_constraints.py): a run is reproducible, and a\n"
+                  "          # new release of a dependency is taken on purpose.  The weekly\n"
+                  "          # scheduled-checks.yml installs without it.\n"
+                  "          PIP_CONSTRAINT: ci/constraints.txt\n        run: |\n          python -m pip install --upgrade pip\n"
+                  "          # Exact JAX pin per lane",
+       "      - name: Install dependencies\n        run: |\n          python -m pip install --upgrade pip\n          # Exact JAX pin per lane", DEPS,
+       "the test lanes install the newest versions again, whatever the constraints file says"),
+    _M("D12", SC, "      - name: Install the newest versions the ranges allow\n        # No PIP_CONSTRAINT and no jax pin, on purpose (see the header).\n",
+       "      - name: Install the newest versions the ranges allow\n        env:\n          PIP_CONSTRAINT: ci/constraints.txt\n", DEPS,
+       "the weekly newest-versions check installs the pinned versions: it can never find a break"),
+    _M("D13", SC, "          MADDENING_SEARCH_ENTROPY: fresh\n", "          MADDENING_SEARCH_ENTROPY: \"0\"\n", DEPS,
+       "the exploring job reads a fixed entropy: the same draws every week"),
+    _M("D14", SC, "          - tests/property/test_sysid_targeted_search.py\n", "", DEPS,
+       "a file that hunts under a seed is not explored"),
+    _M("D15", SC, "          python -m pytest ${{ matrix.file }} -m slow -v -rfEP --tb=short \\\n",
+       "          python -m pytest ${{ matrix.file }} -m slow -v -rfEP --tb=short -p no:cacheprovider --maxfail=0 || true \\\n", DEPS,
+       "the exploring job is green whatever it finds"),
+    _M("D16", DRIFT, "    have = {k: v for k, v in have.items() if k != \"maddening\" and k not in LANE_PINNED}",
+       "    have = dict(have)", DEPS, "the drift report lists jax, which every lane pins itself, and the project, as new"),
     # --- C: the root conftest -------------------------------------------------
     _M("C1", CF, "    if spec:\n        from tests import _sharding", "    if False:\n        from tests import _sharding",
        CI_ALL, "MADDENING_TEST_SHARD ignored: every shard runs everything"),
@@ -843,9 +890,19 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("K26", _USD_SPEC, f"\n\ndef {_USD_GONE}():", f"\n\n@pytest.mark.skip(reason='x')\ndef {_USD_GONE}():",
        CLAIMS, "a cited tests/usd test skip-marked: it is collected and never runs"),
     _M("K27", CI, "      # running them locally relies on.\n      - name: Install dependencies\n"
+       "        env:\n          # The versions CI installs against (ci/constraints.txt, written by\n"
+       "          # scripts/generate_ci_constraints.py): a run is reproducible, and a\n"
+       "          # new release of a dependency is taken on purpose.  The weekly\n"
+       "          # scheduled-checks.yml installs without it.\n"
+       "          PIP_CONSTRAINT: ci/constraints.txt\n"
        "        run: |\n          python -m pip install --upgrade pip\n"
        '          pip install "jax==0.10.2" "jaxlib==0.10.2"\n          pip install -e ".[ci,usd]"\n',
        "      # running them locally relies on.\n      - name: Install dependencies\n"
+       "        env:\n          # The versions CI installs against (ci/constraints.txt, written by\n"
+       "          # scripts/generate_ci_constraints.py): a run is reproducible, and a\n"
+       "          # new release of a dependency is taken on purpose.  The weekly\n"
+       "          # scheduled-checks.yml installs without it.\n"
+       "          PIP_CONSTRAINT: ci/constraints.txt\n"
        "        run: |\n          python -m pip install --upgrade pip\n"
        '          pip install "jax==0.10.2" "jaxlib==0.10.2"\n          pip install -e ".[ci]"\n',
        CLAIMS, "the compliance job without usd-core: no per-push job compares the claims "

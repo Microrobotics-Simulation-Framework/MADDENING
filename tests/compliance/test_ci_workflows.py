@@ -435,6 +435,8 @@ GATED_ON_CODE = {
                        "${{ !cancelled() && needs.changes.outputs.code == 'true' }}"),
     "test-usd": ("changes", "needs.changes.outputs.code == 'true'"),
     "test-streaming": ("changes", "needs.changes.outputs.code == 'true'"),
+    "lineax-floor": ("changes", "needs.changes.outputs.code == 'true'"),
+    "viz3d": ("changes", "needs.changes.outputs.code == 'true'"),
     "typecheck": ("changes", "needs.changes.outputs.code == 'true'"),
     "verify-hypothesis": ("changes", "needs.changes.outputs.code == 'true'"),
 }
@@ -859,7 +861,7 @@ def test_the_slow_lane_files_an_abort_as_an_abort_and_names_both_causes():
 # ---------------------------------------------------------------------------
 
 #: The workflows whose jobs run tests or gates.
-TEST_WORKFLOWS = ("ci.yml", "slow-tests.yml")
+TEST_WORKFLOWS = ("ci.yml", "slow-tests.yml", "scheduled-checks.yml")
 
 #: ``(workflow, job, step)`` allowed ``continue-on-error``: the slow lane's
 #: pytest step, so that the failure classifier after it runs on a red

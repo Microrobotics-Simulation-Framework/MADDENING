@@ -1058,7 +1058,7 @@
         "optax==0.2.8",
         "scipy==1.18.1"
       ],
-      "ref": "maddening==0.4.0"
+      "ref": "maddening==0.4.1"
     },
     {
       "dependsOn": [
@@ -1102,7 +1102,7 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "maddening==0.4.0",
+      "bom-ref": "maddening==0.4.1",
       "description": "Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph",
       "externalReferences": [
         {
@@ -1135,9 +1135,9 @@
         }
       ],
       "name": "maddening",
-      "purl": "pkg:pypi/maddening@0.4.0",
+      "purl": "pkg:pypi/maddening@0.4.1",
       "type": "library",
-      "version": "0.4.0"
+      "version": "0.4.1"
     },
     "properties": [
       {
@@ -1313,7 +1313,7 @@
       ]
     }
   },
-  "serialNumber": "urn:uuid:2bd15b8e-d21c-544b-93f4-a94fe8e4a2fe",
+  "serialNumber": "urn:uuid:75f36814-e35d-511a-93d7-093137d03471",
   "specVersion": "1.6",
   "version": 1
 }

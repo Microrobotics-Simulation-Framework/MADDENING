@@ -255,7 +255,15 @@ dev = [
     # docs/developer_guide/typing.md.  A floor here; the ci extra pins the
     # exact release the typing_tiers.json ceilings were measured with.
     "pyright>=1.1.414",
+    # What tests/conftest.py and the test suite import beyond `all`: the
+    # `verify` extra (hypothesis), the starlette floor tests/api needs (see
+    # the ci extra) and the build backend tests/test_packaging_py_typed.py
+    # uses.  Until 0.4.1 they were missing, so a `pip install -e ".[dev]"`
+    # checkout could not collect the tests.
+    "starlette>=1.7.0",
+    "hatchling>=1.21",
     "maddening[all]",
+    "maddening[verify]",
 ]
 
 [project.urls]

@@ -195,6 +195,39 @@ class TestPackagingConsistency:
         # Streaming keeps PyGObject: that extra is what its name promises.
         assert any(dep.lower().startswith("pygobject") for dep in extras["streaming"])
 
+    def test_dev_installs_every_package_the_ci_extra_tests_with(self):
+        """A ``pip install -e ".[dev]"`` checkout can collect and run the tests.
+
+        ``tests/conftest.py`` imports hypothesis, which ``dev`` did not install
+        until 0.4.1; nor did it carry the starlette floor ``tests/api`` needs or
+        the build backend the packaging test uses.  Every package ``ci`` names
+        must reach ``dev``, directly or through ``all`` / ``verify`` (ci pins
+        pyright exactly where dev keeps a floor, so names are compared).
+        """
+        import re
+
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib
+        with open("pyproject.toml", "rb") as f:
+            extras = tomllib.load(f)["project"]["optional-dependencies"]
+
+        def names(deps):
+            out = set()
+            for dep in deps:
+                match = re.match(r"maddening\[([^\]]+)\]", dep)
+                if match:
+                    for extra in match.group(1).split(","):
+                        out |= names(extras[extra.strip()])
+                else:
+                    out.add(re.split(r"[\[<>=!~ ;]", dep, maxsplit=1)[0].lower())
+            return out
+
+        missing = names(extras["ci"]) - names(extras["dev"])
+        assert not missing, f"dev does not install what ci tests with: {sorted(missing)}"
+        assert "hypothesis" in names(extras["dev"])
+
     def test_ci_excludes_display_deps(self):
         """CI extra doesn't include display-dependent packages."""
         try:

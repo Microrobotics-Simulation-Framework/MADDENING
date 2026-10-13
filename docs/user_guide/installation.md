@@ -52,6 +52,7 @@ Install only what you need. Each extra adds one capability:
 | `usd` | {term}`OpenUSD` graph serialization | `pip install maddening[usd]` |
 | `streaming` | GStreamer {term}`WebRTC` streaming (system packages first: [Streaming prerequisites](#streaming-prerequisites)) | `pip install maddening[streaming]` |
 | `compression` | zstandard for binary-encoder compression (v0.2 #6) | `pip install maddening[compression]` |
+| `verify` | Hypothesis, for `maddening.testing`: verifying your own nodes (`verify_node`, the order and GCI studies; see [Verification](../developer_guide/verification.md)) | `pip install maddening[verify]` |
 
 Mix and match freely:
 
@@ -145,7 +146,7 @@ pip install maddening[client,viz]
 ```bash
 pip install maddening[all]       # every feature extra but usd and streaming, + the RunPod and Lambda cloud providers
 pip install maddening[all,usd]   # the same, with OpenUSD (usd-core)
-pip install maddening[dev]       # all + pytest and the other test tools (still without usd and streaming)
+pip install maddening[dev]       # all + verify + the test tools (still without usd and streaming)
 ```
 
 `all` installs every package of the feature extras in the table above except
@@ -155,6 +156,14 @@ first ([Streaming prerequisites](#streaming-prerequisites)). Everything `all`
 installs comes from wheels, so it needs no compiler. Before 0.4.1, `all` included
 PyGObject, and `pip install maddening[all]` failed without the C headers
 (`MADD-ANO-296`).
+
+## Development and tooling extras
+
+| Extra | What it is for |
+|-------|----------------|
+| `dev` | Working on MADDENING itself: `all`, `verify`, and everything the test suite imports (pytest, httpx, fsspec, FMPy, the build backend, pyright with a floor). Install it editable from a checkout: `pip install -e ".[dev]"`. Before 0.4.1 it lacked hypothesis and two other test tools, so such a checkout could not collect the tests. |
+| `ci` | What the CI jobs install: the test tools of `dev` with pyright pinned to the exact release the typing ceilings were measured with, and without the display packages. |
+| `sbom` | `cyclonedx-bom`, to run `cyclonedx-py` by hand. `scripts/generate_sbom.py` does not need it: it installs its own copy in a separate environment. |
 
 ## Using uv
 

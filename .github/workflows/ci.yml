@@ -624,7 +624,8 @@ jobs:
       # the system package manager anyway (docs/user_guide/installation.md).
       # A dry run resolves without installing anything.
       - name: The all and dev extras install from wheels alone
-        run: pip install --dry-run --quiet --only-binary=:all: --ignore-installed ".[all]" ".[dev]"
+        run: |
+          pip install --dry-run --quiet --only-binary=:all: --ignore-installed ".[all]" ".[dev]"
 
       - name: Validate anomaly registry
         run: python scripts/check_anomalies.py --prefix MADD-ANO-

@@ -30,7 +30,7 @@ shipped in earlier releases (`PROVISIONAL` since 0.1.0, `INTERNAL` since
 and nothing new should:
 
 - `PROVISIONAL` is a synonym for `evolving` and is treated as `evolving`
-  everywhere, the FMU export's `include_evolving` included. Use `EVOLVING`.
+  everywhere, the {term}`FMU` export's `include_evolving` included. Use `EVOLVING`.
 - `INTERNAL` meant "not public, no promise". Leave such a surface untagged
   and give it a private, underscored name.
 

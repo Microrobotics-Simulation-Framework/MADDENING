@@ -21,7 +21,7 @@ print(report)
 `python -m maddening.examples.advanced.profiling_demo` runs it on a
 coupled pair with every measurement on (`measure_coupling`, `counts`,
 `count_scan_steps`, `trace`) and reads each part of the report back:
-the coupling overhead and its cost per extra iteration, the bottleneck
+the {term}`coupling <Coupling>` overhead and its cost per extra iteration, the bottleneck
 and recommendations, the compile counts (checked identical on a freshly
 built graph) and the trace summary, with the Perfetto JSON and the
 trace written to a temporary directory.
@@ -34,8 +34,8 @@ What it measures, and how:
 |--------|--------------------|
 | `jit_compile_ms` | the first step (compile + run) |
 | `mean_step_ms`, `median`, `p95` | `n_steps` warmed steps, each blocked on the device |
-| `dispatch_floor_ms` | a jitted identity on the same `(state, ext, params)` pytree: the cost of dispatching a step before any physics runs |
-| `node_times_ms` | each node's `update` jitted and timed in isolation (an estimate: one dispatch per node, no coupling) |
+| `dispatch_floor_ms` | a jitted identity on the same `(state, ext, params)` {term}`pytree <Pytree>`: the cost of dispatching a step before any physics runs |
+| `node_times_ms` | each {term}`node <Node>`'s `update` jitted and timed in isolation (an estimate: one dispatch per node, no coupling) |
 | `coupling_iter_stats[group]` | over up to 50 further steps: iterations used (mean / min / max) against `max_iterations`, fraction of steps that exited at the cap, fraction whose residual met the threshold, from the always-on `_meta` diagnostics |
 | `coupling_overhead_ms` (`"measured"`) | the graph is recompiled with every group capped at one iteration and timed; the difference to the real step is what the extra iterations cost, and `coupling_per_iteration_ms` divides it by the mean number of extra passes: the real step's `total_iterations` less the one pass per waveform sweep the capped step still runs (before 0.4.0's fix it divided by `iterations - 1`, the largest sweep's count, which overstated the cost of a pass by nearly `waveform_iterations` times on a group that runs several sweeps).  The graph, its state and compiled step are restored afterwards.  `measure_coupling=False` falls back to the old estimate (step minus the sum of isolated node times).  The two windows are timed at different points of the trajectory -- `mean_step_ms` just after a reset, the capped steps from wherever the run and the statistics pass left the state -- which is sound because a cap of one returns after a single staggered pass with no data-dependent control flow, so the capped step costs the same from any state (measured on the compute-bound `expensive-pair` fixture: pinning both windows moves the number by less than one standard error of the difference -- 0.03 SE over 10 repeats on a quiet box, 0.62 SE over 16 on a loaded one).  **Reported signed**: on a graph whose step is dominated by dispatch the difference is smaller than its own scatter and falls either side of zero (measured: negative in 11 of 30 runs of a two-spring pair), so a negative value is the honest report of an overhead the run could not resolve.  It used to be clamped at zero, which biased the mean upward by discarding only the negative half of the noise |
 | `coupling_overhead_se_ms` | the standard error of that difference, propagated from the two windows' own per-step scatter -- no chosen threshold.  Below it the overhead was certainly not resolved and `str(report)` says `below resolution`; above it, not necessarily, because it captures the scatter *within* each window and not drift between two windows timed minutes apart.  On a shared machine the spread over repeated runs is the better guide.  `"measured"` only |
@@ -46,12 +46,12 @@ What it measures, and how:
 Node updates run under `jax.named_scope("node:<name>")`, the residual
 under `coupling:residual`, acceleration under `coupling:accelerate`,
 interface corrections under `coupling:interface_override`, mappings under
-`edge:mapping`.  XLA labels a *fused* kernel with the longest common
+`edge:mapping`.  {term}`XLA` labels a *fused* kernel with the longest common
 prefix of the fused ops' names, so a kernel that fuses two nodes' work
 is reported under the shared prefix (`while/body` for anything inside
 the coupling loop) rather than under either node.  Attribution is
 therefore exact for unfused kernels and coarse inside the loop body —
-which still separates "inside the fixed-point loop" from "outside it".
+which still separates "inside the {term}`fixed-point <Fixed point>` loop" from "outside it".
 
 `device_busy_fraction` is the number to look at first on a GPU: kernel
 time over wall step time.  Well below one with hundreds of kernels per
@@ -84,8 +84,8 @@ python benchmarks/bench_coupling.py --graph mime-ar4 \
 JAX_PLATFORMS=cpu python benchmarks/bench_coupling.py --graph heat-chain --n-cells 256
 ```
 
-Runs `profile_graph` on the graph with its coupling group(s) and on the
-same graph with them disabled (staggered back-edges), prints both
+Runs `profile_graph` on the graph with its {term}`coupling group <Coupling group>`(s) and on the
+same graph with them disabled (staggered back-{term}`edges <Edge>`), prints both
 reports and a summary (coupling cost vs baseline, iterations used vs
 cap, PERF-1 acceptance at `--acceptance-ms`, default 30), and writes a
 JSON record.  Keep before/after records under `benchmarks/results/` when
@@ -124,7 +124,7 @@ periodically driven graph the mean iteration count moved with it.
 export MADDENING_COMPILATION_CACHE_DIR=~/.cache/maddening/xla
 ```
 
-`GraphManager.compile()` picks the variable up and points JAX's
+`GraphManager.compile()` picks the variable up and points {term}`JAX`'s
 persistent cache at it with thresholds that cache MADDENING's
 sub-second compiles (JAX's defaults skip them).  `compile_cache.enable(dir)`
 does the same from code, and `compile_cache.warm_cache(gm_factory,
@@ -212,7 +212,7 @@ python scripts/compile_counts.py            # regenerate the baseline
 ```
 
 Six workloads are measured — a single node, a coupled pair, a
-multi-rate graph, a heat chain with a `run_scan` program, a
+{term}`multi-rate <Multi-rate>` graph, a heat chain with a `run_scan` program, a
 `ShardedStencilNode` over a four-device mesh, and two coupling groups
 with `diagnostics=True` — and compared to
 `benchmarks/compile_counts_baseline.json`.  The script pins
@@ -248,7 +248,7 @@ command.  Two cases:
   If the change is intended, regenerate and commit the new baseline,
   saying in the commit message why the counts moved.
 - **The device count moved.**  Never banded and never widened: the
-  sharded workload meshes over every device, so counts taken on another
+  {term}`sharded <Sharded>` workload meshes over every device, so counts taken on another
   topology are not comparable at any tolerance.  A baseline recording a
   different `device_count` — or none at all — is rejected rather than
   compared.  Regenerating fixes it, because the script pins the count

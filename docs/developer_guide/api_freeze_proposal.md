@@ -136,7 +136,7 @@ commits on `mms.py` this cycle) and their public surface is largely *numeric
 policy* — `DEFAULT_SAFETY_FACTOR`, `CAUTIOUS_SAFETY_FACTOR`,
 `DEFAULT_ASYMPTOTIC_ORDER_TOLERANCE`, `DEFAULT_STAGNATION_RTOL`,
 `MIN_APPARENT_ORDER`. Those are the thresholds a convergence verdict turns on,
-they have been calibrated against the built-in nodes and nothing else, and
+they have been calibrated against the built-in {term}`nodes <Node>` and nothing else, and
 changing one silently changes whether a user's node passes. `experimental`
 ("may break in any minor release, opt-in only") is exactly the promise that
 fits an opt-in extra whose constants are still being tuned.
@@ -157,15 +157,15 @@ should take the level on the surrounding functions as speaking for them.
 | `api.server.warn_if_publicly_bound` | `evolving` | 18 tests, but the warning text and category are the observable behaviour and neither is pinned by the signature. | Nothing this release; it is a diagnostic, and `evolving` is the right resting place. |
 | `serialization.json_codec.dumps_encoded` and the other four | `evolving` | The *wire format* (quoted `"NaN"`/`"Infinity"` tokens) is settled and 35 tests cover the round trip. The **reserved literals are a trap**: adding one changes every `st.text()` draw in the package, which has already caught three property tests this release. Freezing the function does not freeze the token set. | Either the token set becomes part of the frozen contract explicitly, or it is documented as outside it. |
 | `GraphManager`'s `ParamSpec` methods (`param_specs`, `set_param_spec`, `param_spec_overrides`, `trainable_mask`, `constrain`, `unconstrain`, `check_params`) and `SimulationNode.param_specs` | `evolving` | Methods of `stable` classes that take, return or are defined by a `ParamSpec`, which is `evolving`; a method cannot promise more than the type it is built on. `gm.params` and the `params=` argument of `step`, `run` and the `run_scan*` / `run_adaptive*` / `run_sweep` methods are `stable`. All of them are new in 0.4.0, so no release carried a stronger promise. | `ParamSpec` reaching `stable`. |
-| `core.params.*` (5) | `evolving` | Best-documented addition in the set (7 doc pages) and `ParamSpec` is named in 38 test files. Fails criterion 2 outright: 6 commits this cycle, and the params pytree is the direct input to the PEP 589 `TypedDict` phase, which is *designed* to change these annotations. | The `TypedDict` conversion landing, then a cycle of quiet. |
+| `core.params.*` (5) | `evolving` | Best-documented addition in the set (7 doc pages) and `ParamSpec` is named in 38 test files. Fails criterion 2 outright: 6 commits this cycle, and the params {term}`pytree <Pytree>` is the direct input to the PEP 589 `TypedDict` phase, which is *designed* to change these annotations. | The `TypedDict` conversion landing, then a cycle of quiet. |
 | `core.coupling.mapping_spec.build_mapping` | `evolving` | **Zero tests name it.** Exercised only through `MappingSpec.build()`. The free function is public API with no direct coverage at all. | A direct test, or making it private and keeping `MappingSpec.build` as the entry point. The second is probably the right answer. |
 | `core.simulation.profiler.count_hlo_ops` | `evolving` | **Zero tests name it**; reached only from inside `compile_counts()`. Same shape as `build_mapping`. | As above. |
 | `core.simulation.profiler.compile_counts`, `CompileCounts` | `evolving` | 25 dedicated tests, and the compile-count gate is the one piece of this group with a real contract. But `profiler.py` took 7 commits this cycle and `profile_graph`'s signature grew four parameters. | One quiet cycle. This is the strongest promotion candidate in the release for 0.5.0. |
 | `cloud.resume.download_and_load_state` | `evolving` | 48 tests across two files, a dedicated user guide, a real `__all__` export, and a deprecation shim at the old location — the best-evidenced new surface by some margin. It still fails criterion 2 (it *moved* this cycle) and criterion 4. | One cycle at its new home with the shim still in place. Promote in 0.5.0 if nothing moves. |
-| `sysid.*` (9) | `evolving` | 27 commits on `sysid.py` this cycle — the highest churn in the release. It is documented, but as a section of a shared page ("System identification: `maddening.sysid`" in `docs/user_guide/parameters.md`) rather than a page of its own, for the single largest new surface. | A quiet cycle. The user-guide section exists; promotion waits on the churn, not on documentation. |
-| `nodes.adaptive.base.AdaptiveNode` | `evolving` | The 2026-09-17 round argued for demoting it to `experimental` "for free today and not after 0.4.0 ships". I am **not** taking that recommendation: since then it gained a documented dtype policy, an algorithm guide, a verification benchmark and 12 test files, and `docs/release_notes/v0.4.0.md` states the `evolving` choice deliberately. The premise the demotion rested on has changed. | Nothing — `evolving` is the right level and the release notes already say why. |
-| `cloud.multigpu.halo_unstructured.*` (6) | `evolving` | Five of the six existed before 0.4.0 untagged and were tagged this cycle; `exchange_traffic` is new. Tagging them *was* this release's step. | A cycle at `evolving` with the sharding topology doc stable. |
-| `fmi.tcp_bridge.FmuTcpBridge` | `evolving` | Publicly exported and well tested, but it is an **unauthenticated listening socket** with its own protocol, documented as trusted-clients-only and explicitly out of scope of MADD-ANO-015's fix. Freezing its constructor freezes the shape of that exposure. | A decision on whether it gets the same auth treatment as the ZMQ transports. That decision will change its signature. |
+| `sysid.*` (9) | `evolving` | 27 commits on `sysid.py` this cycle — the highest churn in the release. It is documented, but as a section of a shared page ("{term}`System identification`: `maddening.sysid`" in `docs/user_guide/parameters.md`) rather than a page of its own, for the single largest new surface. | A quiet cycle. The user-guide section exists; promotion waits on the churn, not on documentation. |
+| `nodes.adaptive.base.AdaptiveNode` | `evolving` | The 2026-09-17 round argued for demoting it to `experimental` "for free today and not after 0.4.0 ships". I am **not** taking that recommendation: since then it gained a documented dtype policy, an algorithm guide, a {term}`verification benchmark <Verification benchmark>` and 12 test files, and `docs/release_notes/v0.4.0.md` states the `evolving` choice deliberately. The premise the demotion rested on has changed. | Nothing — `evolving` is the right level and the release notes already say why. |
+| `cloud.multigpu.halo_unstructured.*` (6) | `evolving` | Five of the six existed before 0.4.0 untagged and were tagged this cycle; `exchange_traffic` is new. Tagging them *was* this release's step. | A cycle at `evolving` with the {term}`sharding <Sharding>` topology doc stable. |
+| `fmi.tcp_bridge.FmuTcpBridge` | `evolving` | Publicly exported and well tested, but it is an **unauthenticated listening socket** with its own protocol, documented as trusted-clients-only and explicitly out of scope of MADD-ANO-015's fix. Freezing its constructor freezes the shape of that exposure. | A decision on whether it gets the same auth treatment as the {term}`ZMQ` transports. That decision will change its signature. |
 
 ## Three `stable` surfaces whose *behaviour* moved
 
@@ -219,7 +219,7 @@ The report covers the modules this release worked on. It does not cover:
 - **`maddening.api.server.SimulationServer`** — the REST API's central class,
   in every example, with no tag. Two functions beside it in the same file now
   have one, which makes the omission more visible rather than less.  Its
-  surrogate-training routes and state streams were marked `experimental`
+  {term}`surrogate <Surrogate>`-training routes and state streams were marked `experimental`
   late in the cycle (`ROUTE_STABILITY`, registered with
   `register_route_stability`), for hardening in 0.5.0; the class and its
   other routes are still untagged.
@@ -256,7 +256,7 @@ a promise that something else had already committed to.
 
 Two are answered by work that landed since:
 
-- **`GraphManager.to_dict` has no coupling-group field.** It has one now:
+- **`GraphManager.to_dict` has no {term}`coupling-group <Coupling group>` field.** It has one now:
   `to_dict` emits `coupling_groups` carrying every field of every group.
 - **`ift_linear_solve`: expose the solver knobs.** Done —
   `solver`, `preconditioner`, `rtol` and `atol` are keyword-only parameters

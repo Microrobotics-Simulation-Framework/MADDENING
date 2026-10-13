@@ -11,13 +11,13 @@ and the {meth}`~maddening.core.node.SimulationNode.domain_integral_fields`
 API for cross-device reduction of partial-sum outputs.
 ```
 
-This page explains how to write a stencil node whose non-evolving
-arrays are *sharded* alongside state — needed when the array is
+This page explains how to write a {term}`stencil <Stencil>` {term}`node <Node>` whose non-evolving
+arrays are *{term}`sharded <Sharded>`* alongside state — needed when the array is
 big enough that replicating it per device would defeat the point of
-sharding — and how to declare outputs that are domain integrals
+{term}`sharding <Sharding>` — and how to declare outputs that are domain integrals
 over the lattice so the wrapper all-reduces them.
 
-The motivating consumer is MIME's `IBLBMFluidNode`: a D3Q19 LBM
+The motivating consumer is MIME's `IBLBMFluidNode`: a D3Q19 {term}`LBM`
 node carrying a `(nx, ny, nz)` pipe-wall mask and a
 `(19, nx, ny, nz)` "missing-link" bounce-back mask, both far too
 large to replicate on every device when the simulation is sharded
@@ -55,8 +55,8 @@ Three things happen per step:
    that a rewrite with no recompile is *not* picked up by a later
    `step()` on its own: the graph's static-data check hashes shape
    and dtype, never contents.
-2. Inside `shard_map`, each device's slab is halo-exchanged along
-   the matching spatial axis.  Between two shards the halo holds the
+2. Inside `shard_map`, each device's slab is {term}`halo <Halo>`-exchanged along
+   the matching spatial axis.  Between two {term}`shards <Shard>` the halo holds the
    neighbour's cells.  At the edges of the *global* grid it follows
    the wrapper's `boundary` when that is `"periodic"`: the cells
    beyond a periodic edge are the opposite edge's cells, for a static
@@ -279,7 +279,7 @@ invalidate cleanly even when shape and dtype are unchanged.
 
 ## A static copied along a mesh axis, inside a loop (MADD-ANO-068)
 
-On jaxlib 0.10.2 to 0.11.2, XLA compiles one kernel pattern wrongly when
+On jaxlib 0.10.2 to 0.11.2, {term}`XLA` compiles one kernel pattern wrongly when
 the step is traced inside a loop. The step reads a sharded static in its
 halo, reads another array through a window at a `shard_info` offset, and
 the static is copied along a mesh axis of two or more devices. A mesh
@@ -290,8 +290,7 @@ therefore refuses any path that loops over such a step:
 
 * `run_scan`, `run_scan_with_history`, `run_sweep`, `run_adaptive_scan`
   and `sysid.windowed_loss`, gradients through them included;
-* every entry point, `step()` included, when the node is in a coupling
-  group, because the group's iteration loops over the update inside the
+* every entry point, `step()` included, when the node is in a {term}`coupling group <Coupling group>`, because the group's iteration loops over the update inside the
   step.
 
 The `RuntimeError` names the node, the static and the mesh axis.

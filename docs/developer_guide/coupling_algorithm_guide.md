@@ -16,11 +16,11 @@ how the per-step numbers are obtained; this page is about what they say.
 > Aitken's two corrections (its first pass of each timestep relaxed with
 > ω clipped to the 0.01 floor, and the loop exited on the first residual
 > below the threshold, which under Aitken is a transient dip in a
-> non-monotone sequence — on `heterogeneous` under Jacobi that meant
+> non-monotone sequence — on `heterogeneous` under {term}`Jacobi` that meant
 > `converged=True` at a point 15–31x the tolerance it claimed; the exit
 > now requires the threshold on two consecutive passes where one pass is
 > not enough); the error-bound criterion (a group's threshold applies to
-> an estimate of the distance to the fixed point, `ω · residual / (1 -
+> an estimate of the distance to the {term}`fixed point <Fixed point>`, `ω · residual / (1 -
 > rho)`, and every norm scales each field's change by that field's own
 > magnitude); and the `HeatNode` rod-end fix, which doubled the heat
 > fixtures' interface gain (see [How the numbers were
@@ -74,9 +74,9 @@ not, and says which.
 
 | your graph | start with | why |
 |---|---|---|
-| anything, first attempt | `gauss-seidel` / `aitken` / **`l2`** | Gauss-Seidel needs **1.7–2.1x** fewer iterations than Jacobi on every shape where both converge on every step — 1.68 on `stiff-pair-0.25` to 2.06 on `slow-drift`; the first recording read 1.69 to 1.93 and this row quoted 1.7–1.9x.  Aitken removes up to 55% of what is left under the interface norm (58% under L2), and costs up to a pass where plain iteration already converges in three or four (`slow-drift` under both norms, `stiff-pair-0.25` under the interface norm).  It is the sweep's own best configuration on thirteen of the eighteen fast fixtures (twelve under the interface norm, one under L2).  Its arithmetic is inside the dispatch floor on every launch-bound fixture; on a compute-bound one it is not free.  **The norm here is `l2`, not `interface`, and that is a change**: the interface norm is the iteration-cheaper of the two and this row used to recommend it, but it measures only the coupling-edge fields, so a group whose interface has gone stationary can exit while the rest of its state is still moving.  Over generated graphs that is measurable at **5.2e-01** on exactly this configuration — a Jacobi three-spring group under Aitken, both solves reporting `converged`.  Switch to `interface` once you have read the accuracy caveat at the end of [Four combinations that theory says should win](#four-combinations-that-theory-says-should-win) and checked your own graph against it |
-| cheap nodes, few interface DOFs, contraction below ~0.8 | `gauss-seidel` / `aitken` / `interface` | launch-bound: differences between configurations smaller than the dispatch floor — which is most of the step there — are not measuring the algorithm, so pick the fewest iterations and the least machinery among the rows that time the same |
-| contraction above ~0.9, or unknown and possibly divergent | `gauss-seidel` / `iqn-ils` / **`l2`** | the only family that converges *past* the limit at all, and at gain 0.95 it takes 4.0 iterations at 100% converged where `gs/none/l2` exhausts its cap of 60 on **100%** of steps and converges on **0%** (the first recording read 4.1, 98% and 2%).  Right rather than fast: 0.35 ms against 0.40 for a row that spends its whole cap and arrives nowhere.  **The norm here is `l2`, not `interface`, and that is a change**: `iqn-*` with the default `accelerated_fields=None` is the one pairing the accuracy caveat at the end of [Four combinations that theory says should win](#four-combinations-that-theory-says-should-win) names outright — the auto-detected set and the interface criterion are the same fields, so the quasi-Newton step lands on exactly what the criterion then measures and every other field rides out of the last raw pass unwatched.  The interface norm also stopped being the lever here: on `stiff-pair-0.95` it cuts 2.2% of the iterations, not the first recording's 15.1%, and converges 8% of steps rather than 68% |
+| anything, first attempt | `gauss-seidel` / `aitken` / **`l2`** | {term}`Gauss-Seidel` needs **1.7–2.1x** fewer iterations than Jacobi on every shape where both converge on every step — 1.68 on `stiff-pair-0.25` to 2.06 on `slow-drift`; the first recording read 1.69 to 1.93 and this row quoted 1.7–1.9x.  Aitken removes up to 55% of what is left under the {term}`interface norm <Interface norm>` (58% under L2), and costs up to a pass where plain iteration already converges in three or four (`slow-drift` under both norms, `stiff-pair-0.25` under the interface norm).  It is the sweep's own best configuration on thirteen of the eighteen fast fixtures (twelve under the interface norm, one under L2).  Its arithmetic is inside the dispatch floor on every launch-bound fixture; on a compute-bound one it is not free.  **The norm here is `l2`, not `interface`, and that is a change**: the interface norm is the iteration-cheaper of the two and this row used to recommend it, but it measures only the {term}`coupling <Coupling>`-{term}`edge <Edge>` fields, so a group whose interface has gone stationary can exit while the rest of its state is still moving.  Over generated graphs that is measurable at **5.2e-01** on exactly this configuration — a Jacobi three-spring group under Aitken, both solves reporting `converged`.  Switch to `interface` once you have read the accuracy caveat at the end of [Four combinations that theory says should win](#four-combinations-that-theory-says-should-win) and checked your own graph against it |
+| cheap {term}`nodes <Node>`, few interface DOFs, contraction below ~0.8 | `gauss-seidel` / `aitken` / `interface` | launch-bound: differences between configurations smaller than the dispatch floor — which is most of the step there — are not measuring the algorithm, so pick the fewest iterations and the least machinery among the rows that time the same |
+| contraction above ~0.9, or unknown and possibly divergent | `gauss-seidel` / `iqn-ils` / **`l2`** | the only family that converges *past* the limit at all, and at gain 0.95 it takes 4.0 iterations at 100% converged where `gs/none/l2` exhausts its cap of 60 on **100%** of steps and converges on **0%** (the first recording read 4.1, 98% and 2%).  Right rather than fast: 0.35 ms against 0.40 for a row that spends its whole cap and arrives nowhere.  **The norm here is `l2`, not `interface`, and that is a change**: `iqn-*` with the default `accelerated_fields=None` is the one pairing the accuracy caveat at the end of [Four combinations that theory says should win](#four-combinations-that-theory-says-should-win) names outright — the auto-detected set and the interface criterion are the same fields, so the {term}`quasi-Newton <Quasi-Newton>` step lands on exactly what the criterion then measures and every other field rides out of the last raw pass unwatched.  The interface norm also stopped being the lever here: on `stiff-pair-0.95` it cuts 2.2% of the iterations, not the first recording's 15.1%, and converges 8% of steps rather than 68% |
 | one expensive node among cheap ones | `gauss-seidel` / `iqn-imvj` / `interface`, with `accelerated_fields` naming **only the cheap nodes** | the sweep's best configuration on `heterogeneous`: 3.0 iterations at 1.85 ms, against 5.95 and 1.93 for plain iteration, and 2.0 at 96.9 ms for the same accelerator on every field.  The quasi-Newton problem needs enough degrees of freedom to model the interface response, not the grid.  Under **Jacobi** the same restriction costs convergence — see below |
 | every node expensive (grid-to-grid) | `gauss-seidel` / `none` / `interface` | the interface norm alone takes `expensive-pair` from 2.95 iterations and 7.56 ms to 1.65 and 5.15 ms; IQN buys nothing more under that norm (1.60–1.65 iterations) for 32–42x the step time and is not affordable at 2x10⁵ accelerated DOFs |
 | deep chain (information must cross many nodes) | `gauss-seidel` / `aitken` / `interface` | Gauss-Seidel's advantage is real but *flat* in depth — it does not grow with the chain length |
@@ -165,8 +165,8 @@ Three settings that are nearly always right and are not in the table:
   safety margin: IQN allocates `max_iterations - 1` secant columns, so
   the cap sets the size of its least-squares problem.
 * **Turn on `strict_convergence` for training and calibration runs.**
-  The implicit-function-theorem gradient is only valid at a converged
-  fixed point.  It checks only the solves a step keeps: not a multi-rate
+  The {term}`implicit-function-theorem <Implicit function theorem>` gradient is only valid at a converged
+  fixed point.  It checks only the solves a step keeps: not a {term}`multi-rate <Multi-rate>`
   base step on which the group does not fire, and not the step-doubling
   estimate's full step or a rejected attempt under `run_adaptive*`, so
   the adaptive controller can still recover by rejecting a step whose
@@ -179,7 +179,7 @@ Three settings that are nearly always right and are not in the table:
 
 **Checking a group before you rely on it.**  Build the group from one of
 the rows above with `diagnostics=True` and `strict_convergence=True`, step
-it, and read its report by its reason codes rather than by `converged`
+it, and read its report by its {term}`reason codes <Reason code>` rather than by `converged`
 alone.  Here two masses joined by one spring (two `SpringDamperNode`s
 anchored on each other) use the first row:
 
@@ -241,20 +241,20 @@ never run.
 
 | field | what it is |
 |---|---|
-| `iterations` | passes used, counting the first staggered one.  Equal to `max_iterations` exactly when the group exhausted its budget.  With `waveform_iterations > 1` on a sub-cycling group each sweep has a budget of its own and this is the largest sweep's count, so `iterations >= max_iterations` still reads "some sweep hit the cap" — see below |
+| `iterations` | passes used, counting the first staggered one.  Equal to `max_iterations` exactly when the group exhausted its budget.  With `waveform_iterations > 1` on a {term}`sub-cycling <Sub-cycling>` group each sweep has a budget of its own and this is the largest sweep's count, so `iterations >= max_iterations` still reads "some sweep hit the cap" — see below |
 | `total_iterations` | passes the step ran, summed over its `waveform_iterations` sweeps: the work done.  Equal to `iterations` for a group that runs one sweep |
 | `residual` | `\|F(x) - x\|` in the group's norm, for the state the step returned.  Carries a float32 noise floor |
 | `amplification` | the estimated `1 / (1 - rho)` of the mode the residual sequence reveals.  `nan` when the ratio was rejected |
 | `error_estimate` | `residual · max(ω · amplification, 1)` — **an estimate** of the distance to the fixed point, not of the last step.  Falls back to `residual` when the ratio was rejected |
 | `ratio_usable` | whether the contraction *ratio* was usable — see below.  Renamed from `bound_valid` |
-| `gradient_error_estimate` | how far the IFT adjoint may sit from a finite difference of the same forward.  Numerically `error_estimate`, so it inherits every way that number can understate.  `inf` when `ratio_usable` is false.  Renamed from `gradient_error_bound` |
+| `gradient_error_estimate` | how far the {term}`IFT` adjoint may sit from a finite difference of the same forward.  Numerically `error_estimate`, so it inherits every way that number can understate.  `inf` when `ratio_usable` is false.  Renamed from `gradient_error_bound` |
 | `converged` | the *error estimate* met the group's threshold.  **`True` on a stalled float32 iterate** — see below |
-| `rho_spectral` | the spectral radius of `dF/dx` at the returned state, from eight Arnoldi steps on the Jacobian-vector product the IFT adjoint already builds.  Sees every mode, not only the one dominating the step.  Within 5% of `1 − rho_spectral` of the radius wherever `spectral_usable` is true, which needs one pass to depend on the previous one through at most seven independent scalars (eight where they are the whole state; see below).  NaN for `fori`, for `diagnostics=False` and at `max_iterations=1` |
+| `rho_spectral` | the {term}`spectral radius <Spectral radius>` of `dF/dx` at the returned state, from eight Arnoldi steps on the Jacobian-vector product the IFT adjoint already builds.  Sees every mode, not only the one dominating the step.  Within 5% of `1 − rho_spectral` of the radius wherever `spectral_usable` is true, which needs one pass to depend on the previous one through at most seven independent scalars (eight where they are the whole state; see below).  NaN for `fori`, for `diagnostics=False` and at `max_iterations=1` |
 | `spectral_error_bound` | `(residual + floor) · max(‖(I − H)⁻¹‖₂, 1/(1 − rho_spectral))`, with `floor` the residual's own float resolution and `H` the Krylov-compressed Jacobian in the group's own norm — **a bound** on the distance to the fixed point for a linear `F`, whatever the accelerator did; asymptotic for a non-linear one.  See below |
 | `spectral_usable` | the bound is finite and the Arnoldi space had settled: the Krylov space closed within the eight steps, any direction the breakdown test discarded as rounding is `≤ 0.05 (1 − rho_spectral)`, and no rounding of the size one more Jacobian-vector product measures can move the radius by that much.  False where nothing was computed, where rounding can move the radius by more than that (a non-normal Jacobian), where one pass depends on the previous one through more than seven independent scalars (eight where they are the whole state: what the loop closes through under Gauss-Seidel, both directions under Jacobi), and where the residual is at its float floor (`precision_limited`) in a group with a node that has not declared `update_evaluations()` — see below |
 | `gradient_relative_error_bound` | a bound on the relative error of the IFT gradient caused by the forward stopping early: `spectral_error_bound` × the resolvent factor it applies × the change in the map's linearisation per unit distance, for the worst of one probe per floating constant.  **About the gradient, not the solve** — reads 0.0 on an affine group whose state is far off.  See below |
 | `gradient_bound_usable` | the gradient bound is finite and `spectral_usable` is true.  False where nothing was computed and where the Newton–Kantorovich check fails |
-| `reason_codes` | experimental: why each of `spectral_usable`, `gradient_bound_usable` and `precision_limited` reads `False`, as lists of the constants of `maddening.core.coupling.reason_codes`.  A usable flag that is `False` has at least one code and the entry a `not_usable_reason` in words; a flag that is `True` has none.  See [the reason codes of a report](#the-reason-codes-of-a-report) |
+| `reason_codes` | {term}`experimental <EXPERIMENTAL>`: why each of `spectral_usable`, `gradient_bound_usable` and `precision_limited` reads `False`, as lists of the constants of `maddening.core.coupling.reason_codes`.  A usable flag that is `False` has at least one code and the entry a `not_usable_reason` in words; a flag that is `True` has none.  See [the reason codes of a report](#the-reason-codes-of-a-report) |
 | `residual_precision_floor` | experimental: the residual's float floor at the state the step returned, in the residual's units (tolerances): the number `precision_limited` compares the residual with and `spectral_error_bound` adds.  NaN where it was not measured, and `reason_codes["precision_limited"]` then says why |
 | `precision_limited` | the residual is at or below its own float resolution: `residual` and `error_estimate` are rounding, at least half of each bound is the floor, and only a wider dtype can shrink them.  Reported for every group; clears `spectral_usable` only where a node's evaluation count is undeclared |
 
@@ -268,7 +268,7 @@ float32): a relay contracting at 0.99999, started 0.3% short of its
 fixed point, stops after one pass with `residual=0.0` and
 `converged=True` at **38 348 ulps**, a relative distance of 4.2e-3
 against a tolerance of 1e-6.  The criterion is deliberately not changed
-for this — a precision floor in it would make a tight float32 tolerance
+for this — a {term}`precision floor <Precision floor>` in it would make a tight float32 tolerance
 unreachable and move iteration counts everywhere — so the bound keys
 are where it shows: `spectral_error_bound` adds the residual's float
 resolution before amplifying it (it read `0.0` there; it now reads
@@ -305,13 +305,13 @@ group is a constant of the solve; where a fine field is in fact computed from fi
 fields alone the floor is too large, never too small.  In a group of
 one dtype nothing changes.  **A position is exempt from that rule and
 keeps its own dtype's `eps`**: a geometry field that an internal edge
-anchors a geometry-dependent mapping at (under `"l2"` and `"mixed"`), a
+anchors a {term}`geometry-dependent mapping <Geometry-dependent mapping>` at (under `"l2"` and `"mixed"`), a
 position part read in kernel lengths (under `"interface"`), and the
 rounding `eps · r` of the positions a value was delivered through (`r`
 the larger of a position's distance from the coordinates' zero and of
 its lattice coordinate, in spacings: under `"interface"` the kernel's
 own difference from the grid's first point is where a position rounds,
-see the interface-mapping guide).  A stored float64 position has float64 resolution, and what a
+see the {term}`interface-mapping <Interface mapping>` guide).  A stored float64 position has float64 resolution, and what a
 float32 member adds to it in a pass is a rounding of the increment;
 counted at float32's `eps`, float64 positions tens of spacings from zero
 put hundreds of tolerances into the floor and read
@@ -373,7 +373,7 @@ which that norm's floor already counts in spacings; under `"l2"` and
 beside float32 values as precision-limited from a hundred spacings out.)
 Magnitudes add, so the count is a
 bound and can be useless as one: a ten-link chain `3 c_(j-1) - 2 c_(j-2)
-+ c` reads 1.1e7x its true distance, usable, and a sub-cycled member,
++ c` reads 1.1e7x its true distance, usable, and a {term}`sub-cycled <Sub-cycled>` member,
 counted as undamped sub-steps, 1.5e3x-9.6e4x.  A composite map's error grows with its evaluations: explicit
 Euler in `N` sub-steps, each moving its field by less than half an ulp,
 is 5.8 units off the exact map at `N = 20` and 29.4 at `N = 100`, and
@@ -426,7 +426,7 @@ IFT solve and the report -- works in exact power-of-two frames
 and bounds at any power-of-two scale down to the subnormal range.  A node's
 `update` is not framed.  Below `finfo(dtype).tiny / finfo(dtype).eps` a
 change of one ulp of a field is smaller than the smallest normal number,
-which XLA's CPU backend flushes to zero: the node's arithmetic on that
+which {term}`XLA`'s CPU backend flushes to zero: the node's arithmetic on that
 field loses resolution, and a field whose magnitude is below `tiny` itself
 reads as exactly zero in the group's norm.
 
@@ -711,7 +711,7 @@ true distance` (jaxlib 0.11.0, CPU):
 | fixture | `error_estimate` | `spectral_error_bound` |
 |---|---|---|
 | two-mode `(0.999, 0.2)`, gs / none | 0.0082 (the 122x) | 8.05 |
-| two-mode, gs / aitken and gs / iqn-ils | 0.50 and 0.0010 | 1.34 and 1.32 |
+| two-mode, gs / aitken and gs / {term}`iqn-ils <IQN-ILS>` | 0.50 and 0.0010 | 1.34 and 1.32 |
 | random normal contractions, n = 2–6, 80 draws, none and fixed ω ≤ 1 | 0.92–88 | 1.009–96 |
 | heterogeneous, jacobi / aitken, 20 steps | 0.008–0.71 | 2.9–95 (911 on the one precision-limited step) |
 | heterogeneous, gs / none, 20 steps, all precision-limited | 0.98–2.3 | 3.4–25 |
@@ -983,7 +983,7 @@ and it is relative to the tangent's norm, so a scalar
 loss whose gradient nearly cancels across the state can carry a larger
 relative error.  `gradient_bound_usable` reports a finite bound and a
 settled spectrum, not those conditions.  It is not spelled
-`gradient_error_bound`: that spelling is the deprecated alias of
+`gradient_error_bound`: that spelling is the {term}`deprecated <DEPRECATED>` alias of
 `gradient_error_estimate` (below), and code written against 0.3.x
 would read a new meaning under it as the old number.
 
@@ -1032,7 +1032,7 @@ sub-cycling, in words and in code alike.
 | `single_pass` | `max_iterations=1`: no fixed point is solved | allow a second pass |
 | `state_not_finite` | the state the step returned is not finite: the iteration diverged | look at the relaxation and the node updates |
 | `estimate_not_recorded` | the state holds no estimate for a group that asks for one: it was not written by this graph's step (set by hand, or loaded from a graph without diagnostics) | step the group |
-| `written_before_save` | loaded from a checkpoint saved after the group's state was written: the state the float floor is measured on is not in it | step the group; save before writing |
+| `written_before_save` | loaded from a {term}`checkpoint <Checkpoint>` saved after the group's state was written: the state the float floor is measured on is not in it | step the group; save before writing |
 | `floor_needs_the_step` | the float floor reads what an edge delivers at pre-step geometry, which only the step holds, and the state carries none | step the group |
 | `geometry_kind_not_diagnosed` | a geometry-dependent mapping of a kind other than `multilinear_grid` | expected in 0.4.0: no bound is reported for this group |
 | `geometry_norm_not_diagnosed` | a geometry-dependent mapping under `convergence_norm="interface"` | expected; run a diagnostic pass under `"mixed"` or `"l2"`.  The float floor is still reported |
@@ -1072,8 +1072,7 @@ iterates the same one-pass map, starting from where the sweep before it
 stopped: a pass reads only its incoming iterate and the
 beginning-of-step state, and the residual the second sweep measures on
 its first pass is, bit for bit, the residual the first sweep reported
-for the state it handed on.  Inside a pass, a sub-cycled node's boundary
-input is interpolated between the incoming iterate and the in-pass state
+for the state it handed on.  Inside a pass, a sub-cycled node's {term}`boundary input <Boundary inputs>` is interpolated between the incoming iterate and the in-pass state
 -- two estimates of the *end*-of-step value, never the beginning-of-step
 one -- so no sweep sees a waveform over the sub-step window, and
 `boundary_interpolation="quadratic"` is never given its third value.
@@ -1259,7 +1258,7 @@ consequences.
   *step time* is a pessimistic upper bound, because the concurrency the
   mode exists for is not available.  The open question, and the first
   thing to re-measure on a GPU box, is whether a wide `star-N` or a
-  sharded grid recovers Jacobi's roughly 1.9x iteration penalty in wall time.
+  {term}`sharded <Sharded>` grid recovers Jacobi's roughly 1.9x iteration penalty in wall time.
   Nothing in this document answers it either way.
 * On the launch-bound fixtures the whole step is 0.1–2 ms and the spread
   between configurations is tens of microseconds — inside the noise.
@@ -1809,7 +1808,7 @@ this page quoted a different one.  The headline used to be 4.2x10⁻² on
 It was the *sum* of a 60 000-cell grid field: an extensive quantity
 compared against a scale taken from an intensive one, so a per-cell
 difference of 7x10⁻⁷ scored 4x10⁻².  And the scale it was divided by
-came from the driver node, which sits outside every coupling group and
+came from the driver node, which sits outside every {term}`coupling group <Coupling group>` and
 carries a `position` eighty times the coupled probes', so the probes'
 own disagreement — a real 20.6%, caused by the Aitken exit criterion
 described at the top of this page — was reported as 2.6x10⁻³ and passed
@@ -1867,7 +1866,7 @@ The default solver differentiates a group in forward mode, whatever
 derivative you ask for.  `solver="ift"`'s rule is a `jax.custom_jvp`: it
 solves for the tangent from a forward-mode product of the members' pass,
 and `jax.grad` transposes that.  So every member of a group needs a
-forward-mode derivative that JAX can transpose.
+forward-mode derivative that {term}`JAX` can transpose.
 
 A node whose only derivative rule is reverse mode does not have one.  That
 is a `jax.custom_vjp`, which is what a reverse-mode bridge to an external
@@ -1930,7 +1929,7 @@ them, and the analysis agrees with `2 * N**2 * 4` to within a few tens
 of kilobytes at every size from 64 DOF to 3.6e5.
 
 **Forward mode costs half as much again.**  The tangent solve
-`jax.jvp` / `jacfwd` runs -- the FMI `FORWARD` directional derivative
+`jax.jvp` / `jacfwd` runs -- the {term}`FMI` `FORWARD` directional derivative
 among them -- keeps `I - J` live beside the identity basis and the
 Jacobian-vector products, so a dense coupling Jacobian peaks at
 `3 * N**2 * itemsize`: 3.00 `N**2` floats at `N` = 256 and 512 in the

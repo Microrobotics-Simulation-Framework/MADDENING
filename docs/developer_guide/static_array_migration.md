@@ -10,7 +10,7 @@ typed wrapper for non-state arrays carried via
 {attr}`SimulationNode.static_data <maddening.core.node.SimulationNode.static_data>`.
 Bare arrays (anything with ``shape``/``dtype`` but not wrapped) were
 coerced to ``StaticArray(value=arr)`` with a one-time
-{class}`FutureWarning` per (node × key) pair.
+{class}`FutureWarning` per ({term}`node <Node>` × key) pair.
 ```
 
 ```{versionchanged} v0.3.0
@@ -21,7 +21,7 @@ ndarray / ``jnp.ndarray`` into ``static_data`` now raises
 
 ```{versionadded} v0.3.0
 New ``replication="partition"`` variant for graph-partitioned
-sharding (see [{doc}`sharding_topology`](sharding_topology.md)).
+{term}`sharding <Sharding>` (see [{doc}`sharding_topology`](sharding_topology.md)).
 ```
 
 ## Why this changed
@@ -38,7 +38,7 @@ materialised under sharding:
 A bare array carries no replication policy, so the v0.2 coercion
 path silently chose `"replicate"`.  That was harmless on a single
 device but a bug magnet under sharding — the user couldn't see
-why their stencil mask was bigger than expected per device.
+why their {term}`stencil <Stencil>` mask was bigger than expected per device.
 v0.3.0 makes the declaration mandatory.
 
 ## What to do

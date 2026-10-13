@@ -1,12 +1,12 @@
 # Property-Based Verification
 
 MADDENING ships a property-based testing layer (built on
-[Hypothesis](https://hypothesis.readthedocs.io/)) for physics nodes: sample
+[Hypothesis](https://hypothesis.readthedocs.io/)) for physics {term}`nodes <Node>`: sample
 inputs from a declared envelope, check universal invariants, and shrink any
 failure to a minimal counterexample.
 
 Those checks compare the code to itself.  They cannot see a wrong
-discretisation, because a stencil with the wrong weight is finite,
+discretisation, because a {term}`stencil <Stencil>` with the wrong weight is finite,
 deterministic, JIT-consistent and differentiable.  [Order of
 accuracy](#order-of-accuracy-the-method-of-manufactured-solutions) is the
 other half of the battery: it compares the code to the mathematics.
@@ -103,7 +103,7 @@ normalised), or passes on states that say nothing about the node.
 
 `constrain_state=` takes a function that is applied to every drawn state
 before any check uses it; `constrain_boundary=` does the same for the drawn
-boundary inputs.
+{term}`boundary inputs <Boundary inputs>`.
 
 ```python
 import jax.numpy as jnp
@@ -453,7 +453,7 @@ Roache's published check, `GCI_coarse / (r^p * GCI_fine) ~ 1`, is reported but
 is **not** what the verdict is taken from.  For a three-grid study at a
 constant ratio it collapses algebraically to `|phi_fine| / |phi_medium|`, so it
 is within a per cent of 1 for any ladder whose solutions are close together,
-converging or not — it reads 1.006 on the LBM pipe study that is emphatically
+converging or not — it reads 1.006 on the {term}`LBM` pipe study that is emphatically
 not asymptotic.  What carries information is:
 
 1. **the observed order against the declared one** — the criterion ASME V&V 20
@@ -496,7 +496,7 @@ coupled model therefore has three levels, and each establishes one thing:
 | level | what is checked | with | what it establishes |
 |---|---|---|---|
 | 1. the node | `update()` against an analytical or manufactured solution | `verify_node`, `verify_node_order`, `verify_node_gci` (above) | each node solves *its* equations at its declared order |
-| 2. the edge | the transfer between two nodes | `verify_mapping` | nothing is created or destroyed on the way, and a value arrives as the value it was |
+| 2. the {term}`edge <Edge>` | the transfer between two nodes | `verify_mapping` | nothing is created or destroyed on the way, and a value arrives as the value it was |
 | 3. the graph | the coupled model against a known solution, or against itself under refinement | `verify_graph_order`, `verify_graph_gci` | the *coupled* scheme converges, at the order the exchange and the edges allow |
 
 **What none of them does.**  All three are *verification*: evidence that the
@@ -509,11 +509,11 @@ node) are not in this release: level 3 here needs a coupled problem with a
 known solution, or uses grid convergence, which needs none.
 
 *`verify_mapping`, `verify_graph_order` and `verify_graph_gci` are
-experimental in 0.4.0.*
+{term}`experimental <EXPERIMENTAL>` in 0.4.0.*
 
 ### Level 2: the edge
 
-`verify_mapping` is the battery for an interface mapping.  It takes any
+`verify_mapping` is the battery for an {term}`interface mapping <Interface mapping>`.  It takes any
 object with the members of the `Mapping` protocol -- built by a shipped
 factory, registered with `register_mapping`, or written by hand and never
 registered -- or a whole `EdgeSpec`, in which case every check is made on what
@@ -645,12 +645,11 @@ a function that builds the graph at a refinement level, runs it and returns
 one number, and the levels.  Two things differ from a node.
 
 **A graph declares no order, so you state the one you expect.**  Without
-`expected=` the result is a `SKIP`.  What a partitioned coupling can reach:
+`expected=` the result is a `SKIP`.  What a partitioned {term}`coupling <Coupling>` can reach:
 
 * **first order in time**, whatever the nodes' own integrators are.  Each
   node receives its boundary inputs once per step and holds them across it
-  (MADD-ANO-014), so the exchange is first order even where a coupling
-  group iterates the step to convergence;
+  (MADD-ANO-014), so the exchange is first order even where a {term}`coupling group <Coupling group>` iterates the step to convergence;
 * **order `p + 1` in space** through an edge whose mapping reproduces
   polynomials of degree `p`, and no more than the nodes' own order.
 
@@ -670,7 +669,7 @@ levels and stops after one on most steps of the two fine ones (168 of 200,
 383 of 400), so the ladder compares two different schemes and the order it
 reports belongs to neither.  Note the last column: the bound the
 diagnostics report for the *last step* is 1.9% of the error and looks
-harmless.  A fixed-point iteration stopped early from the previous step's
+harmless.  A {term}`fixed-point <Fixed point>` iteration stopped early from the previous step's
 state errs the same way at every step, and the errors add: it is the bound
 **times the number of steps** that has to be small.
 
@@ -694,7 +693,7 @@ from them by at most 0.14, inside the band -- by one of two routes:
   is then the difference of the two measurements, in the study's own units.
   This route assumes nothing about the graph, and is the one to use where a
   group reports no usable bound: `solver="fori"`, diagnostics off, a
-  geometry-dependent mapping the diagnostics do not read, a wide interface,
+  {term}`geometry-dependent mapping <Geometry-dependent mapping>` the diagnostics do not read, a wide interface,
   a custom edge.
 
 Where the guard finds the iteration error too large the result is a `FAIL`
@@ -884,7 +883,7 @@ One more thing the example shows is where the diagnostics route stops.  The
 time study sweeps the two rods together; swept one after the other, which
 is the default, the same group reports a `spectral_error_bound` and
 `spectral_usable=False` -- its pass map is far from normal, which is where
-the diagnostics decline to certify the spectral radius they measured -- and
+the diagnostics decline to certify the {term}`spectral radius <Spectral radius>` they measured -- and
 `coupling_iteration_bound` returns `usable=False` with that flag.  The
 guard then takes the re-run route if it was given one, and is a `SKIP` if
 it was not.
@@ -904,7 +903,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest tests/verification/
 The root `tests/conftest.py` disables the Hypothesis deadline for every
 profile it registers (`dev`, the default, and `ci`; select one with
 `MADDENING_HYPOTHESIS_PROFILE`), because the first example of every test pays
-JIT compilation.  `tests/verification/hypothesis/conftest.py` configures
+{term}`JIT compilation`.  `tests/verification/hypothesis/conftest.py` configures
 nothing any more; it is kept as a signpost to the root file.
 
 ## Limitations
@@ -912,7 +911,7 @@ nothing any more; it is kept as a signpost to the root file.
 1. **Sampling, not proof.** A PASS means no counterexample was found in
    `max_examples` draws. Raise `max_examples` for cheap nodes; use
    `derandomize=True` if CI must be bit-reproducible.
-2. **Subnormals.** XLA flushes subnormals to zero on most backends, so
+2. **Subnormals.** {term}`XLA` flushes subnormals to zero on most backends, so
    properties that depend on them cannot be tested meaningfully.
 3. **Cost scales with `update()`.** Nodes with large grids should use tight
    `bounds` and small shapes in the test fixture; the battery calls

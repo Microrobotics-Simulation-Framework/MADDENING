@@ -342,6 +342,8 @@ def test_the_exploring_job_uses_the_switch_the_hunts_read():
     # One file per process: the entropy is drawn once per process.
     assert run["run"].count("${{ matrix.file }}") == 1
     assert "continue-on-error" not in run
+    # Red when pytest is: nothing swallows its exit code (`|| true`, `; true`, a pipe's last command).
+    assert "||" not in run["run"] and "; true" not in run["run"] and run["run"].rstrip().endswith("| tee explore.log")
     # The other steps never set it: a find is reproducible from the summary alone.
     others = [s for s in job["steps"] if s is not run]
     assert switch not in json.dumps(others) or "MADDENING_SEARCH_ENTROPY=$entropy" in json.dumps(others)

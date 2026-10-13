@@ -435,7 +435,7 @@
       "version": "0.13.8"
     },
     {
-      "bom-ref": "fastapi==0.141.1",
+      "bom-ref": "fastapi==0.143.0",
       "description": "FastAPI framework, high performance, easy to learn, fast to code, ready for production",
       "externalReferences": [
         {
@@ -536,6 +536,42 @@
         },
         {
           "name": "maddening:sbom:requires-dist",
+          "value": "opentelemetry-api>=1.44.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "opentelemetry-exporter-otlp-proto-http>=1.44.0; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "opentelemetry-exporter-otlp-proto-http>=1.44.0; extra == \"opentelemetry\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "opentelemetry-exporter-otlp-proto-http>=1.44.0; extra == \"standard\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "opentelemetry-exporter-otlp-proto-http>=1.44.0; extra == \"standard-no-fastapi-cloud-cli\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "opentelemetry-sdk>=1.44.0; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "opentelemetry-sdk>=1.44.0; extra == \"opentelemetry\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "opentelemetry-sdk>=1.44.0; extra == \"standard\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "opentelemetry-sdk>=1.44.0; extra == \"standard-no-fastapi-cloud-cli\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
           "value": "pydantic-extra-types>=2.0.0; extra == \"all\""
         },
         {
@@ -604,15 +640,15 @@
         },
         {
           "name": "maddening:sbom:requires-dist-count",
-          "value": "32"
+          "value": "41"
         }
       ],
-      "purl": "pkg:pypi/fastapi@0.141.1",
+      "purl": "pkg:pypi/fastapi@0.143.0",
       "type": "library",
-      "version": "0.141.1"
+      "version": "0.143.0"
     },
     {
-      "bom-ref": "fonttools==4.66.0",
+      "bom-ref": "fonttools==4.66.1",
       "description": "Tools to manipulate font files",
       "externalReferences": [
         {
@@ -748,9 +784,9 @@
           "value": "28"
         }
       ],
-      "purl": "pkg:pypi/fonttools@4.66.0",
+      "purl": "pkg:pypi/fonttools@4.66.1",
       "type": "library",
-      "version": "4.66.0"
+      "version": "4.66.1"
     },
     {
       "bom-ref": "h11==0.16.0",
@@ -1485,7 +1521,7 @@
       "version": "0.6.0"
     },
     {
-      "bom-ref": "numpy==2.5.3",
+      "bom-ref": "numpy==2.5.4",
       "description": "Fundamental package for array computing in Python",
       "externalReferences": [
         {
@@ -1532,9 +1568,47 @@
           "value": "0"
         }
       ],
-      "purl": "pkg:pypi/numpy@2.5.3",
+      "purl": "pkg:pypi/numpy@2.5.4",
       "type": "library",
-      "version": "2.5.3"
+      "version": "2.5.4"
+    },
+    {
+      "bom-ref": "opentelemetry-api==1.45.1",
+      "description": "OpenTelemetry Python API",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: Repository",
+          "type": "vcs",
+          "url": "https://github.com/open-telemetry/opentelemetry-python"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Homepage",
+          "type": "website",
+          "url": "https://github.com/open-telemetry/opentelemetry-python/tree/main/opentelemetry-api"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "opentelemetry-api",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "typing-extensions>=4.5.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "1"
+        }
+      ],
+      "purl": "pkg:pypi/opentelemetry-api@1.45.1",
+      "type": "library",
+      "version": "1.45.1"
     },
     {
       "bom-ref": "opt_einsum==3.4.0",
@@ -1750,13 +1824,13 @@
       "version": "12.3.0"
     },
     {
-      "bom-ref": "pydantic==2.13.5",
+      "bom-ref": "pydantic==2.14.1",
       "description": "Data validation using Python type hints",
       "externalReferences": [
         {
           "comment": "from packaging metadata Project-URL: Documentation",
           "type": "documentation",
-          "url": "https://docs.pydantic.dev"
+          "url": "https://pydantic.dev/docs/validation/latest/get-started/"
         },
         {
           "comment": "from packaging metadata Project-URL: Source",
@@ -1771,7 +1845,7 @@
         {
           "comment": "from packaging metadata Project-URL: Changelog",
           "type": "release-notes",
-          "url": "https://docs.pydantic.dev/latest/changelog/"
+          "url": "https://pydantic.dev/docs/validation/latest/get-started/changelog/"
         },
         {
           "comment": "from packaging metadata Project-URL: Homepage",
@@ -1799,31 +1873,31 @@
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "pydantic-core==2.46.5"
+          "value": "pydantic-core==2.50.1"
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "typing-extensions>=4.14.1"
+          "value": "typing-extensions>=4.16.0"
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "typing-inspection>=0.4.2"
+          "value": "typing-inspection>=0.4.4"
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "tzdata; (python_version >= '3.9' and platform_system == 'Windows') and extra == 'timezone'"
+          "value": "tzdata; (platform_system == 'Windows') and extra == 'timezone'"
         },
         {
           "name": "maddening:sbom:requires-dist-count",
           "value": "6"
         }
       ],
-      "purl": "pkg:pypi/pydantic@2.13.5",
+      "purl": "pkg:pypi/pydantic@2.14.1",
       "type": "library",
-      "version": "2.13.5"
+      "version": "2.14.1"
     },
     {
-      "bom-ref": "pydantic_core==2.46.5",
+      "bom-ref": "pydantic_core==2.50.1",
       "description": "Core functionality for Pydantic validation and serialization",
       "externalReferences": [
         {
@@ -1859,16 +1933,16 @@
       "properties": [
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "typing-extensions>=4.14.1"
+          "value": "typing-extensions>=4.16.0"
         },
         {
           "name": "maddening:sbom:requires-dist-count",
           "value": "1"
         }
       ],
-      "purl": "pkg:pypi/pydantic-core@2.46.5",
+      "purl": "pkg:pypi/pydantic-core@2.50.1",
       "type": "library",
-      "version": "2.46.5"
+      "version": "2.50.1"
     },
     {
       "bom-ref": "Pygments==2.21.0",
@@ -2598,7 +2672,7 @@
       "version": "0.4.4"
     },
     {
-      "bom-ref": "uvicorn==0.53.0",
+      "bom-ref": "uvicorn==0.54.0",
       "description": "The lightning-fast ASGI server.",
       "externalReferences": [
         {
@@ -2677,9 +2751,9 @@
           "value": "9"
         }
       ],
-      "purl": "pkg:pypi/uvicorn@0.53.0",
+      "purl": "pkg:pypi/uvicorn@0.54.0",
       "type": "library",
-      "version": "0.53.0"
+      "version": "0.54.0"
     },
     {
       "bom-ref": "wadler_lindig==0.1.7",
@@ -2751,7 +2825,7 @@
       "version": "0.1.7"
     },
     {
-      "bom-ref": "websockets==17.1",
+      "bom-ref": "websockets==17.2",
       "description": "An implementation of the WebSocket Protocol (RFC 6455 & 7692)",
       "externalReferences": [
         {
@@ -2795,9 +2869,9 @@
           "value": "0"
         }
       ],
-      "purl": "pkg:pypi/websockets@17.1",
+      "purl": "pkg:pypi/websockets@17.2",
       "type": "library",
-      "version": "17.1"
+      "version": "17.2"
     },
     {
       "bom-ref": "zstandard==0.25.0",
@@ -2868,7 +2942,7 @@
     {
       "dependsOn": [
         "matplotlib==3.11.2",
-        "numpy==2.5.3",
+        "numpy==2.5.4",
         "pillow==12.3.0"
       ],
       "ref": "contourpy==1.4.0"
@@ -2892,20 +2966,21 @@
       "dependsOn": [
         "PyYAML==6.0.3",
         "annotated-doc==0.0.5",
-        "pydantic==2.13.5",
+        "opentelemetry-api==1.45.1",
+        "pydantic==2.14.1",
         "starlette==1.7.0",
         "typing-inspection==0.4.4",
         "typing_extensions==4.16.0",
-        "uvicorn==0.53.0"
+        "uvicorn==0.54.0"
       ],
-      "ref": "fastapi==0.141.1"
+      "ref": "fastapi==0.143.0"
     },
     {
       "dependsOn": [
         "matplotlib==3.11.2",
         "scipy==1.18.1"
       ],
-      "ref": "fonttools==4.66.0"
+      "ref": "fonttools==4.66.1"
     },
     {
       "ref": "h11==0.16.0"
@@ -2917,7 +2992,7 @@
       "dependsOn": [
         "jaxlib==0.11.2",
         "ml_dtypes==0.6.0",
-        "numpy==2.5.3",
+        "numpy==2.5.4",
         "opt_einsum==3.4.0",
         "scipy==1.18.1"
       ],
@@ -2926,7 +3001,7 @@
     {
       "dependsOn": [
         "ml_dtypes==0.6.0",
-        "numpy==2.5.3",
+        "numpy==2.5.4",
         "scipy==1.18.1"
       ],
       "ref": "jaxlib==0.11.2"
@@ -2952,20 +3027,20 @@
     {
       "dependsOn": [
         "PyYAML==6.0.3",
-        "fastapi==0.141.1",
+        "fastapi==0.143.0",
         "jax==0.11.2",
         "jaxlib==0.11.2",
         "lineax==0.1.1",
         "matplotlib==3.11.2",
-        "numpy==2.5.3",
+        "numpy==2.5.4",
         "pyzmq==27.2.0",
         "rich==15.0.0",
         "scipy==1.18.1",
-        "uvicorn==0.53.0",
-        "websockets==17.1",
+        "uvicorn==0.54.0",
+        "websockets==17.2",
         "zstandard==0.25.0"
       ],
-      "ref": "maddening==0.4.0.dev0"
+      "ref": "maddening==0.4.0"
     },
     {
       "dependsOn": [
@@ -2978,9 +3053,9 @@
       "dependsOn": [
         "contourpy==1.4.0",
         "cycler==0.12.1",
-        "fonttools==4.66.0",
+        "fonttools==4.66.1",
         "kiwisolver==1.5.1",
-        "numpy==2.5.3",
+        "numpy==2.5.4",
         "packaging==26.3",
         "pillow==12.3.0",
         "pyparsing==3.3.3",
@@ -2993,12 +3068,18 @@
     },
     {
       "dependsOn": [
-        "numpy==2.5.3"
+        "numpy==2.5.4"
       ],
       "ref": "ml_dtypes==0.6.0"
     },
     {
-      "ref": "numpy==2.5.3"
+      "ref": "numpy==2.5.4"
+    },
+    {
+      "dependsOn": [
+        "typing_extensions==4.16.0"
+      ],
+      "ref": "opentelemetry-api==1.45.1"
     },
     {
       "ref": "opt_einsum==3.4.0"
@@ -3015,17 +3096,17 @@
     {
       "dependsOn": [
         "annotated-types==0.8.0",
-        "pydantic_core==2.46.5",
+        "pydantic_core==2.50.1",
         "typing-inspection==0.4.4",
         "typing_extensions==4.16.0"
       ],
-      "ref": "pydantic==2.13.5"
+      "ref": "pydantic==2.14.1"
     },
     {
       "dependsOn": [
         "typing_extensions==4.16.0"
       ],
-      "ref": "pydantic_core==2.46.5"
+      "ref": "pydantic_core==2.50.1"
     },
     {
       "ref": "pyparsing==3.3.3"
@@ -3050,7 +3131,7 @@
       "dependsOn": [
         "click==8.5.0",
         "matplotlib==3.11.2",
-        "numpy==2.5.3",
+        "numpy==2.5.4",
         "typing_extensions==4.16.0"
       ],
       "ref": "scipy==1.18.1"
@@ -3062,6 +3143,7 @@
       "dependsOn": [
         "PyYAML==6.0.3",
         "anyio==4.15.1",
+        "opentelemetry-api==1.45.1",
         "typing_extensions==4.16.0"
       ],
       "ref": "starlette==1.7.0"
@@ -3081,18 +3163,18 @@
         "click==8.5.0",
         "h11==0.16.0",
         "typing_extensions==4.16.0",
-        "websockets==17.1"
+        "websockets==17.2"
       ],
-      "ref": "uvicorn==0.53.0"
+      "ref": "uvicorn==0.54.0"
     },
     {
       "dependsOn": [
-        "numpy==2.5.3"
+        "numpy==2.5.4"
       ],
       "ref": "wadler_lindig==0.1.7"
     },
     {
-      "ref": "websockets==17.1"
+      "ref": "websockets==17.2"
     },
     {
       "ref": "zstandard==0.25.0"
@@ -3100,7 +3182,7 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "maddening==0.4.0.dev0",
+      "bom-ref": "maddening==0.4.0",
       "description": "Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph",
       "externalReferences": [
         {
@@ -3133,9 +3215,9 @@
         }
       ],
       "name": "maddening",
-      "purl": "pkg:pypi/maddening@0.4.0.dev0",
+      "purl": "pkg:pypi/maddening@0.4.0",
       "type": "library",
-      "version": "0.4.0.dev0"
+      "version": "0.4.0"
     },
     "properties": [
       {
@@ -3144,7 +3226,7 @@
       },
       {
         "name": "maddening:sbom:exclude-newer",
-        "value": "2026-09-25T00:00:00Z"
+        "value": "2026-10-13T00:00:00Z"
       },
       {
         "name": "maddening:sbom:generator",
@@ -3207,7 +3289,7 @@
         "value": "uv 0.11.15 (x86_64-unknown-linux-gnu)"
       }
     ],
-    "timestamp": "2026-09-25T00:00:00Z",
+    "timestamp": "2026-10-13T00:00:00Z",
     "tools": {
       "components": [
         {
@@ -3311,7 +3393,7 @@
       ]
     }
   },
-  "serialNumber": "urn:uuid:04621b9e-a8ef-5539-832a-db3331ae4041",
+  "serialNumber": "urn:uuid:122a271b-a4ae-5bcc-bc63-f4d6456562ee",
   "specVersion": "1.6",
   "version": 1
 }

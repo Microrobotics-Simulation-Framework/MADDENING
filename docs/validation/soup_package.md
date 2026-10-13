@@ -12,8 +12,8 @@ to forget on a release; there is deliberately no longer one here.
 |---|---|
 | Name | MADDENING |
 | Full Name | Modular Automatic Differentiation and Data Enhanced Neural-network INteracting Graph |
-| Version | 0.4.0.dev0 |
-| Release Date | unreleased (development build) |
+| Version | 0.4.0 |
+| Release Date | 2026-10-13 |
 | Licence | LGPL-3.0-or-later |
 | Source Repository | https://github.com/Microrobotics-Simulation-Framework/MADDENING |
 | Python Version | >=3.12 permitted; verified on 3.12 (the CI matrix) |
@@ -396,10 +396,10 @@ graph is included, and the root's edges are exactly the direct dependencies
 
 | File | Install | What it covers |
 |---|---|---|
-| `maddening-0.4.0.dev0-core.cdx.json` | `pip install maddening` | The base dependencies: what every user gets, and the SOUP items of §1 |
-| `maddening-0.4.0.dev0-server.cdx.json` | `pip install maddening[server]` | The network-facing bundle: the HTTP/WebSocket API, the ZeroMQ transports, terminal (`rich`) and matplotlib rendering, zstd frames.  A superset of the `api`, `network`, `viz` and `compression` extras, and of `terminal` except `termaid`, which draws the graph diagram on an operator's terminal (below) |
-| `maddening-0.4.0.dev0-surrogates.cdx.json` | `pip install maddening[surrogates]` | Neural surrogate training (`optax`).  A trained surrogate replaces a physics node, so this code is in the computed result |
-| `maddening-0.4.0.dev0-usd.cdx.json` | `pip install maddening[usd]` | OpenUSD stage read and write (`usd-core`, a binary wheel that bundles OpenUSD's C++ libraries) |
+| `maddening-0.4.0-core.cdx.json` | `pip install maddening` | The base dependencies: what every user gets, and the SOUP items of §1 |
+| `maddening-0.4.0-server.cdx.json` | `pip install maddening[server]` | The network-facing bundle: the HTTP/WebSocket API, the ZeroMQ transports, terminal (`rich`) and matplotlib rendering, zstd frames.  A superset of the `api`, `network`, `viz` and `compression` extras, and of `terminal` except `termaid`, which draws the graph diagram on an operator's terminal (below) |
+| `maddening-0.4.0-surrogates.cdx.json` | `pip install maddening[surrogates]` | Neural surrogate training (`optax`).  A trained surrogate replaces a physics node, so this code is in the computed result |
+| `maddening-0.4.0-usd.cdx.json` | `pip install maddening[usd]` | OpenUSD stage read and write (`usd-core`, a binary wheel that bundles OpenUSD's C++ libraries) |
 
 **Why these installs, and not the others.**  These are the installs whose
 code runs in a deployed simulation: the base install, the network surfaces

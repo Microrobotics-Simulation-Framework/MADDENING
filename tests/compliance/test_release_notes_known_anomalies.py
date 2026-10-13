@@ -26,7 +26,7 @@ registry".  Of that section two things are required:
 * that paragraph names no reachable entry, so a live defect cannot be filed
   among the closed ones.
 
-The changelog's ``[Unreleased]`` section gives the reachable entries as a
+The changelog's ``[0.4.0]`` section gives the reachable entries as a
 count; the count is held to the registry here, so it cannot go stale.
 """
 
@@ -217,11 +217,11 @@ _COUNT = re.compile(r"(\d+) registry entries are reachable in 0\.4\.0: (\d+) ope
 
 def changelog_count_findings(changelog: str, registry: dict) -> list[str]:
     """Whether the changelog's count of reachable entries is the registry's."""
-    unreleased = changelog[changelog.index("## [Unreleased]"):]
-    unreleased = unreleased[:unreleased.index("\n## [", 1)]
-    match = _COUNT.search(" ".join(unreleased.split()))
+    release = changelog[changelog.index("## [0.4.0]"):]
+    release = release[:release.index("\n## [", 1)]
+    match = _COUNT.search(" ".join(release.split()))
     if match is None:
-        return ["the changelog's [Unreleased] section gives no count of reachable entries"]
+        return ["the changelog's [0.4.0] section gives no count of reachable entries"]
     reachable = _reachable(registry).values()
     n_open = sum(a.get("resolution_status") == "open" for a in reachable)
     said = tuple(int(x) for x in match.groups())
@@ -244,4 +244,4 @@ def test_a_changelog_without_the_count_is_found(registry):
     text = CHANGELOG.read_text()
     stripped = _COUNT.sub("some entries are reachable", " ".join(text.split()))
     assert changelog_count_findings(stripped.replace(" ## [", "\n## ["), registry) == [
-        "the changelog's [Unreleased] section gives no count of reachable entries"]
+        "the changelog's [0.4.0] section gives no count of reachable entries"]

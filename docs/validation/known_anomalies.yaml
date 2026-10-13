@@ -8347,6 +8347,15 @@ anomalies:
       from the live `gm.params` values, exceeds 1 by more than one part in
       a million.  For an equal pair that is g; an unequal pair, which a
       calibration of one node leaves behind, gets the spectral radius.
+      The check runs once, in `compile()`: a constant written to
+      `gm.params` afterwards is not re-checked.  Compiled at k = 4000,
+      c = 150, m = 1 and dt = 0.005 (IQN-ILS, `diagnostics=True`), then
+      given k = 48000 on both nodes through `gm.params`, the pair
+      converged at each of 40 steps with no warning while its common
+      velocity grew by g = -1.25 a step (0.4.0 tree, CPU).  Only the
+      coupling report's `not_contracting` code showed it, and only
+      because that stiffness also makes one plain pass grow
+      (k*dt**2 > m).
       The numerics are unchanged, so this entry stays open.
     severity: "major"
     safety_relevance: "context_dependent"

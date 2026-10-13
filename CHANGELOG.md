@@ -42,10 +42,17 @@ checked, with the defects found and fixed before it, is in
 - **`maddening.testing`** (`EXPERIMENTAL`): `verify_node`, order of accuracy by manufactured solutions or grid refinement (`mms`), `verify_mapping`, `verify_graph_order`.
 - **`SimulationNode.static_data_deps()`** (`STABLE`): a static rebuilt when a parameter it derives from changes.
 - **`py.typed`**: MADDENING's annotations reach your type checker.
-- **Eight new or extended examples**, and a `--local` mode for the remote-simulation examples.
+- **User guide**: "Upgrading from 0.3.1" (each refusal a 0.3.1 graph meets, with its fix), "Serving the REST API on a network" and "ZeroMQ transports".
+- **Guides**: geometry-dependent mappings, moving a node's own sampling onto an edge, a node that draws random numbers, profiling, typing, verification, and algorithm pages for seven existing nodes and the explicit integrators.
+- **The glossary** gains 29 terms for 0.4.0, synced from MICROROBOTICA.
+- **Examples** of profiling, system identification, checkpoint and resume, sharding on four emulated CPU devices, FMU export, interface mapping, REST parameters and convergence diagnostics, and a `--local` mode for the remote-simulation examples.
+- Examples `advanced/calibrated_node.py` (making your own node calibratable: `params=`, `param_specs()`, `static_data_deps()`, checked with `verify_node` and fitted with `fit_lm`) and `advanced/multiple_shooting_fit.py` (`windowed_loss` and `fit_multiple_shooting` on a coupled graph); the node authoring guide explains `static_data_deps`.
+- Examples `coupling/acting_on_diagnostics_demo.py` (a coupling report's reason codes, what to change for each, and what `strict_convergence` does not check), `coupling/sparse_mapping_round_trip_demo.py` (a sparse mapping for an interface too large for a dense matrix, and a coupling group saved and reloaded), and two new stages in `advanced/fmu_export_demo.py` (a multi-clock description, and the FMUs run in FMPy). The coupling guide's "Start here" has a runnable block.
+- `maddening.examples.advanced.unstructured_sharding_demo` (`ShardedUnstructuredNode(exchange="ppermute")` on four emulated CPU devices, `exchange_traffic`, a differentiable preconditioned `sharded_cg` checked against a dense solve); `maddening.examples.cloud.streaming.09_local_webrtc_viewer` (a WebRTC stream to a browser on the same machine, no cloud, no GPU, needs GStreamer; `--self-check` runs it headless).
+- An example of the persistent compile cache (`python -m maddening.examples.advanced.compile_cache_demo`): a cold and a warm process against a temporary directory, with their compile times.
+- Example `servers/serve_with_token.py`: the bearer-token flow on a loopback port.
 - **CycloneDX SBOMs** for the base install and the `server`, `surrogates` and `usd` extras in `docs/validation/sbom/`.
 - **Registries of other projects validate**: `python -m maddening.compliance check-anomalies` accepts one `<project>_version` field (`--version-field NAME`); `ResolutionStatus.PARTIALLY_RESOLVED`.
-- **Guides**: geometry-dependent mappings, moving a node's own sampling onto an edge, a node that draws random numbers, profiling, typing, verification, and algorithm pages for seven existing nodes and the explicit integrators.
 - **`scripts/report_glossary_coverage.py`**, for contributors: lists, page by page, the glossary terms a documentation page uses without a tooltip. It is a report and always exits 0.
 
 ### Changed
@@ -77,6 +84,7 @@ checked, with the defects found and fixed before it, is in
 - `calibrate` and `tune_coupling_params`: use `sysid.fit`; removed in 0.5.0.
 - `solver="fori"`: removed in the next minor release.
 - `maddening.core.simulation.checkpoint.download_and_load_state`: use `maddening.cloud.download_and_load_state`.
+- `StabilityLevel.PROVISIONAL` (use `EVOLVING`) and `StabilityLevel.INTERNAL` (leave the surface untagged, with a private name) are deprecated. Both still work.
 
 ### Removed
 
@@ -172,6 +180,7 @@ One line per defect that a released version had, with its registry entry and the
 ### Verification
 
 - How 0.4.0 was verified (the claims inventories, the property, differential and metamorphic tests, the compliance gates and the CI lanes) is in the development record, with every audit round.
+- The multi-GPU runner's unstructured test node keeps its static arrays, so the `forward` goal's wrapper column times the wrapper rather than a host re-partition on every step (about 25 ns a cell); the 2026-10-12 hardware session's results (4x RTX PRO 6000, all six checklist items closed) are under `benchmarks/results/multigpu/2026-10-12_rtxpro6000/`.
 
 ### Security
 

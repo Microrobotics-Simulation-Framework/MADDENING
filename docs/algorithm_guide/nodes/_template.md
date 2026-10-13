@@ -5,7 +5,7 @@ bibliography: ../../bibliography.bib
 # [Node Name]
 
 **Module**: `maddening.nodes.[module]`
-**Stability**: [experimental | provisional | stable | deprecated]
+**Stability**: [experimental | evolving | stable | deprecated]
 **Algorithm ID**: `MADD-NODE-[XXX]`
 **Version**: [semantic version of this algorithm implementation]
 

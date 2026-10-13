@@ -1163,7 +1163,8 @@ def build_model_description(
         unpacked letter by letter.
     include_evolving : bool, default False
         If ``True``, also include surfaces tagged
-        ``@stability(EVOLVING)`` or ``PROVISIONAL``.  Default keeps
+        ``@stability(EVOLVING)`` (or ``PROVISIONAL``, its deprecated
+        synonym).  Default keeps
         the FMU's public surface minimal — only ``STABLE``-tagged
         sources/sinks contribute.  The filter is by node, and applies to a
         node's outputs, its parameters and the external inputs that target

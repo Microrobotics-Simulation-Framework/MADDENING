@@ -16,18 +16,24 @@ from typing import Optional
 class StabilityLevel(Enum):
     """API stability classification for nodes and public surfaces.
 
-    Levels (what each promises, and how a promise is withdrawn, is
-    ``docs/developer_guide/deprecation_policy.md``):
+    The four levels (what each promises, and how a promise is withdrawn,
+    is ``docs/developer_guide/deprecation_policy.md``):
 
     - ``STABLE``: locked at v1.0.0; backwards-incompatible changes require
       a major version bump.
     - ``EVOLVING``: settled wire format / signature, but additions are
       possible without breaking existing callers.
-    - ``PROVISIONAL``: synonym for ``EVOLVING`` retained for back-compat
-      with pre-v0.3.0 tagged surfaces.
     - ``EXPERIMENTAL``: may break in any minor release. Opt-in only.
-    - ``INTERNAL``: not part of the public API. Implementation detail.
     - ``DEPRECATED``: scheduled for removal in a future release.
+
+    Two members are DEPRECATED since 0.4.0.  Both shipped in earlier
+    releases, so they stay and keep working; tag nothing new with them:
+
+    - ``PROVISIONAL``: a synonym for ``EVOLVING``, treated as it is
+      everywhere (the FMU export's ``include_evolving`` included).  Use
+      ``EVOLVING``.
+    - ``INTERNAL``: "not part of the public API".  Leave the surface
+      untagged and give it a private, underscored name instead.
     """
     EXPERIMENTAL = "experimental"
     PROVISIONAL = "provisional"

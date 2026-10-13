@@ -38,7 +38,7 @@ class TestStabilityDecorator:
         assert my_func._stability_level == StabilityLevel.EXPERIMENTAL
 
     def test_decorator_registers_in_registry(self):
-        @stability(StabilityLevel.PROVISIONAL)
+        @stability(StabilityLevel.EVOLVING)
         class RegisteredClass:
             pass
 
@@ -47,7 +47,7 @@ class TestStabilityDecorator:
         for name, level in _STABILITY_REGISTRY.items():
             if "RegisteredClass" in name:
                 found = True
-                assert level == StabilityLevel.PROVISIONAL
+                assert level == StabilityLevel.EVOLVING
                 break
         assert found, "RegisteredClass not found in registry"
 
@@ -67,14 +67,49 @@ class TestStabilityDecorator:
         assert GrowingClass._stability_level == StabilityLevel.EVOLVING
         assert StabilityLevel.EVOLVING.value == "evolving"
 
-    def test_internal_level_v030(self):
-        """INTERNAL was added in v0.3.0."""
-        @stability(StabilityLevel.INTERNAL)
-        class InternalClass:
+    @pytest.mark.parametrize("name, value", [("PROVISIONAL", "provisional"),
+                                             ("INTERNAL", "internal")])
+    def test_a_deprecated_level_still_tags_and_registers_a_surface(self, name, value):
+        """PROVISIONAL (0.1.0) and INTERNAL (0.3.0) shipped before 0.4.0
+        deprecated them, so code that tags with one keeps working."""
+        level = StabilityLevel[name]
+
+        @stability(level)
+        class TaggedWithADeprecatedLevel:
             pass
 
-        assert InternalClass._stability_level == StabilityLevel.INTERNAL
-        assert StabilityLevel.INTERNAL.value == "internal"
+        assert TaggedWithADeprecatedLevel._stability_level is level
+        assert level.value == value
+        key = (f"{TaggedWithADeprecatedLevel.__module__}."
+               f"{TaggedWithADeprecatedLevel.__qualname__}")
+        assert _STABILITY_REGISTRY[key] is level
+
+    def test_no_surface_in_the_package_is_tagged_with_a_deprecated_level(self):
+        """Nothing in ``src/`` passes PROVISIONAL or INTERNAL to a call
+        (``@stability``, ``register_route_stability``, ``NodeMeta``): the
+        four labels are STABLE, EVOLVING, EXPERIMENTAL and DEPRECATED.
+        Static, so it reads modules whose optional extras are absent; a
+        comparison against a deprecated level (the FMU filter treating
+        PROVISIONAL as EVOLVING) is not a call argument and stays allowed."""
+        src = Path(__file__).resolve().parents[2] / "src" / "maddening"
+        assert len(list(src.rglob("*.py"))) > 100      # the scan reads the package
+        found = deprecated_levels_passed_to_calls(src)
+        assert found == []
+
+    def test_the_scan_for_deprecated_levels_finds_each_way_of_tagging(self, tmp_path):
+        """The scan above can fail: it finds a decorator, a call and a
+        keyword, and leaves a comparison alone."""
+        (tmp_path / "tagged.py").write_text(
+            "from maddening.core.compliance.metadata import StabilityLevel, NodeMeta\n"
+            "@stability(StabilityLevel.PROVISIONAL)\n"
+            "def f(): pass\n"
+            "register_route_stability('m', 'GET /x', StabilityLevel.INTERNAL)\n"
+            "META = NodeMeta(stability=StabilityLevel.PROVISIONAL)\n"
+            "OK = level in (StabilityLevel.EVOLVING, StabilityLevel.PROVISIONAL)\n",
+            encoding="utf-8")
+        found = deprecated_levels_passed_to_calls(tmp_path)
+        assert [(line, attr) for _path, line, attr in found] == [
+            (2, "PROVISIONAL"), (4, "INTERNAL"), (5, "PROVISIONAL")]
 
     def test_v030_first_wave_tagged(self):
         """The v0.3.0 first wave of API surfaces is tagged.
@@ -186,6 +221,30 @@ def applies_stability(source: str) -> bool:
         if isinstance(func, ast.Attribute) and func.attr == "stability":
             return True
     return False
+
+
+#: The members of ``StabilityLevel`` deprecated in 0.4.0.
+DEPRECATED_LEVEL_NAMES = ("PROVISIONAL", "INTERNAL")
+
+
+def deprecated_levels_passed_to_calls(root: Path) -> list:
+    """``(path, line, member)`` for each ``StabilityLevel.PROVISIONAL`` or
+    ``StabilityLevel.INTERNAL`` passed to a call, positionally or by
+    keyword, in the ``*.py`` files under ``root``.  A decorator is a call,
+    so ``@stability(StabilityLevel.PROVISIONAL)`` is found."""
+    found = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            for value in [*node.args, *(k.value for k in node.keywords)]:
+                if (isinstance(value, ast.Attribute)
+                        and value.attr in DEPRECATED_LEVEL_NAMES
+                        and isinstance(value.value, ast.Name)
+                        and value.value.id == "StabilityLevel"):
+                    found.append((path, value.lineno, value.attr))
+    return sorted(found, key=lambda f: (str(f[0]), f[1]))
 
 
 class TestApplyStabilityDetection:

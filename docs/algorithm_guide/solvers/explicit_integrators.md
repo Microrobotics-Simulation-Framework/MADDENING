@@ -5,7 +5,7 @@ bibliography: ../../bibliography.bib
 # Explicit ODE Integrators
 
 **Module**: `maddening.core.simulation.integrators`
-**Stability**: provisional
+**Stability**: evolving
 **Algorithm ID**: `MADD-ALG-INT-001`
 **Version**: 1.1.0
 

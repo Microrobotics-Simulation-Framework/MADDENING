@@ -941,7 +941,7 @@ USD by `tests/usd/test_usd_a_node_that_draws_random_numbers.py`).
 | `jax.grad` | The derivative at a fixed key (below), plain and through a coupling group under `solver="ift"`. |
 | `maddening.sysid` | A record holds the key data of every sample, so `windowed_loss` replays the recorded draws and is exactly zero at the parameters that made the record. The seed is not a leaf of `gm.params`. |
 | `verify_node` | The battery accepts the key leaf as it draws it (below). |
-| FMU export | The key data is a `UInt32` output and the FMU state resumes the stream. Only a `STABLE` node enters an FMU (or an `EVOLVING` / `PROVISIONAL` one with `include_evolving=True`); the seed is not an FMU parameter. |
+| FMU export | The key data is a `UInt32` output and the FMU state resumes the stream. Only a `STABLE` node enters an FMU (or an `EVOLVING` one with `include_evolving=True`); the seed is not an FMU parameter. |
 | REST | `GET /graph/state/{node}` returns the key data as a list of integers; a `PUT` of it and the checkpoint routes resume the stream; a write that is not key data is a 400 naming the field. |
 
 ### Three behaviours that surprise

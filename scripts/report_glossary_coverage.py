@@ -3,7 +3,10 @@
 
 A page links a glossary term with the MyST role ``{term}`Name```, or
 ``{term}`shown text <Name>``` where the text differs, and the docs site
-pops the term's definition up on hover.  This script lists, for every
+pops the term's definition up on hover.  ``{codeterm}`` (a role of the
+docs site, ``docs/_ext/codeterm.py`` in MICROROBOTICA) links the same way
+and keeps a code-spelled name in code style; it counts as ``{term}``
+does.  This script lists, for every
 Markdown page under ``docs/``, each glossary term whose *first* occurrence
 on the page is plain prose rather than such a role.  It prints the page,
 the line and the term.
@@ -102,6 +105,9 @@ INLINE = re.compile(
 )
 
 ROLE_TARGET = re.compile(r"^(?P<text>.*?)\s*<(?P<target>[^<>]+)>$", re.S)
+
+#: The roles that link a glossary term.
+TERM_ROLES = ("term", "std:term", "codeterm")
 
 
 @dataclass(frozen=True)
@@ -344,7 +350,7 @@ def scan_page(path: Path, terms: list, label: str = None) -> PageReport:
         masked = text
         for m in INLINE.finditer(text):
             masked = _blank(masked, m.start(), m.end())
-            if m.group("role") and m.group("rname") in ("term", "std:term"):
+            if m.group("role") and m.group("rname") in TERM_ROLES:
                 body = " ".join(m.group("rbody").split())
                 target = ROLE_TARGET.match(body)
                 name = target.group("target") if target else body
@@ -456,7 +462,7 @@ def main(argv=None) -> int:
                 if 0 < c.line <= len(source):
                     print(f"    | {_excerpt(source[c.line - 1], c.column, len(c.text))}")
         for line, name in report.unknown_roles:
-            print(f"{report.page}:{line}: {{term}} role names no glossary term: {name!r}")
+            print(f"{report.page}:{line}: a term role names no glossary term: {name!r}")
 
     if args.by_term:
         print()

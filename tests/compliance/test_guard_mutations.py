@@ -539,7 +539,12 @@ MUTANTS: tuple[Mutant, ...] = (
        "JAX's cache object left pointing at the test's directory"),
     _M("T2", TC, "    settings, enabled = _snapshot()\n    jax_cache.reset_cache()\n    try:",
        "    settings, enabled = _snapshot()\n    try:", CC,
-       "enable(tmp) silently keeps writing to the outer cache"),
+       "enable(tmp) silently keeps writing to the outer cache",
+       equivalent="defence in depth: compile_cache.enable() drops a cache JAX opened elsewhere "
+                  "itself (MADD-ANO-295), so a test's enable(tmp) writes to tmp without the "
+                  "fixture's reset on entry; test_a_move_after_the_cache_opened_writes_to_the_new_"
+                  "directory and test_graph_compile_moves_an_already_open_cache_to_the_variable "
+                  "hold that in the library"),
     _M("T3", TC, "            jax.config.update(key, value)", "            pass", CC,
        "the three JAX settings left changed"),
     # --- W: the slow-only rule, tests/compliance/test_slow_only_rule.py -------

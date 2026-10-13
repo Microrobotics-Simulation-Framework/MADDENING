@@ -91,6 +91,18 @@ radius = 1  # the spectral radius of the halo
     assert found == [("Shard", 4)]
 
 
+def test_a_codeterm_role_covers_its_term_as_a_term_role_does(report, glossary, tmp_path):
+    """``{codeterm}`` links a term in code style on the docs site: the bare
+    use after it is covered, and a target outside the glossary is listed."""
+    found, result = _found(report, glossary, tmp_path, """\
+Each {codeterm}`Halo` is refreshed; the halo of a shard is
+read, and a {codeterm}`spec <Nope>` names nothing.
+""")
+    assert found == [("Shard", 1)]
+    assert result.unknown_roles == [(2, "Nope")]
+    assert "Halo" in result.used
+
+
 def test_the_first_occurrence_decides_and_plurals_and_line_breaks_match(
     report, glossary, tmp_path
 ):

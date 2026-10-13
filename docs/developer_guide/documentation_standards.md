@@ -271,11 +271,12 @@ API stability levels:
 | Level | Meaning | SemVer Guarantee |
 |-------|---------|-----------------|
 | **stable** | Breaking changes only in major versions | Full |
-| **provisional** | May change in minor versions with deprecation warning | One minor version notice |
+| **evolving** | May change in minor versions with deprecation warning | One minor version notice |
 | **experimental** | May change without notice | None |
-| **deprecated** | Scheduled for removal; the replacement is named in the docstring | Removed when the level it held allows: a `stable` surface in a major release, after two minor releases of notice; an `evolving` or `provisional` one in a minor release, after one; an `experimental` one in any minor release |
+| **deprecated** | Scheduled for removal; the replacement is named in the docstring | Removed when the level it held allows: a `stable` surface in a major release, after two minor releases of notice; an `evolving` one in a minor release, after one; an `experimental` one in any minor release |
 
 The table is a summary; [the deprecation policy](deprecation_policy.md) is the
-rule, and also covers `evolving` and `internal`.  So a deprecated surface is not
-always kept until the next major release: the CHANGELOG schedules
-`calibrate` and `tune_coupling_params` for removal in 0.5.0, a minor release.
+rule, and also covers the two deprecated levels, `PROVISIONAL` and
+`INTERNAL`.  A deprecated surface is not always kept until the next major
+release: the CHANGELOG schedules `calibrate` and `tune_coupling_params` for
+removal in 0.5.0, a minor release.

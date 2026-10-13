@@ -406,7 +406,7 @@ def test_ci_runs_the_budget_on_the_default_lane():
     assert 'MADDENING_TEST_JAX_TIMING: "1"' in ci
     assert "--cache-mode" in ci
     # ...one cache per shard, so shard i of a PR reads shard i of the base
-    assert re.search(r"key=jaxcc-v1-.*-shard\$\{\{ matrix\.shard \}\}of6", ci)
+    assert re.search(r"key=jaxcc-v2-.*-shard\$\{\{ matrix\.shard \}\}of6", ci)
     # ...and without a size cap: with one, every cache write rescans the
     # whole directory, quadratic over a cold run (measured: a lane past
     # 95 minutes).

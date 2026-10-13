@@ -152,6 +152,7 @@ PR = "scripts/prune_jax_cache.py"
 CI = ".github/workflows/ci.yml"
 SL = ".github/workflows/slow-tests.yml"
 SWT = "tests/slow_lane_weights.json"
+PWT = "tests/per_push_weights.json"
 SLW = "scripts/slow_lane_weights.py"
 PP = "pyproject.toml"
 AL = "tests/duration_allowlist.txt"
@@ -283,22 +284,11 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("S1", SH, 'return int(hashlib.sha256(path.encode("utf-8")).hexdigest(), 16) % n + 1',
        'return int(hashlib.sha256(path.encode("utf-8")).hexdigest(), 16) % n', SHARD,
        "0-based shards: every file hashing to 0 runs nowhere"),
-    _M("S2", SH, "    if n == PINS_FOR and path in PINS:", "    if False:", SHARD, "pins ignored"),
-    _M("S3", SH, "    if n == PINS_FOR and path in PINS:", "    if path in PINS:", SHARD,
-       "pins leak into other job counts"),
     _M("S4", SH, "(keep if self.shard_of(path) == self.shard else drop).append(item)", "keep.append(item)",
        SHARD, "every shard runs the whole suite"),
     _M("S5", SH, 'path = item.nodeid.split("::", 1)[0]', "path = item.nodeid", SHARD,
        "a file's tests split across shards (hashed by node id)"),
-    _M("S6", SH, "        if not 1 <= pinned <= PINS_FOR:", "        if False:", SHARD,
-       "a pin to a shard that does not exist is accepted at registration",
-       equivalent="defence in depth: test_every_pin_names_a_real_file_and_a_real_shard checks every "
-                  "shipped pin directly, so an out-of-range pin is still caught (mutant S8)"),
     _M("S7", SH, "    if not 1 <= i <= n:", "    if not 0 <= i <= n:", SHARD, "MADDENING_TEST_SHARD=0/4 accepted"),
-    _M("S8", SH, '"tests/property/test_differential_coupling_topologies.py": 3,',
-       '"tests/property/test_differential_coupling_topologies.py": 7,', SHARD, "a file pinned to shard 7 of 6 runs nowhere"),
-    _M("S9", SH, '"tests/property/test_differential_coupling_topologies.py": 3,',
-       '"tests/property/test_differential_coupling_topologies_renamed.py": 3,', SHARD, "a pin naming a renamed file"),
     _M("S10", SH, 'return int(hashlib.sha256(path.encode("utf-8")).hexdigest(), 16) % n + 1',
        'return int(hashlib.md5(path.encode("utf-8")).hexdigest(), 16) % n + 1', SHARD,
        "every file re-dealt (every saved base cache is for the wrong files)"),
@@ -310,20 +300,23 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("S13", SH, "    return dealt[path] if path in dealt else _by_hash(path, n)", "    return _by_hash(path, n)",
        SHARD, "the weighted split ignores its table: the slow lane is back on the hash split, one shard at "
               "its timeout"),
-    _M("S14", SH, "    return dealt[path] if path in dealt else _by_hash(path, n)",
-       "    return dealt[path] if path in dealt else shard_of(path, n)", SHARD,
-       "the per-push pins leak into the weighted split"),
     _M("S15", SH, "        lightest = min(range(n), key=lambda k: (load[k], k))", "        lightest = 0", SHARD,
        "every measured file dealt to shard 1"),
     _M("S16", SH, "sorted(weights.items(), key=lambda kv: (-kv[1], kv[0])):",
        "sorted(weights.items(), key=lambda kv: (kv[1], kv[0])):", SHARD,
        "shortest first: the 48-minute file lands last, on top of a full shard"),
-    _M("S17", SH, "    return i, n, bool(colon)", "    return i, n, False", SHARD,
+    _M("S17", SH, "    return i, n, plan if colon else None", "    return i, n, None", SHARD,
        "the ':weighted' suffix is parsed and ignored"),
-    _M("S18", SH, "    if colon and plan != WEIGHTED:", "    if False:", SHARD,
-       "any suffix is taken for ':weighted', a misspelt one included"),
-    _M("S19", SH, "    weights = load_weights() if weighted else None", "    weights = None", SHARD,
+    _M("S18", SH, "    if colon and plan not in TABLES:", "    if False:", SHARD,
+       "any suffix is taken for a weighted split, a misspelt one included"),
+    _M("S19", SH, "    weights = load_weights(TABLES[plan]) if plan else None", "    weights = None", SHARD,
        "a weighted spec registers the hash split"),
+    _M("S24", SH, "    weights = load_weights(TABLES[plan]) if plan else None",
+       "    weights = load_weights() if plan else None", SHARD,
+       "the per-push suffix deals the slow lane's table: every shard's cache was built from other files"),
+    _M("S25", SH, "TABLES = {WEIGHTED: WEIGHTS_FILE, WEIGHTED_PUSH: PER_PUSH_WEIGHTS_FILE}",
+       "TABLES = {WEIGHTED: WEIGHTS_FILE, WEIGHTED_PUSH: WEIGHTS_FILE}", SHARD,
+       "both suffixes read the slow lane's table"),
     _M("S20", SH, "        if self.weighted:\n            return weighted_shard_of(path, self.of, self._dealt)\n",
        "", SHARD, "the plugin holds the dealt table and never reads it"),
     _M("S21", SH, "if type(v) is not int or v <= 0}", "if type(v) is not int or v < 0}", SHARD,
@@ -339,6 +332,13 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("SW2", SWT, ' "min_seconds": ', ' "min_seconds": 1000', SHARD,
        "the table claims a floor its entries are under"),
     _M("SW3", SWT, ' "runs": [', ' "runs": [], "earlier": [', SHARD, "weights with no CI run to trace them to"),
+    # --- PW: the per-push lane's table, tests/per_push_weights.json --------------
+    _M("PW1", PWT, '  "tests/compliance/test_gate_scripts.py": ',
+       '  "tests/compliance/test_gate_script.py": ', SHARD,
+       "the table's heaviest entry names a file that does not exist: its shard is five minutes lighter than dealt"),
+    _M("PW2", PWT, ' "min_seconds": ', ' "min_seconds": 1000', SHARD,
+       "the table claims a floor its entries are under"),
+    _M("PW3", PWT, ' "runs": [', ' "runs": [], "earlier": [', SHARD, "weights with no CI run to trace them to"),
     # --- G: the table's generator, scripts/slow_lane_weights.py ----------------
     _M("G1", SLW, "            slowest[path] = max(slowest[path], seconds)",
        "            slowest[path] = seconds", SHARD, "a file's weight is whichever lane was read last"),
@@ -346,6 +346,14 @@ MUTANTS: tuple[Mutant, ...] = (
        SHARD, "the first run's measurement wins over a later one"),
     _M("G3", SLW, "             if round(s) >= min_seconds and p not in gone}",
        "             if round(s) >= min_seconds}", SHARD, "a measured file that no longer exists stays in the table"),
+    _M("G5", SLW, "        merged[lane] = {path: statistics.median(times) for path, times in files.items()}",
+       "        merged[lane] = {path: max(times) for path, times in files.items()}", SHARD,
+       "one slow runner in three sets a file's weight"),
+    _M("G6", SLW, "    lanes = merge(runs, args.aggregate)", "    lanes = merge(runs)", SHARD,
+       "--aggregate median is parsed and ignored"),
+    _M("G7", SLW, '    ap.add_argument("--lane", choices=sorted(LANES), default="slow",',
+       '    ap.add_argument("--lane", choices=sorted(LANES), default="per-push",', SHARD,
+       "the generator writes the per-push table when asked for the slow lane's"),
     _M("G4", SLW, "            lanes[lane][path] += float(case.get(\"time\") or 0.0)",
        "            lanes[lane][path] = float(case.get(\"time\") or 0.0)", SHARD,
        "a file weighs what its last test took"),
@@ -374,8 +382,8 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("P6", PR, "    if len(payload) <= TIME_BYTES:\n", "    if len(payload) < TIME_BYTES:\n", PRUNE,
        "an entry holding only the compile-time header is kept"),
     # --- Y: the default lanes, .github/workflows/ci.yml -----------------------
-    _M("Y1", CI, '          MADDENING_TEST_SHARD: "${{ matrix.shard }}/6"\n        run: |',
-       '          MADDENING_TEST_SHARD: "${{ matrix.shard }}/6"\n'
+    _M("Y1", CI, '          MADDENING_TEST_SHARD: "${{ matrix.shard }}/6:weighted-push"\n        run: |',
+       '          MADDENING_TEST_SHARD: "${{ matrix.shard }}/6:weighted-push"\n'
        '          PYTEST_ADDOPTS: "--deselect tests/core"\n        run: |', CI_ALL,
        "every shard silently drops tests/core (selection moved into the step's env)"),
     _M("Y2", CI, "        if: ${{ !cancelled() && github.event_name == 'push' && steps.tests.outcome == 'success' "
@@ -387,6 +395,11 @@ MUTANTS: tuple[Mutant, ...] = (
        'case "$msg" in *"[cold-ci-off]"*) mode=cold ;; esac', CI_ALL, "a [cold-ci] request is ignored"),
     _M("Y4", CI, '-shard${{ matrix.shard }}of6" >> "$GITHUB_OUTPUT"', '" >> "$GITHUB_OUTPUT"', CI_ALL,
        "one compilation cache shared by all shards"),
+    _M("Y41", CI, "tests/_sharding\\.py|tests/per_push_weights\\.json", "tests/_sharding\\.py", CI_ALL,
+       "re-dealing the per-push shards (a new weights table) no longer forces a cold run"),
+    _M("Y42", CI, 'MADDENING_TEST_SHARD: "${{ matrix.shard }}/6:weighted-push"',
+       'MADDENING_TEST_SHARD: "${{ matrix.shard }}/6"', CI_ALL,
+       "the per-push lane splits by hash again: every shard's compile cache is for other files"),
     _M("Y5", CI, "mark\\.slow|^-", "mark\\.slowXX|^-", CI_ALL, "a slow-mark edit no longer forces a cold run"),
     _M("Y7", CI, '--pytest-arg=--tb=short \\\n            --pytest-arg=-m "--pytest-arg=slow or not slow"',
        "--pytest-arg=--tb=short", CI_ALL, "verify-hypothesis drops the slow-marked properties"),
@@ -427,7 +440,7 @@ MUTANTS: tuple[Mutant, ...] = (
                   "&& steps.prune-cache.outcome == 'success' }}",
        "if: ${{ !cancelled() && github.event_name == 'push' && steps.prune-cache.outcome == 'success' }}", CI_ALL,
        "the cache is saved even when the test step failed"),
-    _M("Y26", CI, "key=jaxcc-v1-${{ runner.os }}-$cpu-py", "key=jaxcc-v1-${{ runner.os }}-py", CI_ALL,
+    _M("Y26", CI, "key=jaxcc-v2-${{ runner.os }}-$cpu-py", "key=jaxcc-v2-${{ runner.os }}-py", CI_ALL,
        "the CPU model is dropped from the compilation-cache key",
        equivalent="the CPU model only raises the hit rate: JAX's own cache key includes the CPU's "
                   "features, so a cache from another model is never used wrongly, only missed"),

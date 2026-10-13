@@ -29,6 +29,9 @@ python -m maddening.examples.servers.api_server --port 0
 # The REST parameter rules, in-process: no port at all
 python -m maddening.examples.servers.rest_params_demo
 
+# The bearer token a network deployment needs, served on loopback
+python -m maddening.examples.servers.serve_with_token
+
 # The cloud examples' server and rendezvous checks, without a cloud account
 python -m maddening.examples.cloud.server.04_server_test --local
 python -m maddening.examples.cloud.server.05_websocket_test --local
@@ -60,10 +63,12 @@ address: `ssh -L 8000:127.0.0.1:8000 user@host` for HTTP, or
 | `coupled_spring_ball.py` | A one-way chain table -> ball -> spring with `run_scan_with_history`; saves a plot | `... coupling.coupled_spring_ball` |
 | `acceleration_comparison.py` | Plain vs Aitken vs under-relaxation vs IQN-ILS, weak and strong coupling (IQN-ILS converges where plain diverges) | `... coupling.acceleration_comparison [--steps N]` |
 | `convergence_diagnostics_demo.py` | `coupling_diagnostics()`: iterations, `converged`, starved budgets, the three norms, the spectral keys; `print_coupling_report()` on a converged and a capped group, and `strict_convergence` raising | `... coupling.convergence_diagnostics_demo [--steps N]` |
+| `acting_on_diagnostics_demo.py` | Acting on `coupling_diagnostics()`: the `reason_codes` behind a `False` `spectral_usable`, sorted into expected / configuration / worry, what to change for each; a converged step that `strict_convergence` lets through while `not_contracting` flags a pair that grows every step, and the timestep that fixes it | `... coupling.acting_on_diagnostics_demo [--parts 1,2,3,4]` |
 | `jacobi_vs_gauss_seidel.py` | Iteration modes on a 3-node cycle: same fixed point, different paths when under-converged | `... coupling.jacobi_vs_gauss_seidel [--steps N]` |
 | `subcycling_demo.py` | Mixed-timestep coupling group vs a coarse and a fine reference | `... coupling.subcycling_demo` |
 | `spatial_interpolation_demo.py` | Interface maps (nearest, linear, RBF, conservative) and two coupled rods at different resolutions | `... coupling.spatial_interpolation_demo [--heat-steps N]` |
 | `interface_mapping_demo.py` | `add_edge(mapping=)` between an 8- and a 24-cell rod: weights in `params["mappings"]`, the patch test, a `to_dict` / `from_dict` round trip that steps identically, and the refusal of a write that would move the mapped points (MADD-ANO-063) | `... coupling.interface_mapping_demo [--steps N]` |
+| `sparse_mapping_round_trip_demo.py` | `StaticSparseMapping` for an interface too large for a dense matrix (the dense one's memory measured: 80 GB of `H` per edge at 200 000 x 100 000 cells), sparse edges in a coupling group with `solver`, `acceleration` and `convergence_norm` set, and a `to_dict` / `from_dict` plus `save_state` / `load_state` round trip that steps identically | `... coupling.sparse_mapping_round_trip_demo [--cells N] [--steps N]` |
 | `flux_coupling_demo.py` | Heat-rod value coupling, flux conservation, additive inputs, IQN-IMVJ, interface norm, sub-cycling options | `... coupling.flux_coupling_demo [--sections 1,3]` |
 | `vessel_bifurcation.py` | Y-junction of three heat rods built from and written back to USD `[usd]` | `... coupling.vessel_bifurcation [--steps N] [--viz]` |
 | `vessel_bifurcation_live.py` | The same, live in a PyVista window with a heat pulse `[usd, viz3d]`, needs a display | `... coupling.vessel_bifurcation_live` |
@@ -83,8 +88,11 @@ address: `ssh -L 8000:127.0.0.1:8000 user@host` for HTTP, or
 | `profile_lbm_step.py` | `profile_graph` on a two-rod graph, saved as Perfetto JSON | `... advanced.profile_lbm_step [--n-steps N]` |
 | `profiling_demo.py` | The whole `ProfileReport` on a coupled pair: measured coupling overhead and cost per iteration, bottleneck, compile counts (checked identical on a fresh graph), a `trace=True` summary, Perfetto JSON; all output in a temporary directory | `... advanced.profiling_demo [--n-cells N] [--out-dir DIR]` |
 | `sysid_demo.py` | Calibration: `fim` finds the spring's scale degeneracy, `fit` holds it (`excited_rank`, `hold_declined`), `fit_lm` recovers k and c under a `ParamSpec` freeze and a mask, Cramér–Rao bounds, `params_table()` before and after | `... advanced.sysid_demo [--samples N] [--n-iter N]` |
+| `calibrated_node.py` | A node of your own made calibratable: `update(..., *, params=None)`, `param_specs()` and `static_data_deps()` on a 40-line thermal node; `nodes_without_params()` empty, `verify_node` passing, `compile()` refusing a trainable constant behind a baked table, `fit_lm` recovering two constants within four Cramér–Rao sigmas `[verify]` | `... advanced.calibrated_node [--samples N] [--max-examples N]` |
+| `multiple_shooting_fit.py` | `windowed_loss` and `fit_multiple_shooting` on a coupled pair (two masses joined by one spring, in a coupling group): the loss is zero at the truth teacher-forced and under multiple shooting; on a noisy record teacher forcing misses the far mass by 9%, multiple shooting recovers it within 0.4% and pulls the window starts towards the clean trajectory | `... advanced.multiple_shooting_fit [--n-iter N]` |
 | `sharding_demo.py` | `ShardedStencilNode(HeatNode)` over four emulated CPU devices (sets `XLA_FLAGS` itself): `print_graph()` shows the wrapper, `memory_estimate()` a quarter per device, the result matches the unsharded rod; CPU emulation, not a speed test | `... advanced.sharding_demo [--n-cells N] [--steps N]` |
-| `fmu_export_demo.py` | FMI 3.0 export: `build_model_description` (tunable and fixed parameters), `build_fmu_binary` + `write_fmu` into a temporary directory, FMPy's `validate_fmu`, and the sidecar driven in-process; stages needing a C compiler or FMPy skip with the reason | `... advanced.fmu_export_demo [--steps N]` |
+| `unstructured_sharding_demo.py` | `ShardedUnstructuredNode(exchange="ppermute")` over four emulated CPU devices: a diffusion node on an irregular graph matches the unsharded node and the `all_to_all` transport, `exchange_traffic` for a compact and a random partition, `sharded_cg(differentiable=True)` with a Jacobi preconditioner and its gradient against a dense solve; why `static_data` must return the same arrays | `... advanced.unstructured_sharding_demo [--n-cells N] [--steps N]` |
+| `fmu_export_demo.py` | FMI 3.0 export: `build_model_description` (tunable and fixed parameters), `build_fmu_binary` + `write_fmu` into a temporary directory, FMPy's `validate_fmu`, the sidecar driven in-process, a multi-rate graph described with `multi_clock=True` (one clock per rate), and both FMUs run in FMPy's `simulate_fmu` against an `FmuTcpBridge` on 127.0.0.1, matching `run_scan`; stages needing a C compiler or FMPy skip with the reason | `... advanced.fmu_export_demo [--steps N]` |
 | `checkpoint_resume_demo.py` | `save_state` / `load_state`: a coupled run resumed in a fresh graph is bitwise identical, `_meta` warm starts and calibrated params included; a cold restart is not | `... advanced.checkpoint_resume_demo [--warmup N] [--steps N]` |
 | `live_stage_bouncing_ball_demo.py` | `LiveStage` writing a time-sampled USD stage `[usd]` | `... advanced.live_stage_bouncing_ball_demo [--steps N]` |
 
@@ -95,6 +103,7 @@ address: `ssh -L 8000:127.0.0.1:8000 user@host` for HTTP, or
 | `remote_viz_client.py` + `remote_sim_server.py` | A simulation streaming state over ZMQ to a viewer (terminal, plain text or matplotlib) `[network]` | `... servers.remote_viz_client --local` |
 | `api_server.py` | The REST/WebSocket API (`SimulationServer`), docs at `/docs` `[api]` | `... servers.api_server [--port 0]` |
 | `rest_params_demo.py` | `PUT /graph/params/{node}` in-process (FastAPI `TestClient`, no port): a write honoured on the next step without a recompile, refusals with the reason (a `ParamSpec` bound, a value the constructor rejects), an initial condition applied at reset `[api]` | `... servers.rest_params_demo [--steps N]` |
+| `serve_with_token.py` | The API as a network deployment serves it: uvicorn in this process on a loopback port, told `bind_host="0.0.0.0"` so the bearer token is on; a request refused without the token and served with it, `checkpoint_root`, and a generated token logged once `[api]` | `... servers.serve_with_token` |
 | `interactive_graph_server.py` | Graph topology page at `/viz/graph` `[api]` | `... servers.interactive_graph_server [--port 0]` |
 | `launch_app.py` | Interactive demo app at `/viz/app`; opens a browser `[api]` | `... servers.launch_app [--port 0] [--no-browser]` |
 | `launch_server_render.py` | Server-side matplotlib frames streamed to `/viz/render` `[api, viz]` | `... servers.launch_server_render [--port 0]` |
@@ -112,4 +121,6 @@ sides (`MADDENING_TRANSPORT_TOKEN`, falling back to `MADDENING_API_TOKEN`).
 Scripts that provision billable VMs on RunPod, Lambda, AWS or GCP; see
 [`cloud/README.md`](cloud/README.md).  Three of them have a `--local` mode
 (above) that runs their payload on this machine, and
-`cloud/streaming/08_subscribe_lbm_velocity.py` runs entirely locally.
+`cloud/streaming/08_subscribe_lbm_velocity.py` runs entirely locally, as does
+`cloud/streaming/09_local_webrtc_viewer.py` (a WebRTC stream to a browser on
+this machine; it needs GStreamer, and `--self-check` runs it headless).

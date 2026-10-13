@@ -20264,10 +20264,15 @@ anomalies:
       first STUN URL, every TURN URL with credentials).  Verified by a
       GStreamer WebRTC peer that signals as the browser client does and
       decodes the frames, on CPU in a network-less container (CI job
-      `test-streaming`).  What remains untested: a GPU encoder (the encoder
-      is x264enc), a real browser, and NAT traversal -- on a cloud host the
-      media travels over UDP, which a provider may not expose, so a viewer
-      outside its network needs a reachable TURN server.  Frames are let
+      `test-streaming`).  The stream encodes in software (`x264enc`) on
+      every host; it was tested from a GPU host, with the simulation on
+      CUDA, on 2026-10-12.  The same day it was viewed over the internet,
+      from a four-GPU cloud host to a laptop, through a TURN relay over TCP
+      carried by an SSH tunnel, both by a scripted viewer and in a real
+      browser.  What remains untested: media over UDP across a provider's
+      network with no relay -- a provider may not expose UDP (the one used
+      on 2026-10-12 did not), so a viewer outside its network needs a
+      reachable TURN server.  Frames are let
       into a viewer's pipeline only once its answer has been applied: a
       frame that reached `webrtcbin` before the offer was applied made it
       answer with an inactive m-line (ICE connected, DTLS never did, no
@@ -20517,4 +20522,396 @@ anomalies:
       - "tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_float32_verdict_changes_at_the_stated_cutoff"
       - "tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_report_carries_the_gram_product_and_decides_nothing_from_it"
       - "tests/core/test_sysid_fim_reads_the_jacobian.py::test_the_x64_rerun_agrees_with_float32_on_the_audited_record"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-290"
+    title: "LBMNode and LBMPipeNode formed their lattice products at JAX's default matmul precision: on an NVIDIA GPU the products ran at reduced precision, and the LBM gradients of the multi-GPU stencil check were off by 1.6e-3 relative"
+    description: >
+      `LBMNode` and `LBMPipeNode` form four quantities of each step as
+      float32 matrix products whose inner dimension is the lattice's: the
+      equilibrium's `e . u` (`velocity @ e.T`, inner size 2 or 3), the
+      momentum `sum_q f_q e_q` (`f @ e`, inner size 9 or 19), Guo forcing's
+      `e . u`, and `LBMPipeNode`'s D3Q7 tracer equilibrium: three products
+      in `lbm.py`, four in `lbm_pipe.py`.  An `@` takes JAX's global
+      `jax_default_matmul_precision`, which on an NVIDIA GPU runs a float32
+      matrix-matrix product at reduced precision.  Measured on an RTX A2000
+      (Ampere, jax 0.11.2) against float64: a `(1e5, 3) @ (3, 19)` product
+      was off by 3.4e-4 relative at the default and by 5.9e-8 at `highest`,
+      a `(1e5, 2) @ (2, 9)` one by 2.9e-4 against 3.6e-8; vector dot
+      products and matrix-vector products were identical at both settings,
+      so the class is small matrix-matrix products.  On four RTX PRO 6000
+      Blackwell GPUs (jax 0.11.2), the multi-GPU runner's `stencil` goal (a
+      D2Q9 `LBMNode` on 316 x 320 = 101,120 cells, sharded four ways on four
+      meshes and compared with the unsharded node) failed 8 of its 356
+      checks at the default precision, every one an LBM gradient:
+      d loss / d initial f differed from the unsharded node's by 1.6e-3
+      relative where the limit is 1e-5, and d loss / d viscosity by 4.7e-5
+      to 5.0e-5.  Nothing warned.  The CPU backend is unaffected: XLA's CPU
+      backend computes these products in full float32 whatever precision is
+      asked.  No release pinned a precision on these products or set the
+      global default: `git show <tag>:src/maddening/nodes/lbm.py` and
+      `lbm_pipe.py` hold the same three and four `@` products, and no
+      `precision` argument or `jax_default_matmul_precision` setting in the
+      package, at v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1.  Resolved in
+      0.4.0: each product is
+      `jnp.matmul(a, b, precision=jax.lax.Precision.HIGHEST)`, so it no
+      longer depends on the global setting.  On the same four GPUs at the
+      default setting the stencil goal then passes 356 of 356, its LBM
+      gradients at 2.0e-6 to 2.1e-6 (initial f) and 0.9e-6 to 1.4e-6
+      (viscosity), equal to a run with the global setting at `highest`, and
+      at no measured cost in speed (0.395 ms per sharded step against 0.386
+      at `highest`).  On CPU the patched step is bit-identical to the
+      unpatched one (D2Q9 and D3Q19).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, so never `minor`: the step and its gradient
+      run to completion with finite values and no warning, and a gradient
+      off by 1.6e-3 relative misleads an optimiser or a parameter fit far
+      beyond the tolerance a user sets for float32 (the stencil check's
+      limit is 1e-5).  Not `critical`: it needs an NVIDIA GPU at the
+      default matmul precision, and the forward state is off by the
+      rounding of a reduced-precision product (3.4e-4 relative per product
+      in the measurement), not by a different model.  `context_dependent`
+      because whether an LBM result or its gradient feeds a decision is the
+      program's choice.
+    affected_components:
+      - "maddening.nodes.lbm.LBMNode"
+      - "maddening.nodes.lbm_pipe.LBMPipeNode"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      On releases before 0.4.0, set `JAX_DEFAULT_MATMUL_PRECISION=highest`
+      in the environment (or call
+      `jax.config.update("jax_default_matmul_precision", "highest")` before
+      building the graph), or run the LBM nodes on CPU.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Other float32 matrix-matrix products a graph runs on an NVIDIA GPU
+      still take the global setting, among them the MLP and FNO surrogates
+      and a user's own nodes; the user guide recommends
+      `jax_default_matmul_precision=highest` for them.  The guard holds
+      `lbm.py` and `lbm_pipe.py` only, and a CPU test cannot measure the
+      reduced precision itself: it pins the cause (every product of the
+      two nodes' steps and gradients carries `Precision.HIGHEST`).
+    verification:
+      - "tests/nodes/test_lbm_matmul_precision.py::test_no_matmul_operator_remains_in_the_lbm_sources"
+      - "tests/nodes/test_lbm_matmul_precision.py::test_every_matrix_product_call_in_the_lbm_sources_pins_highest"
+      - "tests/nodes/test_lbm_matmul_precision.py::test_the_scan_finds_the_lattice_products_it_guards"
+      - "tests/nodes/test_lbm_matmul_precision.py::test_every_dot_in_the_traced_lbm_step_and_its_gradient_is_highest"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-291"
+    title: "A graph's programs formed their float32 matrix products at JAX's default matmul precision: on an NVIDIA GPU an interface mapping on a multi-component field, IQN's least-squares Gram matrix and the FNO surrogate's layers ran at reduced precision, off by up to about 4e-4 relative"
+    description: >
+      No program the library built set a matmul precision: the compiled
+      step, the scans of `run_scan`, `run_scan_with_history`, `run_sweep`
+      and `run_adaptive_scan`, `run_adaptive`'s stepper and the derivatives
+      taken through them all traced each float32 matrix product at JAX's
+      global `jax_default_matmul_precision`, which on an NVIDIA GPU runs a
+      float32 matrix-matrix product at reduced precision.  Measured on an
+      RTX A2000, relative error against float64 at the default and at
+      `highest`: `H @ field` for an interface mapping applied to a
+      3-component field, 2.5e-4 against 6.5e-7; `U.T @ JU` of shape
+      (1e5, 8), 3.0e-4 against 4.9e-7; `w @ cells` of shapes
+      (2, 3) @ (3, 1e5), 4.0e-4 against 7.3e-8; `J.T @ J` of shape
+      (2e4, 12), 9.0e-6 against 1.1e-7.  Vector-vector and matrix-vector
+      products, and anything in float64, were the same at both settings,
+      so the class is float32 matrix-matrix products.  Nothing warned,
+      and XLA's CPU backend computes every float32 product in full
+      whatever is asked, so no CPU run could show it.  In 0.1.0 to 0.3.1
+      the products of this class a graph's program formed were
+      `InterfaceMapping.transform` (`H @ source_values` and
+      `P @ source_values`, a matrix product when the field has more than
+      one component), IQN-ILS's least-squares Gram matrix
+      (`V_masked.T @ V_masked` in `iqn_ils_update`) and the FNO
+      surrogate's lifting, pointwise and projection layers and spectral
+      `einsum`s; `git show <tag>:<file>` holds the same products, and no
+      `precision` argument or `jax_default_matmul_precision` setting in
+      the package, at v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1.  The
+      lattice Boltzmann nodes' products are MADD-ANO-290.  Resolved in
+      0.4.0 by one mechanism at the entry points: `GraphManager`'s step
+      builders return a step whose body is traced under
+      `jax.default_matmul_precision(gm.matmul_precision)`, `"highest"`
+      unless set, so every program built around the step (and a step a
+      caller traces under their own `jax.jit` or `jax.grad`) traces its
+      products at it; the coupling group's implicit-function rule, which
+      JAX traces only when a derivative is taken, captures the precision in
+      force at its call; and the sysid fitters, `windowed_loss`, `fim` and
+      `fim_core` trace their own programs at the graph's setting (`fim`
+      and `fim_core` take a `matmul_precision=` keyword).  `None` inherits
+      JAX's setting (EXPERIMENTAL).  On CPU the results are bit-identical
+      to 0.4.0 before the change, on jax 0.10.2 and 0.11.2.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, so never `minor`: the step, its report and its
+      gradient run to completion with finite values and no warning, off by
+      the rounding of a reduced-precision product (up to about 4e-4
+      relative per product in the measurement) where a float32 user
+      expects about 1e-7, and an error of that size in a coupled exchange
+      or a gradient can move a converged state or a fit beyond the
+      tolerance the user set.  Not `critical`: it needs an NVIDIA GPU at
+      JAX's default setting and a matrix-matrix product (a scalar field's
+      mapping is a matrix-vector product and is unaffected).
+      `context_dependent` because whether such a result feeds a decision
+      is the program's choice.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager"
+      - "maddening.core.coupling.interface_mapping"
+      - "maddening.core.coupling.acceleration.iqn_ils_update"
+      - "maddening.surrogates.architectures.fno"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      On releases before 0.4.0, set `JAX_DEFAULT_MATMUL_PRECISION=highest`
+      in the environment (or call
+      `jax.config.update("jax_default_matmul_precision", "highest")`)
+      before the first JAX call, or run on CPU.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Products formed outside a program the library builds still take
+      JAX's setting: your own code around a graph, a surrogate's training
+      loop (`maddening.surrogates`), the `maddening.testing` helpers that
+      step a node on its own, and work a node does eagerly at
+      construction; set `JAX_DEFAULT_MATMUL_PRECISION=highest` for them.
+      Two kinds of product are traced outside the step's context: the body
+      of a third-party primitive that JAX traces when the program is
+      compiled (lineax's GMRES, in the coupling group's default adjoint,
+      forms one matrix-vector product there, which a GPU computes in full
+      at any setting), and the rule of a `jax.custom_jvp` that JAX itself
+      defines, traced when the derivative is taken (none of those the
+      graphs reach was seen to form an unpinned product); the package's
+      own custom rules are held to a classified list by a test.  With
+      `gm.matmul_precision = None` the products are at JAX's setting
+      again.  A CPU test cannot measure the reduced precision itself: the
+      tests pin the cause, the precision of every float32 product in the
+      programs each entry point lowers.
+    verification:
+      - "tests/core/test_library_programs_trace_products_at_their_matmul_precision.py::test_every_graph_entry_point_traces_its_products_at_highest"
+      - "tests/core/test_library_programs_trace_products_at_their_matmul_precision.py::test_with_none_every_graph_entry_point_inherits_jax_s_setting"
+      - "tests/core/test_library_programs_trace_products_at_their_matmul_precision.py::test_the_coupling_bounds_trace_their_products_at_the_graph_s_setting"
+      - "tests/core/test_library_programs_trace_products_at_their_matmul_precision.py::test_every_sysid_entry_point_traces_its_products_at_highest"
+      - "tests/core/test_library_programs_trace_products_at_their_matmul_precision.py::test_a_new_matmul_precision_recompiles_every_program_of_the_graph"
+      - "tests/core/test_library_programs_trace_products_at_their_matmul_precision.py::test_on_cpu_the_pinned_programs_compute_the_same_bits"
+      - "tests/core/test_library_programs_trace_products_at_their_matmul_precision.py::test_every_custom_derivative_rule_of_the_package_is_classified"
+  - anomaly_id: "MADD-ANO-292"
+    title: "SelkiesSession.update_framebuffer_gpu drops every frame, with a warning, where cupy is not installed, and no extra or image installs it"
+    description: >
+      `update_framebuffer_gpu` first tries a zero-copy push, which raises
+      `NotImplementedError` on every call (`_push_gpu_buffer`), and then
+      copies the frame to the host with `cupy`.  Where `cupy` cannot be
+      imported it logs "Neither GstCudaMemory nor cupy available for GPU
+      buffer" at WARNING and returns: the frame is not encoded, and the
+      viewer sees nothing.  No extra of `pyproject.toml` and no file under
+      `docker/` installs `cupy`, so this is the outcome everywhere the
+      library is installed as documented.  Measured on a GPU host
+      (RTX A2000 laptop GPU, jax 0.11.2, GStreamer 1.24.2, the cloud image
+      at the tree of 0.4.0's release branch): a JAX array on the device
+      pushed through this method, 145 frames pushed, 0 decoded by the
+      viewer, 145 warnings; with `cupy` installed the same push decoded
+      20 of 20 frames.  Reproduced on CPU at the release branch's tip: with
+      no `cupy` the call warns and returns on every frame.  The path is
+      reached only by a renderer of the user's own that provides
+      `read_framebuffer_gpu` (`SelkiesRenderer` then pushes through this
+      method); no renderer MADDENING ships provides it, and neither class
+      carries a stability label.  0.4.0 has no GPU encoder: a frame that
+      does reach the session is encoded in software (`x264enc`).  The
+      method is unchanged at v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1;
+      before 0.4.0 no frame reached a viewer by any path (MADD-ANO-286).
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud: every dropped frame logs a warning, and the viewer has no
+      picture rather than a wrong one.  The defect is in the delivery of
+      rendered frames to a remote viewer; no simulated state, output, saved
+      file or reported result is affected.
+    affected_components:
+      - "maddening.cloud.selkies_session.SelkiesSession.update_framebuffer_gpu"
+      - "maddening.viz.backends.selkies_renderer.SelkiesRenderer"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Install `cupy` for the CUDA version in use and pass frames with
+      unpadded rows (MADD-ANO-293), or read the frame to the host in
+      your renderer and push it with `update_framebuffer_cpu`, which needs
+      neither.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0.  A renderer that provides `read_framebuffer_gpu`
+      streams nothing unless `cupy` is installed beside MADDENING.
+    verification: []
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-293"
+    title: "SelkiesSession.update_framebuffer_gpu ignores GPUFramebuffer.stride_bytes, so a frame with padded rows raises ValueError on every frame"
+    description: >
+      The host-copy fallback of `update_framebuffer_gpu` copies
+      `height * stride_bytes` bytes from the device and hands them to
+      `update_framebuffer_cpu` as an unpadded `width x height` frame.  Where
+      the rows are padded (`stride_bytes` larger than `width` times the
+      bytes per pixel, as a GPU framebuffer's often are) the byte count is
+      wrong, and since 0.4.0 `update_framebuffer_cpu` refuses it:
+      `ValueError: frame holds 322560 bytes; 320x240 RGBA needs 307200` on
+      every frame (stride 1344 bytes for a 320-pixel RGBA row).  Measured
+      on a GPU host with `cupy` installed (RTX A2000 laptop GPU, jax 0.11.2,
+      GStreamer 1.24.2) and reproduced on CPU at the release branch's tip
+      with a stand-in for `cupy`'s copy.  The same frame with unpadded rows
+      is accepted.  At v0.1.0 to v0.3.1 the copy was the same and the bytes
+      were pushed to the encoder as they were, with no size check; no
+      viewer received any frame before 0.4.0 (MADD-ANO-286), and what a
+      padded frame would have shown was not measured.  Reached only through
+      a renderer of the user's own that provides `read_framebuffer_gpu`,
+      and only with `cupy` installed (MADD-ANO-292).
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud: every padded frame raises `ValueError` naming both byte counts,
+      and no frame is encoded from the wrong bytes.  The defect is in the
+      delivery of rendered frames to a remote viewer; no simulated state,
+      output, saved file or reported result is affected.
+    affected_components:
+      - "maddening.cloud.selkies_session.SelkiesSession.update_framebuffer_gpu"
+      - "maddening.viz.backends.selkies_renderer.SelkiesRenderer"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Hand `update_framebuffer_gpu` a framebuffer whose rows are not padded
+      (`stride_bytes == width * 4` for RGBA), or copy the frame to the host
+      yourself, drop the padding, and push it with `update_framebuffer_cpu`.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0.  A renderer whose GPU framebuffer has padded rows
+      cannot stream through the GPU-buffer path.
+    verification: []
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-294"
+    title: "The sharded wrappers place a node's static arrays on the devices again at every eager update() when its static_data builds new array objects on each access: correct results, about 50 times slower per step at 10^7 cells"
+    description: >
+      `ShardedStencilNode` and `ShardedUnstructuredNode` keep the per-device
+      copy of a node's sharded or partitioned static arrays in a cache keyed
+      on the identity of each array (`id(value)`, with its shape and dtype).
+      A node whose `static_data` property builds a new array on every
+      access (a `StaticArray(np.ones(n), ...)` written inside the property)
+      hands back a different object each time, so the cache misses at every
+      public `update()`: the unstructured wrapper copies each partitioned
+      static to the host, gathers it through the layout and copies it back,
+      and the stencil wrapper places each sharded static on the mesh again.
+      `SimulationNode.static_data` asks for a dict that is stable across
+      calls ("build it once in `__init__`"), but nothing checks it and
+      nothing warns.  Measured on four NVIDIA RTX PRO 6000 Blackwell cards
+      (jax and jaxlib 0.11.2, commit `c0c6add8`) with the multi-GPU
+      runner's test node, which had this shape, on a 10,004,569-cell mesh
+      under `ShardedUnstructuredNode`: 242.5 ms per eager `update()`, with
+      40 re-partitions in 20 steps, against 4.45 ms and none when the node
+      returns the same objects; the fields were identical bit for bit.
+      Reproduced on CPU at the release branch's tip on four virtual
+      devices, for both wrappers: 20 eager updates made 20 `device_put`
+      calls (and 20 `device_get` under the unstructured wrapper) where the
+      same node returning cached objects made none.  A compiled graph pays
+      it once, when the step is traced: `gm.step()` made no transfer in 20
+      steps on CPU; on the GPUs it re-partitioned twice at compile and
+      never after (7.23 ms per step; `run_scan` 0.81 ms per step).  Before
+      0.4.0 the wrappers placed the statics again at every eager `update()`
+      for every node (the stencil wrapper from 0.2.1, the unstructured
+      wrapper from 0.3.0); the cache added in 0.4.0 removes that cost only
+      for a node that returns the same objects.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      The results are the same bit for bit; only the time an eager step
+      takes changes.  No simulated state, output, saved file or reported
+      result is affected.
+    affected_components:
+      - "maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode"
+      - "maddening.cloud.multigpu.sharded_node.ShardedStencilNode"
+      - "maddening.core.node.SimulationNode.static_data"
+    affected_versions: ">=0.2.1"
+    workaround: >
+      Build the static arrays once (in `__init__`, or at the first access)
+      and return the same objects from `static_data` at every access; or
+      step the node inside a compiled graph (`gm.step()`, `run_scan`),
+      which places the statics once, when it is traced.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0.  A node that builds its static arrays anew at each
+      access pays a full re-partition at every eager sharded step, and
+      nothing warns.
+    verification: []
+  - anomaly_id: "MADD-ANO-295"
+    title: "compile_cache reported one cache directory while JAX wrote to another: enable(b) after a compile kept JAX writing to the first directory, and with MADDENING_COMPILATION_CACHE_DIR set every GraphManager.compile() re-pointed an explicit enable() or warm_cache(cache_dir=) at the variable (never released)"
+    description: >
+      `maddening.core.simulation.compile_cache` (new in 0.4.0) points JAX's
+      persistent compilation cache at a directory and reports it.  JAX
+      opens that cache once, at the first compile that finds a directory
+      set, and ignores a later change of `jax_compilation_cache_dir`.  Two
+      routes made the module report a directory JAX was not using.  (A)
+      `enable(b)` after the process had compiled with directory `a`
+      returned `b` and `enabled_dir()` said `b`, while JAX kept writing to
+      `a` (measured: 2 entries in `a`, 0 in `b`).  (B) With
+      `MADDENING_COMPILATION_CACHE_DIR=a` set, the `enable_from_env()` that
+      every `GraphManager.compile()` calls re-read the variable and
+      re-pointed the setting and the module's record at `a`, over an
+      explicit `enable(b)` or `warm_cache(..., cache_dir=b)`.  Where the
+      entries then went depended on whether an eager operation had
+      compiled in between: with one (a `HeatNode` constructor's), JAX had
+      already opened `b`, so `warm_cache` returned `cache_dir == b`,
+      `enabled_dir()` said `a`, and the 5 entries were in `b`; without
+      one, they went to `a`, so a script that asked for a temporary
+      directory wrote into the directory of the user's variable (a draft
+      example wrote all 7 of its entries there).  Nothing warned.  Resolved
+      before release: an explicit directory wins over the variable
+      (`enable_from_env()` changes nothing once a directory is enabled, and
+      `enable()` / `warm_cache()` without a directory keep the one already
+      enabled); `enable()` drops JAX's open cache with the public
+      `jax.experimental.compilation_cache.compilation_cache.reset_cache`
+      when it moves the directory, so the next compile opens the new one
+      (on a JAX without that call the move is refused with a
+      `RuntimeError`); `enabled_dir()` reads where JAX's cache actually is
+      and returns `None` rather than a directory JAX is not using;
+      `warm_cache` raises if the cache was re-pointed during the warm-up;
+      the directory is made absolute; and a `min_compile_time_secs` passed
+      for the directory already enabled is applied (it was ignored).
+      Measured on jax 0.10.2, 0.11.0 and 0.11.2.
+    severity: "major"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      A silent wrong report, so not `minor`: the module named a directory
+      that did not hold the entries, and a script that asked for a
+      temporary directory could write compiled programs into the user's
+      own cache directory.  Not safety relevant: a cache entry is keyed on
+      the XLA version, backend and traced program, so whichever directory
+      held it, a hit was the right executable and no simulation result
+      changed; what was wrong was where files went and what was reported.
+    affected_components:
+      - "maddening.core.simulation.compile_cache.enable"
+      - "maddening.core.simulation.compile_cache.enable_from_env"
+      - "maddening.core.simulation.compile_cache.enabled_dir"
+      - "maddening.core.simulation.compile_cache.warm_cache"
+      - "maddening.core.graph_manager.GraphManager.compile"
+    affected_versions: "none"
+    workaround: >
+      Not needed: never released.  (Before the fix: call
+      `compile_cache.enable(dir)` before anything compiles and leave
+      `MADDENING_COMPILATION_CACHE_DIR` unset.)
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      `enabled_dir()` reads private JAX state
+      (`jax._src.compilation_cache._cache`) to learn where the open cache
+      is; a JAX with another layout falls back to the setting, which
+      `enable()` keeps in step with the open cache, and a test fails on
+      every CI lane if the probe stops reading the running JAX.
+      Re-pointing while another thread is compiling may let that compile
+      use either directory; `enabled_dir()` then answers `None` if it is
+      not the enabled one.  Programs already compiled in the process stay
+      in memory after a move and are not written to the new directory.
+    verification:
+      - "tests/core/test_compile_cache.py::test_a_move_after_the_cache_opened_writes_to_the_new_directory"
+      - "tests/core/test_compile_cache.py::test_an_explicit_directory_wins_over_the_variable_in_graph_compile"
+      - "tests/core/test_compile_cache.py::test_an_explicit_directory_wins_after_an_eager_op_opened_the_cache"
+      - "tests/core/test_compile_cache.py::test_warm_cache_writes_to_the_directory_it_was_given_whatever_the_variable_says"
+      - "tests/core/test_compile_cache.py::test_graph_compile_moves_an_already_open_cache_to_the_variable"
+      - "tests/core/test_compile_cache.py::test_enabled_dir_never_names_a_directory_jax_is_not_using"
+      - "tests/core/test_compile_cache.py::test_a_jax_that_cannot_reopen_its_cache_refuses_the_move"
+      - "tests/core/test_compile_cache.py::test_only_compile_cache_points_jax_at_a_cache_directory"
     github_issue: null

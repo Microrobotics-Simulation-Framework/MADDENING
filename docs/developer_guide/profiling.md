@@ -5,9 +5,14 @@ faster without changing the answer?*
 
 ## `profile_graph`
 
-<!-- snippet: no-run, reason: fragment: gm is the reader's compiled graph -->
 ```python
+from maddening import GraphManager
 from maddening.core.simulation.profiler import profile_graph
+from maddening.nodes import SpringDamperNode
+
+gm = GraphManager()
+gm.add_node(SpringDamperNode("spring", 0.01, stiffness=30.0, initial_position=0.5))
+gm.compile()
 
 report = profile_graph(gm, n_steps=200, n_warmup=5, trace=True)
 print(report)
@@ -126,6 +131,49 @@ does the same from code, and `compile_cache.warm_cache(gm_factory,
 n_steps=2, scan_steps=N)` compiles a graph's `step` and `run_scan`
 ahead of a run.  The cache key covers the JAX/XLA version, backend and
 traced program, so a stale entry is a miss, never a wrong executable.
+
+**Which directory.**  An explicit directory wins over the variable:
+`enable(dir)` and `warm_cache(..., cache_dir=dir)` use `dir` whatever
+`MADDENING_COMPILATION_CACHE_DIR` says, and `GraphManager.compile()`
+enables the variable's directory only while no directory is enabled yet.
+`enable()` and `warm_cache()` without a directory keep the one already
+enabled, then fall back to the variable, then to `~/.cache/maddening/xla`.
+
+```python
+import os
+import tempfile
+
+from maddening import GraphManager
+from maddening.core.simulation import compile_cache
+from maddening.nodes import SpringDamperNode
+
+with tempfile.TemporaryDirectory() as mine, tempfile.TemporaryDirectory() as env_dir:
+    os.environ[compile_cache.ENV_VAR] = env_dir     # as if set in the shell
+    assert compile_cache.enable(mine) == mine       # explicit: wins over the variable
+    gm = GraphManager()
+    gm.add_node(SpringDamperNode("s", 0.01))
+    gm.compile()                                    # leaves the enabled directory alone
+    gm.step()
+    assert compile_cache.enabled_dir() == mine
+    assert os.listdir(mine) and not os.listdir(env_dir)
+```
+
+**A change of directory after the process has compiled.**  JAX opens its
+persistent cache once, at the first compile that finds a directory set,
+and ignores a later change of the setting.  So `enable(other)` after
+that also drops JAX's open cache
+(`jax.experimental.compilation_cache.compilation_cache.reset_cache`),
+and the next compile opens `other`.  Programs the process has already
+compiled stay in memory and are not written to `other`.  On a JAX
+without that reset, the move is refused with a `RuntimeError`: enable
+the directory before the first compile, or set the variable before the
+process starts.  `compile_cache.enabled_dir()` reads JAX's own state and
+answers `None` rather than name a directory JAX is not using (after a
+direct `jax.config.update("jax_compilation_cache_dir", ...)`, say).
+
+`python -m maddening.examples.advanced.compile_cache_demo` runs a cold
+and a warm process against a temporary directory, with the variable
+pointed at another, and prints both compile times.
 
 ## Compilation counts, and the regression gate
 

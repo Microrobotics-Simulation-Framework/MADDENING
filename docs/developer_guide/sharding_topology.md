@@ -234,6 +234,41 @@ layout.  Which transport is *faster* under NCCL is hardware-dependent
 and is measured in the real multi-GPU session; the correctness and the
 byte counts are settled here.
 
+The counts come from the layout alone, so they can be read on the host
+before any device is involved.  A 64-cell ring split into four
+contiguous blocks: each block reads one cell from each neighbouring
+block.
+
+```python
+import numpy as np
+
+from maddening.cloud.multigpu.halo_unstructured import (
+    build_unstructured_partition,
+    exchange_traffic,
+)
+
+n_cells, n_devices = 64, 4
+ring = np.array([[i, (i + 1) % n_cells] for i in range(n_cells)])
+layout = build_unstructured_partition(
+    partition_assignment=np.arange(n_cells) * n_devices // n_cells,
+    edges=ring,
+    n_devices=n_devices,
+)
+traffic = exchange_traffic(layout)
+print(traffic)
+# all_to_all sends n_devices * n_ghost_max = 4 * 2 cells per device;
+# ppermute sends one cell to each of the two neighbouring devices.
+assert traffic == {"all_to_all": 8, "ppermute": 2, "useful": 2, "ppermute_messages": 2}
+```
+
+`python -m maddening.examples.advanced.unstructured_sharding_demo` runs
+the whole unstructured path on four emulated CPU devices: a diffusion
+node on an irregular graph wrapped with `exchange="ppermute"` and checked
+against the unsharded node, the traffic of a compact and of a random
+partition, and `sharded_cg(differentiable=True)` with a Jacobi
+preconditioner, its gradient checked against a dense solve.  It takes
+about ten seconds on three cores.
+
 ## Partition-assignment handoff (unstructured path)
 
 The contract for unstructured sharding has **three** participants:
@@ -271,6 +306,14 @@ is refused at construction, naming both counts, where before the cells
 past the layout's count were silently dropped (`partition_value` refuses
 the same thing for any other caller).
 
+Build the inner node's `static_data` once, in its constructor, and
+return the same `StaticArray` objects on every access.  The wrapper keeps
+its per-device copy of each partitioned static keyed on the identity of
+its array, so a `static_data` property that builds new arrays each time
+makes every eager `update()` partition them again: on four GPUs at 10⁷
+cells that cost 242 ms a step against 4.45 ms.  After rewriting a
+static's buffer in place, call `invalidate_static_cache()`.
+
 Reproducibility: the partition assignment is part of the experiment's
 reproducibility bundle (alongside seeds and version pins).  It is not
 recomputed every run.  Different PyMetis versions can produce
@@ -290,11 +333,26 @@ the equivalent expressed as a graph with the same number of cells.
 For the MICROROBOTICA Light cloud-rendered demos at 30 fps the gap is
 load-bearing — that's why we keep both paths.
 
-The unstructured path is tested on CPU virtual devices only: a 16-cell
-toy mesh, a 1024-cell smoke, and a 10⁵-cell ring in the slow lane for
-the two transports' bit identity.  How it performs at real-mesh sizes
-(10⁴–10⁶ cells) under NCCL on actual GPUs has not been measured; the
-tooling for that session is `benchmarks/multigpu/run_pod.py`.
+CI tests the unstructured path on CPU virtual devices: a 16-cell toy
+mesh, a 1024-cell smoke, and a 10⁵-cell ring in the slow lane for the
+two transports' bit identity.  It was checked once on GPUs, on
+2026-10-12, with `benchmarks/multigpu/run_pod.py`: four NVIDIA RTX PRO
+6000 Blackwell cards joined by PCIe, jax and jaxlib 0.11.2.
+
+- Sharded and unsharded results agreed from 10⁵ to 10⁸ cells and on a
+  body-fitted tetrahedral mesh of 1,001,664 cells, and `all_to_all`
+  and `ppermute` gave identical results at every size.
+- Per exchange, `ppermute` took 4–5% less time than `all_to_all` at
+  10⁵ and 3×10⁵ cells, and `all_to_all` 17% less at 10⁶.  With five
+  fields per cell `all_to_all` was faster at every size from 10⁵ to
+  10⁶; with one field at 10⁷ cells `ppermute` took half the time.
+  `all_to_all` stays the default.
+- The compiled step of a cheap neighbour-mean node took 3.4 ms at 10⁷
+  cells and 4.0 ms at 10⁸.  At 10⁷ cells the sharded step took 3.82 ms
+  against 1.25 ms on one card: for a node this cheap the step is bound
+  by dispatch and by the halo exchange (43 kernels a step against 2).
+
+The files are in `benchmarks/results/multigpu/2026-10-12_rtxpro6000/`.
 
 ## Sharding spreads the work, not the size limit, in 0.4.0
 
@@ -327,7 +385,11 @@ construction-time check that the grid divides by the device count, so
 check that yourself); and step it with the wrapper's `update()`, without
 calling its `initial_state()`.
 `benchmarks/multigpu/run_capacity.py` does exactly this (`build_state`,
-`_make_lattice_class`).  The registry entry has the details.
+`_make_lattice_class`).  The registry entry has the details.  Built this
+way, a 471,905,280-cell D3Q19 `LBMNode` ran on four 96 GB cards on
+2026-10-12 (jax and jaxlib 0.11.2) and stayed within 1.2e-6 of its
+reference.  The sharded lattice step peaked at about 4.3 times its
+state on each device: size a run on that.
 
 ## What 0.4.0 does with the unstructured contract
 

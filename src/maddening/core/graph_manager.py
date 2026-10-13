@@ -82,7 +82,7 @@ from maddening.core.schedule import (
 # a private helper is not an attribute of this module, so a stale
 # ``graph_manager._helper`` reference fails instead of naming a copy that
 # nothing reads.
-from maddening.core import _adaptive_scan, _graph_specs, _param_probes
+from maddening.core import _adaptive_scan, _graph_specs, _matmul_precision, _param_probes
 from maddening.core.coupling import (
     _bounds, _carried_fields, _coupled_block, _flux_loops, _group_layout, _interface_plan,
     _reports,
@@ -276,6 +276,10 @@ class GraphManager:
         # siblings, keyed by ``_cached_scan``.
         self._scan_cache: dict[tuple, Callable] = {}
         self._n_scan_traces: int = 0
+        # The precision every program built from this graph traces its
+        # float32 matrix products at (``matmul_precision``; read by the
+        # step builders, ``_matmul_precision.pins_the_built_step``).
+        self._matmul_precision: Optional[str] = _matmul_precision.DEFAULT
         self._observers: list[Callable] = []
         self._back_edges: list[EdgeSpec] = []
         self._external_inputs: list[ExternalInputSpec] = []
@@ -666,6 +670,52 @@ class GraphManager:
     def _count_scan_trace(self) -> None:
         """Record one Python trace of a cached scan program."""
         self._n_scan_traces += 1
+
+    @property
+    @stability(StabilityLevel.EXPERIMENTAL)
+    def matmul_precision(self) -> Optional[str]:
+        """The precision every program built from this graph traces its
+        float32 matrix products at: ``"highest"`` unless set.
+
+        On NVIDIA GPUs, JAX's default runs float32 matrix-matrix products at
+        reduced precision (measured on an RTX A2000: 2.5e-4 relative error for
+        an interface mapping applied to a 3-component field, 3.0e-4 for the
+        coupling bounds' Krylov basis, against 6.5e-7 and 4.9e-7 at
+        ``"highest"``).  The graph traces the body of its step under
+        ``jax.default_matmul_precision(matmul_precision)``, so the compiled
+        step, ``run_scan``, ``run_scan_with_history``, ``run_sweep``,
+        ``run_adaptive``, ``run_adaptive_scan``, a step traced under your own
+        ``jax.jit`` or ``jax.grad`` (the implicit-function gradient of a
+        coupling group included), the FMU sidecar's step and the REST
+        server's stepping all compute their products at this precision.
+        :func:`maddening.sysid.fit`, :func:`~maddening.sysid.fit_lm`,
+        :func:`~maddening.sysid.fit_multiple_shooting` and
+        :func:`~maddening.sysid.windowed_loss` follow the graph's setting.
+        On CPU every float32 product is computed in full whatever is
+        requested, so the setting changes nothing there.
+
+        **EXPERIMENTAL.**  Set it to ``None`` to inherit JAX's own
+        ``jax_default_matmul_precision`` instead (for reduced-precision
+        tensor-core speed, in MLP or FNO surrogate nodes for instance), or to
+        any other value ``jax.default_matmul_precision`` accepts.  Products
+        that pass their own ``precision=`` keep it.  Changing the setting
+        marks the graph for recompilation: the next entry point recompiles,
+        so no program traced at the previous setting runs again, and a
+        compiled step handed out before (``gm._compiled_step``) is refused
+        by the FMU sidecar as the step of an earlier compile.  The setting
+        is a runtime choice and is not saved by :meth:`to_dict`.
+        """
+        return self._matmul_precision
+
+    @matmul_precision.setter
+    def matmul_precision(self, value: Optional[str]) -> None:
+        value = _matmul_precision.validated(value)
+        if value != self._matmul_precision:
+            self._matmul_precision = value
+            # Every compiled program closes over the setting it was traced
+            # at; the next entry point rebuilds them (``compile()`` clears
+            # the scan cache and starts a new generation).
+            self._dirty = True
 
     def reset_params(self) -> None:
         """Discard live/calibrated values: ``gm.params`` becomes the
@@ -3453,7 +3503,8 @@ class GraphManager:
                 )
 
         # Persistent XLA cache, if the user asked for one via the env var
-        # (see maddening.core.simulation.compile_cache).
+        # and no directory is enabled yet: an explicit compile_cache.enable()
+        # wins (see maddening.core.simulation.compile_cache).
         from maddening.core.simulation.compile_cache import enable_from_env
         enable_from_env()
 
@@ -3904,6 +3955,7 @@ class GraphManager:
             params=self.params,
         )
 
+    @_matmul_precision.pins_the_built_step
     def _build_step_fn(self, plan: Optional["_graph_specs._StepPlan"] = None) -> Callable:
         """Create a pure function ``(full_state, ext_inputs) -> full_state``.
 
@@ -6745,6 +6797,7 @@ class GraphManager:
     # Adaptive timestepping
     # ------------------------------------------------------------------
 
+    @_matmul_precision.pins_the_built_step
     def _build_dt_step_fn(self, *, collect_strict: bool = False) -> Callable:
         """Build a step function parameterised by ``dt``.
 

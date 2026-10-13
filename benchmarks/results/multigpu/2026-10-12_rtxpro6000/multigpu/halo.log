@@ -1,0 +1,3 @@
+devices: ['cuda:0', 'cuda:1', 'cuda:2', 'cuda:3']  jax 0.11.2  platform gpu
+[halo] 24 stencil cases on 1d+1d-axis1+2d-flat+2d meshes, worst |diff| 0.0e+00; unstructured 1000000 cells: all_to_all fwd 0.0e+00 adj 0.0e+00  ppermute fwd 0.0e+00 adj 0.0e+00
+wrote results/multigpu/halo.json (30.0 s)  checks 52/52 passed

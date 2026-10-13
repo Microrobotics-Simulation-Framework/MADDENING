@@ -54,12 +54,19 @@ FMU built over a pending structural write ran the old model if the step had
 been traced before the write, 6.35 K off the graph after 50 steps of a
 heated rod, and the new one if it had not (MADD-ANO-147).
 
-`python -m maddening.examples.advanced.fmu_export_demo` runs the
-build-and-check half of this without a TCP port: the description (with
-the parameters it leaves fixed, and why), the binary and the package in
-a temporary directory, FMPy's `validate_fmu`, and the sidecar driven
-in-process against `run_scan(params=...)`.  It skips the stages whose C
-compiler or FMPy is missing, saying so.
+`python -m maddening.examples.advanced.fmu_export_demo` runs all of this
+from start to finish: the description (with the parameters it leaves
+fixed, and why), the binary and the package in a temporary directory,
+FMPy's `validate_fmu`, the sidecar driven in-process against
+`run_scan(params=...)`, a multi-clock description (below), and last the
+packaged FMUs loaded in a master.  FMPy's `simulate_fmu` runs each
+`.fmu` against a bridge on `127.0.0.1` at a port the OS chooses; both
+were packaged without an endpoint, so the binary reads
+`MADDENING_FMU_ENDPOINT`.  A stiffness set as a start value and an
+anchor driven as an input give the graph's own `run_scan` result to
+float32 round-off.  It skips the stages whose C compiler or FMPy is
+missing, saying so.  FMPy is not a runtime dependency of MADDENING
+(`pip install fmpy`), and MADDENING has no FMU importer of its own.
 
 The importer then loads `plant.fmu` as usual; the wrapper reads
 `resources/endpoint.txt` (or `MADDENING_FMU_ENDPOINT`) and connects.  A
@@ -690,6 +697,13 @@ are constant-interval and tick with time.  `fmi3GetClock` and
 `fmi3SetClock` are `fmi3Error`, because FMI 3.0 allows them only in Event
 Mode, which this FMU does not have (`hasEventMode="false"`).  They used to
 answer `fmi3OK` for any value reference.
+
+Stages 5 and 6 of `python -m maddening.examples.advanced.fmu_export_demo`
+export a graph whose spring steps every 0.05 s beside a ball at 0.01 s,
+with `multi_clock=True`: two clocks, the spring's outputs and its input
+on the slower one.  Run in FMPy's `simulate_fmu` with a 0.01 s
+communication step, the spring's position changes on the first step and
+then on every fifth, and both outputs match `run_scan`.
 
 ## Verification
 

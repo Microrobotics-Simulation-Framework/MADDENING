@@ -457,21 +457,42 @@ the existing launcher, once the dry run above is clean.  Two equivalent
 manual routes:
 
 * **`maddening.cloud.launcher.CloudLauncher` + `JobConfig`** from a
-  Python REPL: `provider="runpod"`, `gpu_type="RTX4090"` (the name the
-  launcher's catalogue lists for RunPod, `src/maddening/cloud/providers.py`;
-  confirm it with `sky show-gpus --cloud runpod`),
+  Python REPL (the route of the 2026-10-12 session): `provider="runpod"`,
+  `gpu_type=` SkyPilot's name for the card (`"RTXPRO6000"` that day,
+  `"RTX4090"` as first planned; `src/maddening/cloud/providers.py`,
+  confirmed with `sky show-gpus --cloud runpod --all`),
   `gpu_count=4`, `use_spot=False` (a preempted benchmark is a wasted
-  hour), `workdir=<MADDENING checkout>` so the tree is synced, and a
+  hour; on demand, SkyPilot retries region after region until it has the
+  cards), no `workdir`, and a
   `CostPolicy(max_cost_per_hour=12.0, max_total_budget=40.0,
-  autostop_minutes=20, auto_teardown=False)` — autostop is the safety net
-  for a pod left idle; teardown stays with the maintainer.  `run` can be
-  `"sleep 7200"`; the runner itself is driven over SSH with
-  `CloudJob.ssh_run`.  Credentials come from
-  `~/.maddening/cloud_credentials.yaml` (`CloudLauncher._load_credentials`),
-  the RunPod key lands in `~/.runpod/config.toml` only for the duration
-  of the launch (`_credential_context`).
-* **SkyPilot's CLI** (`sky launch` with `--gpus RTX4090:4
-  --cloud runpod --no-use-spot --workdir .`), typed by the maintainer.
+  autostop_minutes=20, auto_teardown=True)`.  **`auto_teardown=True` on
+  RunPod:** SkyPilot cannot stop a RunPod pod, only tear it down, so the
+  autostop safety net exists there only as a teardown.  `run` is a
+  `sleep` longer than the session (`"sleep 10800"`): the job stays busy, so
+  the pod lives at most the sleep plus `autostop_minutes`, unless the
+  maintainer tears it down first.  The runner itself is driven over SSH
+  with `CloudJob.ssh_run`.  **`CloudLauncher` needs
+  `~/.maddening/cloud_credentials.yaml`** (`CloudLauncher._load_credentials`;
+  mode 600) before anything else, the dry run included; the RunPod key
+  lands in `~/.runpod/config.toml` only for the duration of the launch
+  (`_credential_context`).  `launch(dry_run=True)` returns before
+  SkyPilot answers: wait on its request (`sky.stream_and_get`) to see the
+  optimiser's choice.
+* **SkyPilot's CLI** (`sky launch` with `--gpus <card>:4
+  --cloud runpod --no-use-spot`), typed by the maintainer.
+
+**The checkout: clone it on the pod, at the session's commit.**  Do not
+sync the tree with `workdir`: a git worktree's `.git` is a pointer file
+to a directory that is not synced, so `git rev-parse` fails on the pod,
+and section 2a stops there.  Once the pod is up, over SSH:
+
+```sh
+git clone -q https://github.com/Microrobotics-Simulation-Framework/MADDENING.git ~/sky_workdir
+cd ~/sky_workdir && git checkout -q --detach <commit>          # the image's commit
+```
+
+and copy a `--mesh` file beside it (`scp -P <port> mesh.npz root@<ip>:~/`).
+The commit must be one the public repository has: push it first.
 
 **The image: one built from the session's commit, never `:latest`.**  The
 launcher's default, `JobConfig.container_image =
@@ -498,22 +519,25 @@ on the SkyPilot CLI route.  `JAX_SPEC` pins the JAX that CI's newer lane
 tests, the version section 2a installs; without it the image carries the
 newest JAX in the range of the `cuda12` extra.
 
-**The session is on 4 × RTX 4090, 24 GB each.**  What that changes:
+**The session ran on 4 × RTX PRO 6000 Blackwell Server Edition, 96 GB
+each** (2026-10-12; the RTX 4090s first planned were not available).  Its
+record is `benchmarks/results/multigpu/2026-10-12_rtxpro6000/`.  What the
+card changes:
 
-* The cards talk over PCIe; an RTX 4090 has no NVLink.  Every transport
-  timing of the session (`exchange`, and the exchange inside `forward`
-  and `gradient`) is a PCIe timing, and the ranking `exchange` decides is
-  a ranking on that interconnect.
-* The duration estimates of section 2 were made for A100s and have not
-  been made again; the time boxes are those of the A100 estimates (two of
-  them raised with schema 10, `stencil` to 45 minutes and `forward` to 20,
-  and one added, 25 minutes for the second `forward` run, on the real mesh:
-  "Expected durations" says why, and what is cut first when the 2-hour cap
-  binds).
+* The cards talk over PCIe; neither an RTX PRO 6000 nor an RTX 4090 has
+  NVLink (on the session's pod GPU 0-1 and GPU 2-3 each shared a PCIe
+  switch, and the two pairs crossed between PCIe host bridges).  Every
+  transport timing of the session (`exchange`, and the exchange inside
+  `forward` and `gradient`) is a PCIe timing, and the ranking `exchange`
+  decides is a ranking on that interconnect.
+* The duration estimates of section 2 were made for A100s; the
+  measured times of the 2026-10-12 session sit beside them ("Expected
+  durations"), and the time boxes stay those of the estimates.
 * No goal needs more than one card: each compares a sharded run with the
   unsharded node on one device of the same pod, at 1e5 to 1e6 cells.
   Whether a run *larger* than one card works is not a checklist question;
-  the stress tail after section 4 asks it, and gates nothing.
+  the stress tail after section 4 asks it, and gates nothing.  Its
+  capacity ramp takes the card's memory as an option (section (b)).
 
 `src/maddening/examples/cloud/multigpu/09_real_gpu_benchmark.py` shows
 the launch → `ssh_run` → copy-back → `teardown` shape end to end (it is
@@ -534,7 +558,8 @@ Until the runner records those, the session makes them true by procedure:
 * **Run from a clean checkout at one commit.**  `git status --porcelain`
   prints nothing, before the first goal and after the last.
 * **Import `maddening` from that checkout.**  Print `maddening.__file__`
-  (below); it must be under the synced tree, not an older install.
+  (below); it must be under the cloned tree (section 1), not the image's
+  own install.
 * **One pod per item.**  Every goal that decides a checklist item runs on
   the same pod, in one session: the summary checks that an item's files
   share a commit, not that they share a machine.
@@ -582,20 +607,25 @@ this line, was measured so) records no commit in any file, and its
 `git status --porcelain` prints nothing, so the dirty-tree check above
 would pass and the whole session would close nothing.  The second line of
 the block stops such a pod before the first goal, as it stops a work
-directory synced without `.git`.
+directory synced without `.git` or synced from a git worktree, whose
+`.git` is a pointer file (section 1 clones instead).
 
 **Float32 matrix products.**  On an NVIDIA card JAX computes float32
 matrix products at reduced precision unless told otherwise
 (`jax_default_matmul_precision`; this project has seen the default move a
 float32 trajectory by 15 % on an RTX A2000, and `highest` remove the
-difference).  `LBMNode` computes its momentum and its `e . u` with matrix
-products, so the D2Q9 cases of `stencil` and the D3Q19 lattice of the
-capacity test are the goals it reaches.  The session asks whether a
-sharded run equals the unsharded one, not what that default does, so every
-goal runs with `JAX_DEFAULT_MATMUL_PRECISION=highest`, and `session.txt`
-records the variable.  What the default does to the lattice is measured
-once, in the stress tail, and gates nothing.  On CPU the setting changes
-nothing, so no dry run could have shown either number.
+difference).  The session asks whether a sharded run equals the unsharded
+one, not what that default does, so every goal runs with
+`JAX_DEFAULT_MATMUL_PRECISION=highest`, and `session.txt` records the
+variable.  What the default does is measured once, in the stress tail, and
+gates nothing: on the 2026-10-12 session it failed 8 of `stencil`'s 356
+checks at 1e5 cells, every one a gradient of the D2Q9 lattice (`LBMNode`
+computed its momentum and its `e . u` as small matrix products; d loss /
+d initial `f` 1.6e-3 against 1e-5), and nothing else.  With #327 the LBM
+nodes pin those products to full float32 precision themselves (the same
+patch passed 356/356 at the default on that pod), and the variable stays
+for everything else.  On CPU the setting changes nothing, so no dry run
+could have shown either number.
 
 A dirty tree is the stop condition of section 3, before anything is
 spent on goals.  Run `git status --porcelain` again after the last goal:
@@ -621,7 +651,7 @@ failure and does not stop the session, but it keeps the item open.  On
 four GPUs there are none.
 
 ```sh
-R="python3 benchmarks/multigpu/run_pod.py --out results/multigpu"
+R="python3 -u benchmarks/multigpu/run_pod.py --out results/multigpu"
 L=results/multigpu
 timeout 10m $R --goal indivisible 2>&1 | tee $L/indivisible.log      # checklist 5
 timeout 10m $R --goal halo        2>&1 | tee $L/halo.log             # checklist 2
@@ -632,11 +662,16 @@ timeout 10m $R --goal exchange    2>&1 | tee $L/exchange.log         # the trans
 timeout 20m $R --goal forward     2>&1 | tee $L/forward.log          # checklist 1: the three synthetic sizes
 timeout 20m $R --goal gradient    2>&1 | tee $L/gradient.log         # checklist 1 and 3, unstructured
 M=results/multigpu-mesh; mkdir -p $M                                  # the real mesh: a directory of its own
-timeout 25m python3 benchmarks/multigpu/run_pod.py --out $M --goal forward \
+timeout 25m python3 -u benchmarks/multigpu/run_pod.py --out $M --goal forward \
     --mesh /path/to/mesh.npz 2>&1 | tee $M/forward.log               # one size, the file's
 python3 benchmarks/multigpu/run_pod.py --summarise results/multigpu | tee $L/summary.txt
 python3 benchmarks/multigpu/run_pod.py --summarise $M | tee $M/summary.txt
 ```
+
+`python3 -u`: the output goes through a pipe, where Python buffers it,
+and a goal killed at its time box loses the buffer with it; unbuffered, its
+log keeps every line up to the kill (two steps of the 2026-10-12 stress
+tail left empty logs).
 
 `forward` runs twice.  The first run is the goal at the three synthetic
 sizes, with the other seven in `results/multigpu`.  The second, with
@@ -696,28 +731,42 @@ the tests that need 8/16 devices.  It is not part of the session.
   region, the price per hour, the launch and teardown times, and the final
   cost (`job.cost_so_far()` or the provider console).
 
-### Expected durations (estimated for 4×A100, not measurements; the session is on 4×RTX 4090)
+### Expected durations (estimated for 4×A100; measured on 4×RTX PRO 6000)
 
 Estimated from the sizes and from the CPU dry run, where compile time
 dominates; a GPU compile of the coupled group's adjoint is assumed to take
-10–30 s.  The time box is what `timeout` enforces.
+10–30 s.  The measured column is each goal's process on the 2026-10-12
+session (`multigpu/progress.txt` of its record).  The time box is what
+`timeout` enforces.
 
-| goal | what runs | estimate | time box |
-|---|---|---|---|
-| `indivisible` | 4 refusals; a 1e5-cell uneven unstructured run, 20 public `update()` calls | ~1 min | 10 min |
-| `halo` | 5 programs at 1e6 cells (the four meshes, unstructured) and the NumPy reference | 1–2 min | 10 min |
-| `coupled` | 2 solvers × (the unsharded group once, and the sharded group on each of the four meshes) at 1e5 cells, and on the pencil at 3e5 and 1e6 -- 18 programs -- and the float64 model on the host | 7–15 min | 25 min |
-| `stencil` | rollout and gradient per side: at 1e5 cells the field under each of the three ends, the D2Q9 lattice, and the field with a halo of two under each of the three ends, on each of the four meshes, the field once under the zero fill with its two stacked integrals on each, and the field with periodic ends twice more, its static split along the second axis on the pencil and on the crossed pencil (34 cases, the unsharded side run once per node and ends, and once per mesh for the stacked integrals: 92 programs), and periodic ends on the pencil mesh at 3e5 and 1e6 (36 cases, 100 programs) | 21–37 min | 45 min |
-| `hybrid` | `run_scan` and the gradient of the unsharded graph once per size, and of the sharded one on each of the four meshes at 1e5 cells and on the pencil at the others (9 graphs) | 4–8 min | 20 min |
-| `exchange` | per size, 2 transports | ~5 min | 10 min |
-| `forward` | per size, 2 transports, public and compiled step; every step ghost-exchanges the field and the per-cell source | ~13 min | 20 min |
-| `gradient` | per size, 3 rollout gradients (each one reverse pass for the start, the per-cell source and the injected weight) and `sharded_cg` (55 to 58 iterations a solve; the 3000-iteration cap is never reached) | ~8 min | 20 min |
-| `forward --mesh` | the real mesh, its one size (1,001,664 cells), 2 transports, public and compiled step | 10–20 min | 25 min |
+| goal | what runs | estimate | measured | time box |
+|---|---|---|---|---|
+| `indivisible` | 4 refusals; a 1e5-cell uneven unstructured run, 20 public `update()` calls | ~1 min | 18 s | 10 min |
+| `halo` | 5 programs at 1e6 cells (the four meshes, unstructured) and the NumPy reference | 1–2 min | 39 s | 10 min |
+| `coupled` | 2 solvers × (the unsharded group once, and the sharded group on each of the four meshes) at 1e5 cells, and on the pencil at 3e5 and 1e6 -- 18 programs -- and the float64 model on the host | 7–15 min | 4 min 51 s | 25 min |
+| `stencil` | rollout and gradient per side: at 1e5 cells the field under each of the three ends, the D2Q9 lattice, and the field with a halo of two under each of the three ends, on each of the four meshes, the field once under the zero fill with its two stacked integrals on each, and the field with periodic ends twice more, its static split along the second axis on the pencil and on the crossed pencil (34 cases, the unsharded side run once per node and ends, and once per mesh for the stacked integrals: 92 programs), and periodic ends on the pencil mesh at 3e5 and 1e6 (36 cases, 100 programs) | 21–37 min | 2 min 40 s | 45 min |
+| `hybrid` | `run_scan` and the gradient of the unsharded graph once per size, and of the sharded one on each of the four meshes at 1e5 cells and on the pencil at the others (9 graphs) | 4–8 min | 1 min 3 s | 20 min |
+| `exchange` | per size, 2 transports | ~5 min | 33 s | 10 min |
+| `forward` | per size, 2 transports, public and compiled step; every step ghost-exchanges the field and the per-cell source | ~13 min | 1 min 41 s | 20 min |
+| `gradient` | per size, 3 rollout gradients (each one reverse pass for the start, the per-cell source and the injected weight) and `sharded_cg` (55 to 58 iterations a solve; the 3000-iteration cap is never reached) | ~8 min | 2 min 12 s | 20 min |
+| `forward --mesh` | the real mesh, its one size (1,001,664 cells), 2 transports, public and compiled step | 10–20 min | 3 min 1 s | 25 min |
 
-About 70–109 minutes of goals; with setup and copy-back (about 35
-minutes) 1.75–2.4 hours.  **The session is capped at 2 hours, and above
-about 85 minutes of goals the cap binds**: the top of the estimate does
-not fit.  The time boxes add up to 185 minutes, more than the cap: a box
+About 70–109 minutes of goals were estimated, with setup and copy-back
+(about 35 minutes) 1.75–2.4 hours; the 2026-10-12 session's goals took
+**17 minutes**, about 3 minutes after the pod was up.
+
+**The cap is the maintainer's, set before the launch from the budget and
+the price**: `CostPolicy.max_total_budget` over the pod's price per hour,
+less 15 minutes to copy back and tear down, and less the stress tail's
+time if the tail is wanted.  Nothing enforces it: `CloudJob.cost_so_far()`
+is SkyPilot's estimate, no budget guarantee by its docstring, and it read
+0.0 for the 2026-10-12 job, so the maintainer watches the clock and the
+provider's console.  The 2 hours below were set
+for the RTX 4090 pod first planned; on 2026-10-12, at $9.96 an hour
+against a $40 budget, the whole session took 1 h 45 min, tail and
+teardown included.  **With a 2-hour cap, above about 85 minutes of goals
+the cap binds**: the top of the estimate does not fit.  The time boxes
+add up to 185 minutes, more than that cap: a box
 is one goal's own ceiling, so that a goal that hangs ends there, not a
 share of the session.  The cap bounds the session (section 3).  So,
 before each goal, compare the time left before the cap, less 15 minutes
@@ -767,9 +816,10 @@ pod:
 * `nvidia-smi -L` lists fewer than four GPUs, or `jax.devices()` does
   not list four CUDA devices;
 * `git status --porcelain` prints anything, or `maddening.__file__` is not
-  under the synced checkout (section 2a);
-* the session passes **2 hours** since launch, or the provider's cost
-  reaches the `CostPolicy` budget.
+  under the cloned checkout (section 2a);
+* the session passes its cap since launch (2 hours as planned; "Expected
+  durations" says what it depends on), or the provider's cost, read on
+  its console, reaches the `CostPolicy` budget.
 
 A failed goal's JSON is still written (it records which check failed and
 by how much); copy it back with the rest.  The failure is reproduced and
@@ -783,43 +833,67 @@ with one of those: an item is decided only by files from one git commit
 From the laptop, with the `CloudJob` still in hand:
 
 ```python
-job.ssh_run("cd ~/sky_workdir && tar czf /tmp/multigpu-results.tgz results/multigpu")
+job.ssh_run("cd ~/sky_workdir && tar czf /tmp/multigpu-results.tgz results")
 # then scp -P <job.ssh_port> root@<job.vm_ip>:/tmp/multigpu-results.tgz .
 job.teardown()
 ```
 
-or with the CLI: `rsync -avz -e "ssh -p <port>" root@<ip>:~/sky_workdir/results/multigpu/ benchmarks/results/multigpu/`
-followed by `sky down <cluster>`.  Confirm on the RunPod console that
-the pod is gone.  Cost check: `job.cost_so_far()`.
+or with the CLI: `rsync -avz -e "ssh -p <port>" root@<ip>:~/sky_workdir/results/ <local dir>/`
+followed by `sky down <cluster>`.  Copy the whole of `results/`, the
+stress tail's directories with the checklist's, and **compare before the
+teardown**: a sha256 of every file on both sides (`find . -type f -exec
+sha256sum {} + | LC_ALL=C sort -k2`: the pod's locale and the laptop's
+sort differently otherwise), and any file missing or different blocks
+it.  Then tear down once, read `job.status()` again (a failed `sky.down`
+only logs a warning), and confirm on the RunPod console that the pod is
+gone.  Read the cost on the console: `job.cost_so_far()` is SkyPilot's
+estimate and read 0.0 for the 2026-10-12 job.
 
-Store the JSON under `benchmarks/results/multigpu/` (tracked, small)
-and commit it with the summary output pasted into the commit body.
+Store the pod's `results/` as it is under
+`benchmarks/results/multigpu/<date>_<card>/` (tracked, small: the
+2026-10-12 session's is `2026-10-12_rtxpro6000/`, 1.9 MB), with a
+`README.md` of what ran, in what order, and where each number is, and
+commit it with the summary output pasted into the commit body.  Leave
+out profiler traces.
 
 ## After the checklist: the stress tail (not a gate)
 
 Run only when the summary of section 2b has exited 0, the checklist's
 results are copied back (section 4, the copy without the teardown), and
-the 2-hour cap leaves 30 minutes.  **Nothing here changes the checklist's
-verdict**: every command below writes to a directory of its own,
-`run_pod.py --summarise results/multigpu` reads none of them, and a
+the session's cap leaves the tail its time.  **Nothing here changes the
+checklist's verdict**: every command below writes to a directory of its
+own, `run_pod.py --summarise results/multigpu` reads none of them, and a
 failure here is a finding to reproduce off the pod, not a reason to
-reopen an item.  The tail has **30 minutes** from its first command;
-when they are up, stop, whatever is left.
+reopen an item.
 
-| step | expected | time box |
+**The tail's time is what the cap leaves**, less the copy-back: it
+depends on the cap, and so on the budget and the price ("Expected
+durations").  Under the 2-hour cap planned for the RTX 4090 pod that was
+30 minutes from the tail's first command.  On 2026-10-12, with no such
+cap, every step but `forward` at 1e8 cells took 28 minutes in all, and
+that one 29 minutes more.  When the time is up, stop, whatever is left.
+
+| step | measured, 4 × RTX PRO 6000 (2026-10-12) | time box |
 |---|---|---|
-| (a) `forward`, `exchange` at 1e7 cells | 1 min each | 2 min each |
-| (a) `gradient` at 1e7 cells | 2–3 min | 4 min |
-| (a) `forward`, `exchange` at 3e7 cells | 2–3 min each | 4 min each |
-| (b) the pencil's ramp, five rungs | about 1 min a rung | 120 s a rung |
-| (b) the soak | 3 min, and its last block | 7 min |
-| (b) the 1-D mesh, two rungs | about 1 min a rung | 120 s a rung |
-| (c) `stencil` at 1e5 cells with the default matmul precision | 1–2 min | 10 min |
-| (a) `forward` at 1e8 cells, last and only if time is left | 7–9 min | 9 min |
+| (a) `forward` at 1e7 cells | 1 min 40 s | 5 min |
+| (a) `exchange` at 1e7 cells | 1 min 48 s | 5 min |
+| (a) `gradient` at 1e7 cells | 7 min 4 s | 15 min |
+| (a) `forward` at 3e7 cells | 4 min 22 s | 10 min |
+| (a) `exchange` at 3e7 cells | 2 min 20 s | 6 min |
+| (b) the pencil's ramp, five rungs and the soak | 21–44 s a rung; the soak 3 min 8 s; 5 min in all (out of memory at the third rung) | `--rung-timeout-s` a rung (below); 7 rung boxes and 3 min in all |
+| (b) the 1-D mesh, two rungs | 1 min in all | 2 rung boxes |
+| (c) `stencil` at 1e5 cells with the default matmul precision | 4 min 40 s | 10 min |
+| (a) `forward` at 1e8 cells, last and only if time is left | 29 min 16 s | 40 min |
 
-The expected times are estimates: (a) from the CPU dry run below, (b)
-from nothing but the sizes (no accelerator has run it).  The time boxes
-add up to more than 30 minutes; the 30-minute rule is what holds.
+Each is the step's process, from the record's `stress/progress.txt`.  The
+first boxes of that session, scaled from the CPU dry run below, were 2
+and 4 minutes for (a) at 1e7 and 3e7 and 9 for 1e8: `gradient` at 1e7 and
+`forward` at 3e7 ran out at 4 minutes in the host's setup, and their logs
+were empty, so the boxes above are the measured times with room, and
+every command says `python3 -u`.  The `forward` times include its public
+`update()` re-partitioning the statics at every step (0.25 to 2.5 s a
+step at 1e7 to 1e8 cells), which the runner no longer does: they are an
+upper bound.
 
 Before the session, on the laptop (about 15 s on four cores):
 
@@ -843,16 +917,16 @@ result with it); stop at the first non-zero exit.
 
 ```sh
 T=results/stress; mkdir -p $T
-big() { timeout "$1" python3 benchmarks/multigpu/run_pod.py --goal "$2" --cells "$3" \
+big() { timeout "$1" python3 -u benchmarks/multigpu/run_pod.py --goal "$2" --cells "$3" \
             --partition contiguous --warmup 1 --repeats 3 \
             --out $T/cells-$3 2>&1 | tee $T/$2-$3.log; }
-big 2m forward  10000000;  echo $?
-big 2m exchange 10000000;  echo $?
-big 4m gradient 10000000;  echo $?
-big 4m forward  30000000;  echo $?
-big 4m exchange 30000000;  echo $?
-# then section (b); and only if the 30 minutes are not up after it:
-big 9m forward  100000000; echo $?
+big 5m  forward  10000000;  echo $?
+big 5m  exchange 10000000;  echo $?
+big 15m gradient 10000000;  echo $?
+big 10m forward  30000000;  echo $?
+big 6m  exchange 30000000;  echo $?
+# then sections (b) and (c); and only if the tail's time is not up after them:
+big 40m forward  100000000; echo $?
 ```
 
 At 3e7 and 1e8 cells the `forward` goal prints one `CHECK NOT RUN` a size
@@ -874,7 +948,9 @@ per million cells.  At that rate 3e7 cells need about 10 GiB and 2
 minutes and 1e8 about 34 GiB and 7 minutes, before the timed steps; and a
 pod should not be asked for more cells than half its RAM holds: 90
 million on 64 GiB, 180 million on 128 GiB.  Check `free -g` first, and
-leave the 1e8 run out on a pod with less than 70 GiB.  The commands pass
+leave the 1e8 run out on a pod with less than 70 GiB.  The pod of
+2026-10-12 had 1.5 TB, and its times (the table above) were two to four
+times these estimates: the estimate is for memory, not for time.  The commands pass
 `--partition contiguous` because PyMetis at these sizes was not measured,
 and `--warmup 1 --repeats 3` because twenty timed repeats of twenty steps
 are for the ranking at the gate's sizes, not for this.
@@ -905,15 +981,23 @@ the tiling rules that make a wrong halo show (an odd number of tiles
 along every split axis, sharing no factor with the devices there).
 
 ```sh
-C="python3 benchmarks/multigpu/run_capacity.py --device-memory-gb 24 --rung-timeout-s 120"
+GB=96; RUNG=360                                  # the card's memory; 120 s a rung per 24 GB
+C="python3 -u benchmarks/multigpu/run_capacity.py --device-memory-gb $GB --rung-timeout-s $RUNG"
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.95       # with PREALLOCATE=false of section 2a
-timeout 18m $C --mesh 2x2 --ramp 0.25 0.5 0.75 0.85 0.9 --soak-minutes 3 \
+timeout $((7 * RUNG + 180))s $C --mesh 2x2 --ramp 0.25 0.5 0.75 0.85 0.9 --soak-minutes 3 \
     --out results/capacity-2x2 2>&1 | tee results/capacity-2x2.log;  echo $?
-timeout 5m  $C --mesh 4x1 --ramp 0.25 0.85 \
+timeout $((2 * RUNG + 60))s  $C --mesh 4x1 --ramp 0.25 0.85 \
     --out results/capacity-4x1 2>&1 | tee results/capacity-4x1.log;  echo $?
 python3 benchmarks/multigpu/run_capacity.py --summarise results/capacity-2x2 | tee results/capacity-2x2.txt
 python3 benchmarks/multigpu/run_capacity.py --summarise results/capacity-4x1 | tee results/capacity-4x1.txt
 ```
+
+**`--device-memory-gb` is the card's memory** (96 on the 2026-10-12
+pod; the fill is read against it, and the first rung is sized from it),
+and the rung's box scales with it: 120 s for a 24 GB card, 360 s for
+96 GB, where a rung took 21 to 44 s.  The ramp's own `timeout` holds its
+rungs' boxes and the soak's (the soak's box is its minutes plus two rung
+boxes).
 
 Each rung is a process of its own under `--rung-timeout-s`, so an
 out-of-memory loses nothing and leaves no allocator state behind (and a
@@ -922,9 +1006,21 @@ first rung's size is a guess (97 bytes of state per cell times 6: about
 44 million cells at 0.25 of four 24 GiB cards); every later rung is
 sized from the peak bytes per cell the rung before it measured.  The
 fill is the largest `peak_bytes_in_use` of `jax.devices()[i].memory_stats()`
-over the 24 GiB given, over the four cards.  The soak then repeats
-build, ten steps and comparison at 0.75 of the ceiling's cells for three
-minutes and reports how the memory moved from block to block.
+over the `--device-memory-gb` given, over the four cards.  The soak then
+repeats build, ten steps and comparison at 0.75 of the ceiling's cells for
+three minutes and reports how the memory moved from block to block.
+
+**What the 2026-10-12 session measured.**  The step peaks at about **4.3
+times the state**: 11.44 GB per device after the build, 49.55 GB at the
+first compiled step, 425 to 433 bytes a cell against 97 of state, so the
+guess of 6 filled 0.18 of the cards for the 0.25 asked.  The 2×2 pencil
+passed at 176 and 472 million cells (fill 0.49 of 96 GB, `max_rel`
+1.2e-6) and ran out of memory at 713 million on one 37.46 GiB allocation
+in the step, below the predicted peak (most likely the growing pool's
+fragmentation; not reproduced); the 1-D mesh passed 174 million and ran
+out at 802 million; the soak held its memory flat.  Ceiling: about 472
+million D3Q19 cells, twice one card.  The record is
+`benchmarks/results/multigpu/2026-10-12_rtxpro6000/capacity-*`.
 
 A rung ends as exactly one of:
 
@@ -970,15 +1066,15 @@ The pool is also understood to have an upper limit of its own,
 unset -- below the ramp's last two targets -- which is why the commands
 export 0.95 (the script sets that too where it is unset).  JAX documents
 the fraction for a preallocated pool; that it also bounds a growing one
-is read from the allocator, and neither effect was measured before the
-session.  Each rung records the three variables as
+is read from the allocator (on 2026-10-12 every card's `bytes_limit` was
+96.88 GB with 0.95).  Each rung records the three variables as
 found and as used and every card's `bytes_limit`, and the summary prints
 the allocator's own limit beside the ceiling: **an out-of-memory at a
-fill just under `bytes_limit` over 24 GiB is the allocator's limit, not
-the card's.**
+fill just under `bytes_limit` over the card's memory is the allocator's
+limit, not the card's.**
 
-Read in the first rung's record before trusting the rest (nothing below
-has run on an accelerator before): `environment.platform` is `gpu` and
+Read in the first rung's record before trusting the rest (it has run on
+one accelerator, once): `environment.platform` is `gpu` and
 `device_kinds` names the card; `memory.readings` hold numbers on all four
 devices; `memory.bytes_limit` is about 0.95 of what the card had free;
 `memory.fill` against the 0.25 asked for says how good the factor 6 was; and
@@ -997,7 +1093,7 @@ This is the same `stencil` goal with the variable unset, at the smallest
 size, into a directory of its own:
 
 ```sh
-env -u JAX_DEFAULT_MATMUL_PRECISION timeout 10m python3 benchmarks/multigpu/run_pod.py \
+env -u JAX_DEFAULT_MATMUL_PRECISION timeout 10m python3 -u benchmarks/multigpu/run_pod.py \
     --goal stencil --cells 100000 --out results/stress/stencil-default-precision 2>&1 \
     | tee results/stress/stencil-default-precision.log;  echo $?
 ```
@@ -1007,14 +1103,24 @@ own `stencil.json`: whether sharded still equals unsharded at the default
 precision (the two sides round the same products), and how far the
 lattice's velocities are from the ones computed at `highest`.
 
+On 2026-10-12, before #327, this run passed 348 of 356 checks: the
+forward and halo checks all held, and the eight failures were the D2Q9
+lattice's gradients on all four meshes (d loss / d initial `f` 1.637e-3,
+d loss / d viscosity 4.7e-5 to 5.0e-5, against 1e-5; at `highest`, 2.1e-6
+and 1.6e-6 to 1.8e-6).  Since #327 the LBM nodes compute those products
+at full float32 precision whatever the default (the same seven sites,
+patched on that pod, passed 356/356 at the default), so the run now asks
+whether anything else in the goal reads the default.
+
 **Copy back** `results/stress/`, `results/capacity-2x2/`,
 `results/capacity-4x1/` and the `*.log` and `*.txt` beside them, with
-the rest (section 4), and store them under
-`benchmarks/results/multigpu-stress/`, apart from the checklist's files.
+the rest (section 4), and store them with the checklist's files in the
+session's directory (section 4): `--summarise` of its `multigpu/` reads
+none of them.
 
 ## 5. Read the result
 
-`python benchmarks/multigpu/run_pod.py --summarise benchmarks/results/multigpu`
+`python benchmarks/multigpu/run_pod.py --summarise benchmarks/results/multigpu/<date>_<card>/multigpu`
 exits 0 when no recorded check failed and every file records one commit,
 3 when any check failed or a file cannot decide (below), 4 when nothing
 failed but the files come from more than one commit, or any file records

@@ -77,6 +77,7 @@ deprecated since 0.4.0: they still work, and no surface carries them.
 | `maddening.core.graph_manager.GraphManager.constrain` | evolving |
 | `maddening.core.graph_manager.GraphManager.coupling_report` | experimental |
 | `maddening.core.graph_manager.GraphManager.format_graph` | experimental |
+| `maddening.core.graph_manager.GraphManager.matmul_precision` | experimental |
 | `maddening.core.graph_manager.GraphManager.memory_estimate` | experimental |
 | `maddening.core.graph_manager.GraphManager.param_spec_overrides` | evolving |
 | `maddening.core.graph_manager.GraphManager.param_specs` | evolving |
@@ -240,4 +241,4 @@ deprecated since 0.4.0: they still work, and no surface carries them.
 | `maddening.usd.live_stage.LiveStage` | evolving |
 | `maddening.viz.relay.StateRelay` | experimental |
 
-*219 API surfaces registered.*
+*220 API surfaces registered.*

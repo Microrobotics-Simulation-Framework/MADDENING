@@ -19,6 +19,7 @@ import numpy as np
 # guard — a missing lineax is now an installation fault, not a
 # user-recoverable "install the extra" condition.
 
+from maddening.core import _matmul_precision
 from maddening.core._pow2_frame import pow2_frame
 from maddening.core.coupling._bounds import _F_dispatch, _analysis_dtype
 from maddening.core.coupling._fixed_point import _fixed_point_while
@@ -482,7 +483,14 @@ def _zero_tangent(x):
 #                  (static str).  4=first_res is a *traced* scalar (the
 #                  residual of the pass before the loop), so it is a
 #                  primal with an ignored tangent, not a static.
-_ift_solve = jax.custom_jvp(
-    _ift_solve_impl, nondiff_argnums=(0, 5, 6, 7, 8, 9, 10, 11)
+#
+# The rule is traced when a derivative is taken (the caller's ``jax.grad``,
+# ``jax.jvp``, the FMU's directional derivative), after the step body that
+# called ``_ift_solve`` has returned, so the step's
+# ``jax.default_matmul_precision`` does not reach it: it is built with
+# ``custom_jvp_at_call_precision``, which hands the rule the precision in
+# force at the call (the graph's ``matmul_precision``), and the rule's
+# products -- the members' own JVPs and the adjoint solve -- trace at it.
+_ift_solve = _matmul_precision.custom_jvp_at_call_precision(
+    _ift_solve_impl, _ift_solve_jvp, nondiff_argnums=(0, 5, 6, 7, 8, 9, 10, 11),
 )
-_ift_solve.defjvp(_ift_solve_jvp)

@@ -38,6 +38,8 @@ error.
 from __future__ import annotations
 
 import ast
+import difflib
+import html
 import importlib
 import importlib.util
 import os
@@ -326,15 +328,30 @@ PER_PUSH = [
         expect=("All checks passed",)),
     Run("advanced.sysid_demo", ("--samples", "100", "--n-iter", "150"),
         expect=("All checks passed",)),
+    # verify_node needs Hypothesis (the verify extra), which CI installs.
+    Run("advanced.calibrated_node", ("--samples", "80", "--max-examples", "10"),
+        needs=("hypothesis",), expect=("All checks passed",)),
+    Run("advanced.multiple_shooting_fit", expect=("All checks passed",)),
     Run("advanced.checkpoint_resume_demo", ("--warmup", "20", "--steps", "20"),
         expect=("All checks passed",)),
+    # Two child processes into its own temporary directories, with the
+    # cache variable pointed at a second one the entries must not reach.
+    Run("advanced.compile_cache_demo", expect=("All checks passed",)),
     # Pins its own device count (4) before importing JAX, whatever
     # XLA_FLAGS it inherits.
     Run("advanced.sharding_demo", ("--n-cells", "64", "--steps", "20"),
         expect=("All checks passed",)),
-    # Skips its packaging / validation stages, saying why, when the C
-    # compiler or FMPy is missing; CI has both.
-    Run("advanced.fmu_export_demo", ("--steps", "5"), expect=("All checks passed",)),
+    # The same device pinning; nearly all of its time is XLA compile (three
+    # sharded graphs and the adjoint of a sharded CG solve), so a smaller
+    # size saves little: listed in tests/duration_allowlist.txt.
+    Run("advanced.unstructured_sharding_demo", ("--n-cells", "256", "--steps", "20"),
+        expect=("All checks passed",)),
+    # Skips its packaging / validation / master stages, saying why, when the
+    # C compiler or FMPy is missing; CI has both, and the expected lines are
+    # the ones stage 6 (FMPy's simulate_fmu against a loopback bridge) prints.
+    Run("advanced.fmu_export_demo", ("--steps", "5"), needs=("fmpy",),
+        expect=("requests over the loopback port", "spring.position: FMPy",
+                "All checks passed")),
     Run("advanced.surrogate_demo",
         ("--epochs", "10", "--train-steps", "100", "--compare-steps", "20"),
         needs=("equinox", "optax"), expect=("Done!",)),
@@ -345,6 +362,8 @@ PER_PUSH = [
         expect=("Takeaway",)),
     Run("coupling.convergence_diagnostics_demo", ("--steps", "5"),
         expect=("All demos complete",)),
+    Run("coupling.acting_on_diagnostics_demo", ("--parts", "1,2,3"),
+        expect=("not_contracting", "All checks passed")),
     Run("coupling.jacobi_vs_gauss_seidel", ("--steps", "40"), expect=("Takeaway",)),
     Run("coupling.spatial_interpolation_demo", ("--heat-steps", "2000"),
         expect=("All demos complete",)),
@@ -352,8 +371,14 @@ PER_PUSH = [
         expect=("All demos completed successfully",)),
     Run("coupling.interface_mapping_demo", ("--steps", "20"),
         expect=("All checks passed",)),
+    Run("coupling.sparse_mapping_round_trip_demo", ("--cells", "20000", "--steps", "5"),
+        expect=("states identical: True", "All checks passed")),
     # In-process TestClient: no port, no server process.
     Run("servers.rest_params_demo", ("--steps", "5"), needs=("fastapi", "httpx"),
+        expect=("All checks passed",)),
+    # uvicorn in a thread on a loopback port the OS picks; the server is told
+    # a network bind, so the token is enforced.  Stops itself.
+    Run("servers.serve_with_token", needs=("fastapi", "uvicorn"),
         expect=("All checks passed",)),
     Run("cloud.streaming.08_subscribe_lbm_velocity", ("--n-frames", "5"),
         needs=("fastapi", "uvicorn", "websockets", "zstandard"),
@@ -372,6 +397,9 @@ SLOW = [
      "coupling.acceleration_comparison --steps 10"),
     (Run("coupling.convergence_diagnostics_demo", expect=("All demos complete",)),
      "nine graphs, diagnostics read every step", "--steps 5"),
+    (Run("coupling.acting_on_diagnostics_demo", expect=("It decays", "All checks passed")),
+     "part 4 compiles a second graph with diagnostics=True (~4 s more)",
+     "coupling.acting_on_diagnostics_demo --parts 1,2,3"),
     (Run("coupling.jacobi_vs_gauss_seidel", expect=("Takeaway", "Settled")),
      "1000 steps x 7 graphs; also checks the cycle comes to rest",
      "coupling.jacobi_vs_gauss_seidel --steps 40"),
@@ -379,6 +407,9 @@ SLOW = [
      "20 000 coupled heat steps", "--heat-steps 2000"),
     (Run("coupling.flux_coupling_demo", expect=("All demos completed successfully",)),
      "all seven sections, 13 graphs", "--sections 1,2,3"),
+    (Run("coupling.sparse_mapping_round_trip_demo", expect=("All checks passed",)),
+     "rods of 200 000 and 100 000 cells, the sizes its memory figures are for",
+     "coupling.sparse_mapping_round_trip_demo --cells 20000 --steps 5"),
     (Run("servers.lbm_pipe_interactive", ("--frames", "2"), needs=("pyvista",),
          expect=("Rendered 2 frames",)),
      "3-D LBM plus off-screen VTK rendering", "none: needs pyvista, absent in CI"),
@@ -426,6 +457,11 @@ LOOPBACK = {
     "servers/lbm_pipe_server.py", "servers/vessel_flow_server.py",
     "cloud/server/04_server_test.py", "cloud/server/05_websocket_test.py",
     "cloud/multijob/08_two_vm_test.py",
+    # A SelkiesSession on 127.0.0.1.  Its stream needs GStreamer, so its
+    # --self-check and its viewer page run in CI's streaming container
+    # (tests/cloud/test_local_webrtc_viewer_example.py); the two tests at
+    # the end of this file cover what runs without GStreamer.
+    "cloud/streaming/09_local_webrtc_viewer.py",
 }
 
 
@@ -843,3 +879,65 @@ def test_example_guard_refuses_cloud_imports_and_off_loopback_traffic(
     for line in ("blocked sky", "blocked maddening.cloud.launcher",
                  "blocked network", "blocked deprecation"):
         assert line in out, (line, out, result.stderr[-2000:])
+
+
+# ---------------------------------------------------------------------------
+# The local WebRTC viewer, where GStreamer is absent (its stream runs in the
+# streaming container: tests/cloud/test_local_webrtc_viewer_example.py)
+# ---------------------------------------------------------------------------
+
+WEBRTC_VIEWER = "maddening.examples.cloud.streaming.09_local_webrtc_viewer"
+
+
+def test_local_webrtc_viewer_without_gstreamer_says_how_to_get_it(tmp_path, example_env):
+    """Without PyGObject the example exits 2 with what to install, or which
+    image to run it in -- never a traceback.  ``gi`` is hidden by a package
+    of that name that raises, so the test means the same with or without
+    GStreamer on the machine."""
+    shadow = tmp_path / "shadow"
+    (shadow / "gi").mkdir(parents=True)
+    (shadow / "gi" / "__init__.py").write_text(
+        'raise ImportError("gi is hidden from this run")\n')
+    env = dict(example_env)
+    guard, *rest = env["PYTHONPATH"].split(os.pathsep)
+    env["PYTHONPATH"] = os.pathsep.join([guard, str(shadow), *rest])
+    result = subprocess.run(
+        [sys.executable, "-m", WEBRTC_VIEWER, "--self-check"], cwd=tmp_path, env=env,
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
+    output = result.stdout + result.stderr
+    assert result.returncode == 2, output[-3000:]
+    assert "Traceback" not in output, output[-3000:]
+    assert "Cannot stream: PyGObject" in result.stderr and "gi is hidden" in result.stderr
+    assert "apt install python3-gi" in result.stderr
+    assert "docker build -f docker/Dockerfile.streaming-test" in result.stderr
+
+
+def test_local_webrtc_viewer_page_is_the_shipped_client_with_the_url_filled_in(
+    tmp_path, example_env,
+):
+    """The viewer page is the shipped browser client with three edits: the
+    signaling URL (HTML-escaped) in the input, no STUN server, and a
+    connect on load.  It holds a token, so only its owner can read it."""
+    url = "ws://127.0.0.1:9/signaling/abc?token=example-token-not-a-secret&x=<1>"
+    probe = textwrap.dedent(f'''
+        import importlib, sys
+        from pathlib import Path
+        viewer = importlib.import_module("{WEBRTC_VIEWER}")
+        print(viewer.write_viewer_page(sys.argv[1], Path(sys.argv[2])))
+    ''')
+    result = subprocess.run(
+        [sys.executable, "-c", probe, url, str(tmp_path)], cwd=tmp_path, env=example_env,
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stdout[-2000:] + result.stderr[-2000:]
+    page = Path(result.stdout.strip().splitlines()[-1])
+    assert page.parent == tmp_path and (page.stat().st_mode & 0o777) == 0o600
+    text = page.read_text(encoding="utf-8")
+    value = re.search(r'<input id="signaling-url" type="text"\s+value="([^"]*)">', text)
+    assert value and html.unescape(value.group(1)) == url, text[:2000]
+    assert "iceServers: []" in text and "stun:" not in text
+    assert text.count("window.addEventListener('load', connect);") == 1
+    shipped = (EXAMPLES_ROOT.parent / "api" / "static" / "webrtc_client.html").read_text(
+        encoding="utf-8")
+    changed = [line for line in difflib.ndiff(shipped.splitlines(), text.splitlines())
+               if line[:2] in ("- ", "+ ")]
+    assert len(changed) == 5, changed     # two lines replaced, one line added

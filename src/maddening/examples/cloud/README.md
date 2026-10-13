@@ -15,6 +15,9 @@ python -m maddening.examples.cloud.server.05_websocket_test --local
 python -m maddening.examples.cloud.multijob.08_two_vm_test --local
 # Field subscription and compression over the binary WebSocket (local only):
 python -m maddening.examples.cloud.streaming.08_subscribe_lbm_velocity
+# A WebRTC stream (SelkiesSession, x264enc on the CPU) to a browser on this
+# machine; needs GStreamer and PyGObject.  --self-check runs it headless:
+python -m maddening.examples.cloud.streaming.09_local_webrtc_viewer
 ```
 
 None of these import the cloud launcher.
@@ -43,7 +46,8 @@ cloud/
 └── streaming/                       # WebRTC / Selkies streaming
     ├── 06_selkies_test.py               # GStreamer pipeline on a cloud GPU
     ├── 07_webrtc_streaming_test.py      # Full WebRTC pipeline + profiling
-    └── 08_subscribe_lbm_velocity.py     # Binary-WS field subscription (local only)
+    ├── 08_subscribe_lbm_velocity.py     # Binary-WS field subscription (local only)
+    └── 09_local_webrtc_viewer.py        # WebRTC to a browser on this machine (local only)
 ```
 
 ## Setup

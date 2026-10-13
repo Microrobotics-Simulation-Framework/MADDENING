@@ -1,0 +1,126 @@
+{
+  "cells": 10004569,
+  "steps": 20,
+  "devices": [
+    "cuda:0",
+    "cuda:1",
+    "cuda:2",
+    "cuda:3"
+  ],
+  "A_eager_fresh_statics": {
+    "median_ms_per_step": 242.50441999174654,
+    "repartitions_during_steps": 40
+  },
+  "B_eager_cached_statics": {
+    "median_ms_per_step": 4.452675115317106,
+    "repartitions_during_steps": 0
+  },
+  "C_graph_step": {
+    "median_ms_per_step": 7.228766102343798,
+    "repartitions_at_compile_and_first_step": 2,
+    "repartitions_during_steps": 0,
+    "compile_and_first_step_s": 3.4786383789032698
+  },
+  "C_graph_run_scan": {
+    "ms_per_step": 0.8064927067607641,
+    "repartitions": 0
+  },
+  "A_vs_B_max_abs": 0.0,
+  "A_vs_graph_step_max_abs": 2.384185791015625e-07,
+  "profile_4_cards_sharded": {
+    "jit_compile_ms": 3326.966521795839,
+    "mean_step_ms": 3.7854127399623394,
+    "median_step_ms": 3.8192090578377247,
+    "std_step_ms": 0.28105176693391415,
+    "steps_per_second": 264.17198564454264,
+    "dispatch_floor_ms": 2.40786237642169,
+    "device": "cuda:0",
+    "node_times_ms": {
+      "mesh": 3.442283906042576
+    },
+    "trace": {
+      "n_steps": 20,
+      "device_busy_ms_per_step": 1.0976264500000017,
+      "device_busy_fraction": 0.2899621587924708,
+      "n_kernels_per_step": 43.0,
+      "host_dispatch_ms_per_step": 7.544031250000001,
+      "device_ms_by_scope": {
+        "unscoped": 0.19884015000000008,
+        "node:mesh": 0.8987863000000009
+      },
+      "top_kernels": [
+        [
+          "ncclDevKernel_SendRecv(ncclDevKernelArgsStorage<4096ul>)",
+          0.7064600500000001
+        ],
+        [
+          "input_reduce_fusion",
+          0.16878395
+        ],
+        [
+          "loop_compare_fusion",
+          0.09155334999999996
+        ],
+        [
+          "loop_add_fusion",
+          0.077171
+        ],
+        [
+          "input_scatter_fusion_1",
+          0.027309050000000005
+        ],
+        [
+          "loop_select_fusion",
+          0.014576400000000002
+        ],
+        [
+          "loop_broadcast_fusion",
+          0.009025500000000004
+        ],
+        [
+          "MemcpyP2P",
+          0.001420750000000001
+        ],
+        [
+          "Memset 3",
+          0.0013264000000000008
+        ]
+      ],
+      "log_dir": "/root/gve_results/profile/4_cards_sharded"
+    }
+  },
+  "profile_1_card_unsharded": {
+    "jit_compile_ms": 1676.9563211128116,
+    "mean_step_ms": 1.2514738272875547,
+    "median_step_ms": 1.254924340173602,
+    "std_step_ms": 0.23585193666749396,
+    "steps_per_second": 799.0578613756555,
+    "dispatch_floor_ms": 0.9041595552116632,
+    "device": "cuda:0",
+    "node_times_ms": {
+      "mesh": 1.232179207727313
+    },
+    "trace": {
+      "n_steps": 20,
+      "device_busy_ms_per_step": 0.27986989999999995,
+      "device_busy_fraction": 0.22363224375741853,
+      "n_kernels_per_step": 2.0,
+      "host_dispatch_ms_per_step": 0.1406803,
+      "device_ms_by_scope": {
+        "unscoped": 0.20541400000000004,
+        "node:mesh": 0.07445590000000002
+      },
+      "top_kernels": [
+        [
+          "input_reduce_fusion",
+          0.20541400000000004
+        ],
+        [
+          "loop_add_fusion",
+          0.07445590000000002
+        ]
+      ],
+      "log_dir": "/root/gve_results/profile/1_card_unsharded"
+    }
+  }
+}

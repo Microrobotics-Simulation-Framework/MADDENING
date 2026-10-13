@@ -739,6 +739,165 @@ def _shim(tmp_path):
     return f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
 
 
+def test_the_budget_step_retries_an_outlier_before_failing():
+    """``--retry-outliers`` is what keeps one runner's stall from failing a pull request."""
+    step = _budget_step()
+    last = _shell_words(re.sub(r"\$\{\{\s*(.*?)\s*\}\}", r"{{\1}}", _commands(step["run"])[-1]))
+    assert "--retry-outliers" in last, last
+    # The re-run is a pytest of this checkout: the step needs the test step's environment.
+    test_env = next(s for s in _ci()["jobs"]["test"]["steps"] if s.get("name") == "Run tests")["env"]
+    for key in ("JAX_PLATFORMS", "XLA_FLAGS", "PYTEST_DISABLE_PLUGIN_AUTOLOAD"):
+        assert step["env"][key] == test_env[key], key
+    assert "MADDENING_TEST_SHARD" not in step["env"]
+
+
+def _again(gate, outcome="passed", seconds=1.2, ran=None):
+    """A stand-in for ``run_pytest_again``: writes a re-run report holding every id it was given."""
+    def run(nodeids, report, cache_dir, **_):
+        if ran is not None:
+            ran.append(list(nodeids))
+        cases = []
+        for nid in nodeids:
+            file, _, name = nid.partition("::")
+            extra = "<failure message='boom'/>" if outcome == "failed" else ""
+            cases.append(_case(file, name, seconds, extra=extra))
+        report.write_text('<testsuites><testsuite name="pytest">' + "".join(cases)
+                          + "</testsuite></testsuites>", encoding="utf-8")
+        return 0
+    return run
+
+
+@pytest.mark.parametrize("again_seconds, outcome, forgiven", [
+    (1.2, "passed", True),           # the outlier of 2026-10-13: 23.9 s once, 1.1-1.6 s everywhere else
+    (20.0, "passed", True),          # exactly on the line is not over it
+    (20.1, "passed", False),         # over twice
+    (1.2, "failed", False),          # a re-run that fails is not a pass
+])
+def test_a_test_over_the_hard_line_once_is_run_again_and_fails_only_if_it_is_over_twice(
+        gate, tmp_path, capsys, monkeypatch, again_seconds, outcome, forgiven):
+    report = _report(tmp_path, _case("tests/a/test_x.py", "test_outlier", 23.9),
+                     _case("tests/a/test_x.py", "test_fast", 0.2))
+    ran = []
+    monkeypatch.setattr(gate, "run_pytest_again", _again(gate, outcome, again_seconds, ran))
+    code, out = _run(gate, capsys, report, "--retry-outliers")
+    assert ran == [["tests/a/test_x.py::test_outlier"]], ran    # only the test over the line, once
+    if forgiven:
+        assert code == 0 and "::error" not in out
+        assert ("::warning title=Outlier forgiven::tests/a/test_x.py::test_outlier took 23.9 s here "
+                f"and {gate._fmt(again_seconds)} on a re-run alone") in out, out
+        assert "after a re-run (1 forgiven)" in out
+    else:
+        assert code == 1 and "::error file=tests/a/test_x.py,line=11," in out
+        assert "Outlier forgiven" not in out
+
+
+def test_a_test_whose_rerun_found_nothing_still_fails(gate, tmp_path, capsys, monkeypatch):
+    # pytest could not start, or the test no longer exists under its id: no report, no pardon.
+    report = _report(tmp_path, _case("tests/a/test_x.py", "test_outlier", 23.9))
+    monkeypatch.setattr(gate, "run_pytest_again", lambda nodeids, report, cache_dir, **_: 4)
+    code, out = _run(gate, capsys, report, "--retry-outliers")
+    assert code == 1 and "::error" in out
+    monkeypatch.setattr(gate, "run_pytest_again",
+                        lambda nodeids, report, cache_dir, **_: report.write_text("<testsuites/>") or 5)
+    code, out = _run(gate, capsys, report, "--retry-outliers")
+    assert code == 1
+
+
+def test_without_the_flag_nothing_is_run_again(gate, tmp_path, capsys, monkeypatch):
+    report = _report(tmp_path, _case("tests/a/test_x.py", "test_outlier", 23.9))
+    monkeypatch.setattr(gate, "run_pytest_again", lambda *a, **k: pytest.fail("a re-run nobody asked for"))
+    code, out = _run(gate, capsys, report)
+    assert code == 1
+
+
+def test_a_listed_test_and_a_fast_one_are_not_run_again(gate, tmp_path, capsys, monkeypatch):
+    allow = tmp_path / "allow.txt"
+    allow.write_text("tests/a/test_x.py::test_kept # kept: the only end-to-end run\n")
+    report = _report(tmp_path, _case("tests/a/test_x.py", "test_kept", 90.0),
+                     _case("tests/a/test_x.py", "test_fast", 0.2))
+    monkeypatch.setattr(gate, "run_pytest_again", lambda *a, **k: pytest.fail("nothing here is an outlier"))
+    code, out = _run(gate, capsys, report, "--allowlist", allow, "--retry-outliers")
+    assert code == 0
+
+
+def test_more_tests_over_the_line_than_the_retry_limit_are_a_regression_not_an_outlier(
+        gate, tmp_path, capsys, monkeypatch):
+    report = _report(tmp_path, *(_case("tests/a/test_x.py", f"test_{i}", 30.0) for i in range(6)))
+    monkeypatch.setattr(gate, "run_pytest_again", lambda *a, **k: pytest.fail("six are not outliers"))
+    code, out = _run(gate, capsys, report, "--retry-outliers")
+    assert code == 1
+    assert "6 tests are over 20 s, more than --retry-max 5: not outliers, none is re-run" in out
+    # ... and five are.
+    report = _report(tmp_path, *(_case("tests/a/test_x.py", f"test_{i}", 30.0) for i in range(5)),
+                     name="five.xml")
+    ran = []
+    monkeypatch.setattr(gate, "run_pytest_again", _again(gate, ran=ran))
+    code, out = _run(gate, capsys, report, "--retry-outliers")
+    assert code == 0 and len(ran) == 1 and len(ran[0]) == 5
+
+
+_FLAKY = """\
+import os
+import time
+from pathlib import Path
+
+HERE = Path(__file__).parent
+
+
+def test_stalls_once():
+    # The first run of this test stalls (a runner's burst); a run after it does not.
+    seen = HERE / "seen"
+    first = not seen.exists()
+    seen.write_text("x")
+    if first:
+        time.sleep(1.6)
+
+
+def test_always_slow():
+    (HERE / "env").write_text(
+        repr((os.environ.get("MADDENING_TEST_SHARD"), os.environ.get("JAX_COMPILATION_CACHE_DIR"))))
+    time.sleep(1.6)
+"""
+
+
+def test_the_real_rerun_forgives_a_stall_that_does_not_repeat_and_fails_a_test_that_is_slow_twice(tmp_path):
+    """No stand-ins: pytest writes the report, the gate runs a second pytest on the tests over the line.
+
+    The scratch hard line is 1 s.  ``test_stalls_once`` takes 1.6 s the first
+    time it runs and nothing after; ``test_always_slow`` takes 1.6 s every
+    time.  The re-run must also name no shard and start with a compilation
+    cache directory that is new, not the one the first run wrote.
+    """
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "test_flaky.py").write_text(_FLAKY)
+    first_cache = tmp_path / "first-cache"
+    first_cache.mkdir()
+    env = {**os.environ, "MADDENING_TEST_SHARD": "9/9", "JAX_COMPILATION_CACHE_DIR": str(first_cache),
+           "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}
+    env.pop("PYTEST_ADDOPTS", None)
+    # This scratch directory has no root conftest, so the shard variable is inert in it.
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q", "--junitxml=results.xml",
+         "-o", "junit_family=xunit1", "test_flaky.py"],
+        cwd=work, env=env, capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert eval((work / "env").read_text()) == ("9/9", str(first_cache))
+    gate_proc = subprocess.run(
+        [sys.executable, str(SCRIPT), "results.xml", "--markdown", "summary.md", "--watch-over", "0.1",
+         "--slow-over", "0.5", "--fail-over", "1", "--retry-outliers"],
+        cwd=work, env=env, capture_output=True, text=True, timeout=300)
+    out = gate_proc.stdout
+    assert gate_proc.returncode == 1, out + gate_proc.stderr
+    errors = [ln for ln in out.splitlines() if ln.startswith("::error")]
+    assert len(errors) == 1 and "test_flaky.py::test_always_slow took" in errors[0], errors
+    assert "::warning title=Outlier forgiven::test_flaky.py::test_stalls_once took 1.6 s here and" in out, out
+    # The re-run's environment, written by the test that was slow twice: no shard, a new cache directory.
+    shard, cache = eval((work / "env").read_text())
+    assert shard is None
+    assert cache != str(first_cache) and "retry-outliers-" in cache, cache
+
+
 def test_the_budget_step_records_the_cache_mode_even_when_the_gate_fails(tmp_path):
     """The step runs under ``bash -e``: a line after a failing gate never runs.
 

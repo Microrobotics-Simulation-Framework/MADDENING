@@ -97,6 +97,26 @@ persistent-cache lookups is flagged: a test switched a cache on in-process,
 and when the lookups reach more than one file, it left it on for the tests
 after it, so those times are partly warm.
 
+One slow runner is not a slow test
+----------------------------------
+A test can read 23.9 s on one runner and 1.07-1.61 s on every other run of
+the same tree (2026-10-13, ``test_wavelet_mms_order.py``): a hosted runner
+that stalls, a neighbour's noisy burst.  With ``--retry-outliers`` an
+unlisted test over ``--fail-over`` is run again, once, alone, in a fresh
+``python -m pytest`` of the same checkout and environment.  It stops
+failing the gate only if that re-run passes under the hard line; a test
+that is over the line twice, or that fails or is not found on the re-run,
+still fails.  The re-run starts with an **empty compilation cache**
+(``JAX_COMPILATION_CACHE_DIR`` is a new directory): a test whose time is a
+real compile must pay it again, rather than read back from the cache its
+first run just wrote and look fast.  What a re-run alone cannot see: a test
+that is quick in its file only because an earlier test built the fixture or
+program it shares pays for that itself, so such a test over the line by
+noise can fail twice; it is then a case for the allowlist or a slow mark,
+as any test over the line is.  More than ``--retry-max`` tests over the line
+in one report (default 5) is not an outlier: none is re-run and all fail.
+The summary and a warning name each test forgiven, with both times.
+
 The allowlist
 -------------
 ``tests/duration_allowlist.txt``: one pytest node id per line, then
@@ -137,7 +157,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from pathlib import Path
@@ -622,6 +644,53 @@ def markdown(verdict, allow, *, title, watch_over, slow_over, fail_over, top, ca
     return "\n".join(lines) + "\n"
 
 
+#: How long the one re-run of the outliers may take, in all.
+RETRY_TIMEOUT_S = 900
+
+
+def run_pytest_again(nodeids: list[str], report: Path, cache_dir: Path, *, timeout: float = RETRY_TIMEOUT_S) -> int:
+    """Run ``nodeids`` in a fresh pytest with an empty compilation cache; the exit code, or -1 on a time-out.
+
+    The environment is this process's, except that it names no shard (the
+    node ids are the selection) and the persistent compilation cache is a
+    new directory, so a compile the first run paid is paid again.
+    """
+    env = {k: v for k, v in os.environ.items() if k != "MADDENING_TEST_SHARD"}
+    env["JAX_COMPILATION_CACHE_DIR"] = str(cache_dir)
+    cmd = [sys.executable, "-m", "pytest", *nodeids, "-p", "no:cacheprovider", "-q",
+           f"--junitxml={report}", "-o", "junit_family=xunit1"]
+    try:
+        return subprocess.run(cmd, env=env, timeout=timeout).returncode
+    except subprocess.TimeoutExpired:
+        return -1
+
+
+def retry_outliers(failing: list[TestTime], *, fail_over: float, run=None,
+                   ) -> tuple[list[TestTime], list[tuple[TestTime, TestTime]]]:
+    """Re-run each of ``failing`` once; ``(still failing, [(first run, re-run) forgiven])``.
+
+    A test is forgiven only when the re-run found it, passed, and took no
+    more than ``fail_over``.  Pure but for ``run`` (default
+    ``run_pytest_again``, looked up when called), which tests replace.
+    """
+    run = run or run_pytest_again
+    with tempfile.TemporaryDirectory(prefix="retry-outliers-") as tmp:
+        report = Path(tmp) / "retry.xml"
+        run([t.nodeid for t in failing], report, Path(tmp) / "jax-cache")
+        try:
+            second = {t.nodeid: t for t in read_report(report)}
+        except ReportError:
+            second = {}  # no report: the re-run never got to run anything
+    still, forgiven = [], []
+    for t in failing:
+        again = second.get(t.nodeid)
+        if again is not None and again.outcome == "passed" and again.seconds <= fail_over:
+            forgiven.append((t, again))
+        else:
+            still.append(t)
+    return still, forgiven
+
+
 def annotations(verdict, *, slow_over, fail_over):
     out = []
     for t in verdict["failing"]:
@@ -666,6 +735,11 @@ def main(argv=None) -> int:
                    help="append the summary here (default: $GITHUB_STEP_SUMMARY)")
     p.add_argument("--no-removable", action="store_true",
                    help="list no allowlist entries as removable (the reports do not cover the whole lane)")
+    p.add_argument("--retry-outliers", action="store_true",
+                   help="re-run each unlisted test over --fail-over once, alone, with an empty compilation "
+                        "cache; it fails the job only if it is over again (see 'One slow runner')")
+    p.add_argument("--retry-max", type=int, default=5,
+                   help="more unlisted tests than this over --fail-over are not outliers: none is re-run (default 5)")
     p.add_argument("--title", default="Test durations")
     p.add_argument("--top", type=int, default=30)
     args = p.parse_args(argv)
@@ -709,6 +783,22 @@ def main(argv=None) -> int:
     fail_over = args.fail_over or float("inf")
     verdict = judge(tests, allow, watch_over=args.watch_over,
                     slow_over=args.slow_over, fail_over=fail_over)
+    forgiven = []
+    if args.retry_outliers and verdict["failing"]:
+        if len(verdict["failing"]) > args.retry_max:
+            print("::warning title=Test over the hard line::" + _escape(
+                f"{len(verdict['failing'])} tests are over {args.fail_over:g} s, more than "
+                f"--retry-max {args.retry_max}: not outliers, none is re-run"))
+        else:
+            print(f"re-running {len(verdict['failing'])} test(s) over {args.fail_over:g} s once, alone, "
+                  "with an empty compilation cache", flush=True)
+            still, forgiven = retry_outliers(verdict["failing"], fail_over=fail_over)
+            verdict["failing"] = still
+            for first, again in forgiven:
+                print("::warning title=Outlier forgiven::" + _escape(
+                    f"{first.nodeid} took {_fmt(first.seconds)} here and {_fmt(again.seconds)} on a re-run "
+                    f"alone (limit {args.fail_over:g} s): one runner's outlier, not a slow test. If it "
+                    "repeats, look at the runner and at what the test shares with its neighbours."))
     if args.no_removable:
         # An entry absent from a partial view may simply be in the part
         # that is missing.
@@ -734,6 +824,7 @@ def main(argv=None) -> int:
           f"{len(verdict['slow_warm'])} slow even with a warm cache; "
           f"{len(verdict['slow_subprocess'])} with work in a subprocess, not measured here); "
           + (f"{len(verdict['failing'])} unlisted over {args.fail_over:g} s"
+             + (f" after a re-run ({len(forgiven)} forgiven)" if forgiven else "")
              + (f", {len(verdict['kept_over_hard_line'])} allowlisted over it."
                 if verdict["kept_over_hard_line"] else ".")
              if args.fail_over else "hard line off (--fail-over 0)."))

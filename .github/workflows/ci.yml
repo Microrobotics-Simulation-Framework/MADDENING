@@ -323,7 +323,18 @@ jobs:
         # fails on one over 20 s.  The summary is written once per lane,
         # from all six shards, by the "Test durations" job below.  The
         # budget is in docs/developer_guide/testing_standards.md.
+        #
+        # An unlisted test over the hard line is re-run once, alone, with an
+        # empty compilation cache before the step fails (--retry-outliers):
+        # one runner's stall read 23.9 s for a test that takes 1.1-1.6 s
+        # everywhere else and failed a pull request (2026-10-13).  A test
+        # over the line twice still fails.  The re-run is a pytest of this
+        # checkout, so it needs the environment the test step runs in.
         if: ${{ !cancelled() }}
+        env:
+          JAX_PLATFORMS: cpu
+          XLA_FLAGS: "--xla_gpu_autotune_level=0"
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: |
           # What this shard's cache was, for the lane summary: warm only if a
           # cache was actually restored.  Written first: this runs under
@@ -332,7 +343,8 @@ jobs:
           echo "${{ (steps.cc.outputs.mode == 'warm' && steps.cc-restore.outputs.cache-matched-key != '') && 'warm' || 'cold' }}" \
             > cache-mode-shard${{ matrix.shard }}.txt
           python scripts/report_test_durations.py test-results-shard${{ matrix.shard }}.xml \
-            --allowlist tests/duration_allowlist.txt --markdown /dev/null
+            --allowlist tests/duration_allowlist.txt --markdown /dev/null \
+            --retry-outliers
 
       - name: Drop unreadable compilation-cache entries
         # A truncated entry (see "No JAX_COMPILATION_CACHE_MAX_SIZE" above)

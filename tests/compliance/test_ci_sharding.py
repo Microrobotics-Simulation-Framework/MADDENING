@@ -322,6 +322,8 @@ def test_the_weights_generator_writes_a_table_the_split_reads(tmp_path):
     # a: its slower lane (61 s, two tests summed).  b: under the floor.  c: the
     # later run's 20 s on one lane, the first run's 90 s on the other.
     assert table["seconds"] == {real_a: 61, real_c: 90}
+    # No --lane: the slow lane's table, last run wins.
+    assert "slow lane" in table["what"] and "the later" in table["measured"], table
     assert [(r["run"], r["commit"]) for r in table["runs"]] == [("11", "abc1234"), ("22", "def5678")]
     assert table["runs"][1]["artifacts"] == ["slow-durations-py3.12-jax0.10.2-shard2of2"]
     assert "not a file in the tree, left out: tests/test_gone.py" in proc.stdout
@@ -356,6 +358,7 @@ def test_the_per_push_lane_table_is_the_median_of_the_runs_it_names(tmp_path):
     table = json.loads(out.read_text(encoding="utf-8"))
     assert table["seconds"] == {real_a: 70, real_b: 100, real_c: 40}
     assert "median" in table["measured"]
+    assert "per-push lane" in table["what"], table
     # The lane's own shard count is the default prediction.
     assert f"weighted, {_sharding.PER_PUSH_SHARDS} shards" in proc.stdout
     # The default stays the last run's, which is what the slow lane's table is.

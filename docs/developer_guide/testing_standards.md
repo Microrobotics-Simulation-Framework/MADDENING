@@ -680,8 +680,8 @@ cost, so it is never listed).
 
 Every install of the project in `ci.yml` resolves against
 `ci/constraints.txt` (`PIP_CONSTRAINT`): an exact `name==version` for
-every distribution a resolution of the base dependencies and the `ci`,
-`usd` and `viz3d` extras pulls in, resolved on CPython 3.12 on Linux x86-64
+every distribution a resolution of the base dependencies and the `ci`
+and `usd` extras pulls in, resolved on CPython 3.12 on Linux x86-64
 for both JAX versions of the test matrix (which pin their own `jax` and
 `jaxlib`, so they are not in the file). A run is then reproducible, and a new
 release of a dependency changes nothing in per-push CI until the file is
@@ -703,15 +703,11 @@ says, in the step summary, which installed versions are newer than the
 file's. A red run is a bound in `pyproject.toml` or a fix, then a
 regeneration. (lineax 0.1.1 was found this way, by luck, in 0.4.0.)
 
-Two jobs of `ci.yml` close ends of declared ranges nothing else installs.
+One job of `ci.yml` closes an end of a declared range nothing else installs.
 `lineax-floor` installs `lineax==0.0.7` (the floor `pyproject.toml` allows;
 the other jobs install the newest) on both JAX versions and runs every test
 file that names lineax; the compliance tests read the floor from
 `pyproject.toml` and fail when a file that names lineax is not listed.
-`viz3d` installs the `viz3d` extra and runs `tests/api/test_frame_renderer_3d.py`
-under `xvfb-run` (VTK's OpenGL needs a display; Mesa's software rasteriser
-draws it); `MADDENING_REQUIRE_VIZ3D_TESTS=1` turns a missing PyVista from a
-skip into a failure, so the 14 tests cannot silently run nowhere again.
 
 The same workflow's other schedule, Thursdays (and on demand), explores. The
 slow lane's targeted searches run under fixed seeds, so its verdict on a tree

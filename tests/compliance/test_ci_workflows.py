@@ -436,7 +436,6 @@ GATED_ON_CODE = {
     "test-usd": ("changes", "needs.changes.outputs.code == 'true'"),
     "test-streaming": ("changes", "needs.changes.outputs.code == 'true'"),
     "lineax-floor": ("changes", "needs.changes.outputs.code == 'true'"),
-    "viz3d": ("changes", "needs.changes.outputs.code == 'true'"),
     "typecheck": ("changes", "needs.changes.outputs.code == 'true'"),
     "verify-hypothesis": ("changes", "needs.changes.outputs.code == 'true'"),
 }

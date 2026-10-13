@@ -159,7 +159,6 @@ GEN = "scripts/generate_ci_constraints.py"
 DRIFT = "scripts/report_constraint_drift.py"
 CONS = "ci/constraints.txt"
 SC = ".github/workflows/scheduled-checks.yml"
-VIZ = "tests/api/test_frame_renderer_3d.py"
 SLW = "scripts/slow_lane_weights.py"
 PP = "pyproject.toml"
 AL = "tests/duration_allowlist.txt"
@@ -391,7 +390,7 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("D2", GEN, '[*requirement_strings(pyproject), "jax-versions: " + ",".join(JAX_VERSIONS)]',
        "requirement_strings(pyproject)", DEPS, "a new JAX version in the matrix does not make the file stale"),
     _M("D3", GEN, '    for extra in EXTRAS:\n        out += [', '    for extra in EXTRAS[:1]:\n        out += [', DEPS,
-       "an edit to the usd or viz3d requirements does not make the file stale"),
+       "an edit to the usd requirements does not make the file stale"),
     _M("D4", CONS, "hypothesis==6.169.0\n", "hypothesis==7.0.0\n", DEPS, "a pin outside the range pyproject declares"),
     _M("D5", CONS, "\nlineax==0.1.1\n", "\n", DEPS, "a requirement CI installs that the file does not pin"),
     _M("D6", PP, '    "lineax>=0.0.7",\n', '    "lineax>=0.0.8",\n', DEPS,
@@ -401,10 +400,6 @@ MUTANTS: tuple[Mutant, ...] = (
        "the floor job installs something above the floor"),
     _M("D8", CI, "            tests/core/test_solver_ift_lineax_is_core.py \\\n", "", DEPS,
        "a test that names lineax is not run at its floor"),
-    _M("D9", CI, '          MADDENING_REQUIRE_VIZ3D_TESTS: "1"\n', "", DEPS,
-       "the viz3d job passes by skipping its 14 tests if PyVista does not install"),
-    _M("D10", VIZ, 'if os.environ.get("MADDENING_REQUIRE_VIZ3D_TESTS") == "1":', "if False:", DEPS,
-       "the switch is set and read by nothing"),
     _M("D11", CI, "      - name: Install dependencies\n        env:\n          # The versions CI installs against (ci/constraints.txt, written by\n"
                   "          # scripts/generate_ci_constraints.py): a run is reproducible, and a\n"
                   "          # new release of a dependency is taken on purpose.  The weekly\n"

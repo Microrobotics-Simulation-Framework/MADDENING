@@ -11,7 +11,7 @@ committed file::
     ci/constraints.txt
 
 holding ``name==version`` for every distribution a resolution of the extras
-CI installs (``ci``, ``usd``, ``viz3d``) pulls in.  JAX and jaxlib are not
+CI installs (``ci``, ``usd``) pulls in.  JAX and jaxlib are not
 in it: each lane pins its own, and the file is resolved against every JAX
 version of the test matrix (``JAX_VERSIONS``) and refused unless they agree
 on every other distribution (0.10.2 and 0.11.2 do).
@@ -59,8 +59,8 @@ CONSTRAINTS_DIR = REPO_ROOT / "ci"
 
 #: The extras CI installs anywhere (``ci.yml``): the test lanes and the
 #: type check install ``ci``, the compliance job and ``test-usd`` add
-#: ``usd``, the ``viz3d`` job adds ``viz3d``.
-EXTRAS = ("ci", "usd", "viz3d")
+#: ``usd``.
+EXTRAS = ("ci", "usd")
 #: The JAX versions of the test matrix, which the one file must hold for.
 #: ``tests/compliance/test_ci_constraints.py`` holds this against the matrix.
 JAX_VERSIONS = ("0.10.2", "0.11.2")

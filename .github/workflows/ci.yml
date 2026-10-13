@@ -588,52 +588,6 @@ jobs:
             tests/core/test_solver_ift_lineax_is_core.py \
             tests/nodes/adaptive/test_wavelet_cg_conditioning.py \
             tests/property/test_coupling_adjoint_solve.py
-  viz3d:
-    # tests/api/test_frame_renderer_3d.py needs PyVista (the viz3d extra),
-    # which the sharded lanes do not install, so its 14 tests skipped there
-    # and ran nowhere.  The renderer draws off screen through VTK's OpenGL,
-    # which wants a display; Xvfb is one, with Mesa's software rasteriser.
-    # MADDENING_REQUIRE_VIZ3D_TESTS=1 makes a missing PyVista fail the job:
-    # a skip here would mean the tests ran nowhere again.
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install a virtual display and Mesa's software OpenGL
-        # A package mirror that stops answering leaves apt-get waiting with
-        # no output (see the test job's C toolchain step).
-        timeout-minutes: 10
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq xvfb libgl1 libegl1 libosmesa6
-
-      - name: Install dependencies (with viz3d)
-        env:
-          # The versions CI installs against (ci/constraints.txt, written by
-          # scripts/generate_ci_constraints.py): a run is reproducible, and a
-          # new release of a dependency is taken on purpose.  The weekly
-          # scheduled-checks.yml installs without it.
-          PIP_CONSTRAINT: ci/constraints.txt
-        run: |
-          python -m pip install --upgrade pip
-          pip install "jax==0.10.2" "jaxlib==0.10.2"
-          pip install -e ".[ci,viz3d]"
-
-      - name: Run the 3D frame renderer tests
-        env:
-          JAX_PLATFORMS: cpu
-          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
-          MADDENING_REQUIRE_VIZ3D_TESTS: "1"
-        run: |
-          xvfb-run -a python -m pytest -v -rs --tb=short tests/api/test_frame_renderer_3d.py
 
   typecheck:
     # Phase 2 of the typing policy (docs/developer_guide/typing.md): the

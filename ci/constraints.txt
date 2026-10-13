@@ -1,11 +1,11 @@
 # The versions CI installs against.  Written by
 # scripts/generate_ci_constraints.py from fresh resolutions of the base
-# dependencies with the extras ci, usd, viz3d on JAX 0.10.2 and 0.11.2;
+# dependencies with the extras ci, usd on JAX 0.10.2 and 0.11.2;
 # do not edit by hand.  jax and jaxlib are pinned by each lane, not here.
 # ci.yml reads this file through PIP_CONSTRAINT; the weekly
 # scheduled-checks.yml installs the same extras without it.  Resolved on
 # CPython 3.12, Linux x86-64, 2026-10-14.
-# requirements-digest: 860e2cc5fbf9ee4608af3c60d5f12d6ab04e39cbf949f91a67e655a4708c6363
+# requirements-digest: fd3f90461569307052bedcfd72a291123cf04c28707f3c167a8d74d1a935683c
 absl-py==2.5.1
 agent-detector==2.0.0
 aiodns==3.6.1
@@ -40,10 +40,8 @@ contourpy==1.4.0
 cpsat-logutils==1.0.0
 cryptography==50.0.2
 cycler==0.12.1
-cyclopts==5.2.0
 detect-installer==0.2.1
 dnspython==2.9.0
-docstring-parser==0.18.0
 email-validator==2.3.0
 equinox==0.13.8
 fastapi==0.143.0
@@ -120,7 +118,6 @@ pillow==12.3.0
 pip==26.2.1
 platformdirs==4.13.0
 pluggy==1.6.0
-pooch==1.9.0
 prettytable==3.18.0
 prometheus-client==0.26.0
 prompt-toolkit==3.0.53
@@ -146,21 +143,17 @@ pytest==9.1.1
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.4
 python-multipart==0.0.32
-pyvista==0.49.1
-pyvista-validation==0.2.2
 pyyaml==6.0.3
 pyzmq==27.2.0
 referencing==0.37.0
 requests==2.34.2
 rich==15.0.0
-rich-rst==2.2.0
 rich-toolkit==0.20.6
 rignore==0.8.1
 rpds-py==2026.9.1
 runpod==1.10.1
 s3transfer==0.19.2
 scipy==1.18.1
-scooby==0.12.0
 sentry-sdk==2.72.0
 setproctitle==1.3.8
 setuptools==84.0.0
@@ -191,7 +184,6 @@ urllib3==2.8.0
 usd-core==26.8
 uvicorn==0.35.0
 uvloop==0.23.0
-vtk==9.7.1
 wadler-lindig==0.1.7
 watchdog==6.0.0
 watchfiles==1.3.0

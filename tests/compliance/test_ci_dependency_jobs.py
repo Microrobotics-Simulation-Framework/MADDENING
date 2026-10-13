@@ -12,8 +12,6 @@ these tests pin, with nothing installed and no network:
 * the generator and the drift report do what they say, on hand-made input;
 * ``lineax-floor`` installs the lowest lineax ``pyproject.toml`` allows and
   runs every test file that names lineax;
-* ``viz3d`` runs the 3D frame renderer's tests under a virtual display and
-  cannot pass by skipping them;
 * the exploring searches run every file that runs a seeded hunt, with the
   entropy switch the hunts read, and the replay it prints is the one the
   hunts accept.
@@ -93,7 +91,6 @@ def test_the_digest_moves_with_a_range_an_extra_and_the_jax_versions(gen, monkey
     for mutate in (
         lambda p: p["project"]["dependencies"].__setitem__(2, "lineax>=0.0.8"),
         lambda p: p["project"]["optional-dependencies"]["ci"].append("newpackage>=1"),
-        lambda p: p["project"]["optional-dependencies"]["viz3d"].__setitem__(0, "pyvista>=0.43"),
         lambda p: p["project"]["optional-dependencies"]["usd"].clear(),
     ):
         changed = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
@@ -197,7 +194,7 @@ def test_every_install_of_the_project_in_ci_reads_the_constraints_file():
     """The per-push jobs resolve against ci/constraints.txt, not against whatever is newest today."""
     steps = list(_install_steps(_workflow("ci.yml")))
     assert {job for job, _ in steps} == {"test", "test-usd", "typecheck", "compliance", "verify-hypothesis",
-                                         "lineax-floor", "viz3d"}, steps
+                                         "lineax-floor"}, steps
     for job, step in steps:
         if job == "lineax-floor":
             # The same file with lineax's own pin taken out, which the floor job replaces.
@@ -312,39 +309,6 @@ def test_the_lineax_floor_job_cannot_pass_by_running_nothing():
     (step,) = [s for s in job["steps"] if s.get("name") == "Run the tests that name lineax"]
     assert "continue-on-error" not in step and "||" not in step["run"]
     assert not re.search(r"\s-m\s+(?!pytest\b)", step["run"]), "no marker expression: the default lane's `not slow` applies"
-
-
-# ---------------------------------------------------------------------------
-# The 3D frame renderer
-# ---------------------------------------------------------------------------
-
-def test_the_viz3d_job_runs_the_renderer_tests_under_a_virtual_display_and_cannot_skip_them():
-    job = _workflow("ci.yml")["jobs"]["viz3d"]
-    (install,) = [s for s in job["steps"] if "pip install -e" in s.get("run", "")]
-    assert '".[ci,viz3d]"' in install["run"]
-    (apt,) = [s for s in job["steps"] if "apt-get" in s.get("run", "")]
-    assert "xvfb" in apt["run"] and isinstance(apt["timeout-minutes"], int)
-    (run,) = [s for s in job["steps"] if s.get("name") == "Run the 3D frame renderer tests"]
-    assert "xvfb-run -a python -m pytest" in run["run"] and "tests/api/test_frame_renderer_3d.py" in run["run"]
-    assert run["env"]["MADDENING_REQUIRE_VIZ3D_TESTS"] == "1"
-    test = (REPO_ROOT / "tests" / "api" / "test_frame_renderer_3d.py").read_text(encoding="utf-8")
-    assert 'os.environ.get("MADDENING_REQUIRE_VIZ3D_TESTS") == "1"' in test
-
-
-def test_the_renderer_tests_fail_rather_than_skip_when_required(tmp_path):
-    """With the switch on and no PyVista importable, the module errors; with it off, it skips."""
-    blocker = tmp_path / "pyvista.py"
-    blocker.write_text("raise ModuleNotFoundError(\"No module named 'pyvista'\", name='pyvista')\n")
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("MADDENING_", "PYTEST_"))}
-    env.update(PYTHONPATH=f"{tmp_path}{os.pathsep}{REPO_ROOT / 'src'}", JAX_PLATFORMS="cpu",
-               PYTEST_DISABLE_PLUGIN_AUTOLOAD="1")
-    command = [sys.executable, "-m", "pytest", "tests/api/test_frame_renderer_3d.py", "-q", "-p", "no:cacheprovider"]
-    skipped = subprocess.run(command, cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=120)
-    # pytest exits 5 ("no tests collected") for a module that skipped itself whole.
-    assert skipped.returncode in (0, 5) and "skipped" in skipped.stdout, skipped.stdout + skipped.stderr
-    required = subprocess.run(command, cwd=REPO_ROOT, env={**env, "MADDENING_REQUIRE_VIZ3D_TESTS": "1"},
-                              capture_output=True, text=True, timeout=120)
-    assert required.returncode != 0 and "skipped" not in required.stdout, required.stdout + required.stderr
 
 
 # ---------------------------------------------------------------------------

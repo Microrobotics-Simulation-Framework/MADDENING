@@ -5,14 +5,14 @@ bibliography: ../../bibliography.bib
 # Explicit ODE Integrators
 
 **Module**: `maddening.core.simulation.integrators`
-**Stability**: evolving
+**Stability**: {term}`evolving <EVOLVING>`
 **Algorithm ID**: `MADD-ALG-INT-001`
 **Version**: 1.1.0
 
 ## Summary
 
-Three explicit Runge-Kutta steppers for nodes that implement
-`derivatives()`, plus a dispatch helper.  They are pure JAX functions,
+Three explicit Runge-Kutta steppers for {term}`nodes <Node>` that implement
+`derivatives()`, plus a dispatch helper.  They are {term}`pure <Pure function>` {term}`JAX` functions,
 so each composes with `jit`, `grad` and `scan`.
 
 ## Governing Equations
@@ -23,7 +23,7 @@ $$
 \frac{dx}{dt} = f(x, u), \qquad x(t_n) = x_n
 $$
 
-where $x$ is the node state and $u$ the boundary inputs.
+where $x$ is the node state and $u$ the {term}`boundary inputs <Boundary inputs>`.
 
 ## Discretization
 
@@ -135,7 +135,7 @@ need a second input argument; autonomisation reaches 4 with none.
    function above and calls `rk4_step` directly.
 4. **Inputs that are not functions of time alone** — data exchanged with
    another node during the step — cannot be reached at stage times by any
-   single-node integrator.  The order is then set by the coupling scheme;
+   single-node integrator.  The order is then set by the {term}`coupling <Coupling>` scheme;
    see `docs/algorithm_guide/coupling/`.
 5. Explicit stability limits apply. `rk4_step` is unstable for real
    $h\lambda < -2.785$, `heun_step` for $h\lambda < -2$, `euler_step` for

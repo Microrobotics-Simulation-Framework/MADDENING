@@ -5,13 +5,13 @@ bibliography: ../../bibliography.bib
 # SpringDamperNode
 
 **Module**: `maddening.nodes.spring`
-**Stability**: stable
+**Stability**: {term}`stable <STABLE>`
 **Algorithm ID**: `MADD-NODE-003`
 **Version**: 1.0.0
 
 ## Summary
 
-A linear spring with viscous damping connecting a point mass to a moving attachment point. The node owns one end of the spring; the other end arrives each step as the boundary input `anchor_position`.
+A linear spring with viscous damping connecting a point mass to a moving attachment point. The {term}`node <Node>` owns one end of the spring; the other end arrives each step as the {term}`boundary input <Boundary inputs>` `anchor_position`.
 
 ## Governing Equations
 
@@ -45,9 +45,9 @@ There is no spatial order — the node integrates an ODE and has no grid. The te
 | Position update ($\dot x = v$) | `maddening.nodes.spring.SpringDamperNode.update` | `position + velocity * dt`, using the **new** velocity |
 | Continuous right-hand side | `maddening.nodes.spring.SpringDamperNode.derivatives` | For `maddening.core.simulation.integrators.integrate_node`; not the scheme `update()` uses |
 | Backward-Euler residual | `maddening.nodes.spring.SpringDamperNode.implicit_residual` | $x^{n+1} - x^n - \Delta t f(x^{n+1})$ |
-| Reaction force delivered over a flux edge | `maddening.nodes.spring.SpringDamperNode.compute_boundary_fluxes` | `spring_force`, same constants as `update` |
-| Coupled-pair limit (warning) | `maddening.nodes.spring._anchored_pair_advisories` | `compile()` warns when two nodes anchored on each other in a coupling group have a converged step that grows, MADD-ANO-098 |
-| Converged step of an anchored pair | `maddening.nodes.spring._anchored_pair_step_matrix` | The map on $(x_a - x_b, v_a, v_b)$ the warning takes the spectral radius of |
+| Reaction force delivered over a flux {term}`edge <Edge>` | `maddening.nodes.spring.SpringDamperNode.compute_boundary_fluxes` | `spring_force`, same constants as `update` |
+| Coupled-pair limit (warning) | `maddening.nodes.spring._anchored_pair_advisories` | `compile()` warns when two nodes anchored on each other in a {term}`coupling group <Coupling group>` have a converged step that grows, MADD-ANO-098 |
+| Converged step of an anchored pair | `maddening.nodes.spring._anchored_pair_step_matrix` | The map on $(x_a - x_b, v_a, v_b)$ the warning takes the {term}`spectral radius <Spectral radius>` of |
 
 ## Assumptions and Simplifications
 
@@ -83,13 +83,13 @@ $$
 
 which is $\Delta t < 2\sqrt{m/k}$ ($\omega \Delta t < 2$) undamped. Damping tightens it.
 
-**Two nodes anchored on each other in a converged coupling group** (each node's `position` is the other's `anchor_position`, with rest lengths $+\ell_0$ and $-\ell_0$ so that they form one spring). At the converged fixed point each node's force reads its own position at the old time and its partner's at the new time. The spring forces therefore do not cancel, and the pair's momentum is not conserved. For an equal pair (the same $k$, $c$ and $m$), the sum $S = v_a + v_b$ decouples exactly:
+**Two nodes anchored on each other in a converged coupling group** (each node's `position` is the other's `anchor_position`, with rest lengths $+\ell_0$ and $-\ell_0$ so that they form one spring). At the converged {term}`fixed point <Fixed point>` each node's force reads its own position at the old time and its partner's at the new time. The spring forces therefore do not cancel, and the pair's momentum is not conserved. For an equal pair (the same $k$, $c$ and $m$), the sum $S = v_a + v_b$ decouples exactly:
 
 $$
 S^{n+1} = \frac{m - c\,\Delta t}{m - k\,\Delta t^2}\, S^n .
 $$
 
-The coupling iteration converges for $k\Delta t^2 < m$; Gauss-Seidel contracts by $(k\Delta t^2/m)^2$ per sweep. Where it converges and $c\Delta t < m$, the pair is stable only for
+The {term}`coupling <Coupling>` iteration converges for $k\Delta t^2 < m$; {term}`Gauss-Seidel` contracts by $(k\Delta t^2/m)^2$ per sweep. Where it converges and $c\Delta t < m$, the pair is stable only for
 
 $$
 c \ge k\,\Delta t ,

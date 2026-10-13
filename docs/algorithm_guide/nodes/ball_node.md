@@ -5,13 +5,13 @@ bibliography: ../../bibliography.bib
 # BallNode
 
 **Module**: `maddening.nodes.ball`
-**Stability**: stable
+**Stability**: {term}`stable <STABLE>`
 **Algorithm ID**: `MADD-NODE-001`
 **Version**: 1.0.0
 
 ## Summary
 
-A point mass falling under gravity in one dimension, with an optional perfectly rigid collision surface supplied as the boundary input `table_position`.
+A point mass falling under gravity in one dimension, with an optional perfectly rigid collision surface supplied as the {term}`boundary input <Boundary inputs>` `table_position`.
 
 ## Governing Equations
 
@@ -38,7 +38,7 @@ $$
 Collision is resolved once per step, after the integration, with `jnp.where` so the whole update stays traceable.
 
 **Declared order of accuracy**: `DiscretizationOrder(spatial=None, temporal=1.0)`.
-There is no spatial order — the node integrates an ODE. The temporal claim is 1st order globally and covers the **smooth regime only**: a contact is a non-smooth event and no order is claimed across one.
+There is no spatial order — the {term}`node <Node>` integrates an ODE. The temporal claim is 1st order globally and covers the **smooth regime only**: a contact is a non-smooth event and no order is claimed across one.
 
 ```{warning}
 `NodeMeta.discretization` names *forward* Euler, and the implementation is

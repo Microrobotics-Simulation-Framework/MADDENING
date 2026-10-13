@@ -9,6 +9,8 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-13
+
 The release notes, [`docs/release_notes/v0.4.0.md`](docs/release_notes/v0.4.0.md),
 give each item with its guide and say what to do. How the release was built and
 checked, with the defects found and fixed before it, is in

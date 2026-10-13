@@ -7,8 +7,7 @@ cff-version: 1.2.0
 message: "If you use this software, please cite it using these metadata."
 title: "MADDENING: Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph"
 type: software
-version: 0.4.1
-date-released: 2026-10-13
+version: 0.4.2.dev0
 license: LGPL-3.0-or-later
 repository-code: "https://github.com/Microrobotics-Simulation-Framework/MADDENING"
 abstract: >

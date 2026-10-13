@@ -3443,11 +3443,15 @@ class TestAnomalyGateHoldsEveryRangeToTheRegistrysVersion:
         self, tmp_path, aid
     ):
         """MADD-ANO-006 shipped ``resolved`` in 0.4.0 with ``>=0.1.0``."""
+        import yaml
+
         assert _status_of(aid) == "resolved"
+        registry = REPO_ROOT / "docs" / "validation" / "known_anomalies.yaml"
+        version = yaml.safe_load(registry.read_text())["maddening_version"]
         path = _shipped_registry_with(tmp_path, _set_range(aid, ">=0.1.0"))
         result = self._gate(path, "--no-resolve")
         assert result.returncode == 1, result.stdout
-        assert aid in result.stderr and "admits 0.4.0.dev0" in result.stderr
+        assert aid in result.stderr and f"admits {version}" in result.stderr
 
     @pytest.mark.parametrize("bad", [
         "banana",

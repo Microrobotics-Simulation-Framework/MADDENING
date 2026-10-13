@@ -13,7 +13,7 @@ the sidecar manifest landed in v0.2 #8.  See
 
 ```{versionchanged} v0.4.0
 `download_and_load_state` moved to {mod}`maddening.cloud.resume`
-(URL transport is a deployment concern; the core checkpoint module
+(URL transport is a deployment concern; the core {term}`checkpoint <Checkpoint>` module
 stays dependency-free).  The old
 `maddening.core.simulation.checkpoint.download_and_load_state` import
 still works but emits a `DeprecationWarning` and is removed in 1.0.
@@ -177,7 +177,7 @@ no extra dependencies.
 ## The full preempt-resume contract
 
 1. Hook fires on `CloudSession._on_preemption_signal()` (called by
-   the SkyPilot preemption monitor thread).
+   the {term}`SkyPilot` preemption monitor thread).
 2. Hook calls
    {func}`~maddening.core.simulation.checkpoint.save_state_with_manifest`
    with the configured snapshot path + extra meta.
@@ -208,7 +208,7 @@ the manifest didn't apply.
 ```{note}
 The stock entry point does not load a graph yet (`MADDENING_GRAPH_USD`
 is a stub), and a checkpoint can only be restored into a graph with
-the same nodes.  When `RESUME_FROM_URL` is set and the server's graph
+the same {term}`nodes <Node>`.  When `RESUME_FROM_URL` is set and the server's graph
 has no nodes, the entry point logs
 "resume is impossible until a graph is loaded" and starts fresh
 instead of failing later with a node-mismatch error.  Embedders that
@@ -255,7 +255,7 @@ garbage.
 `python -m maddening.examples.advanced.checkpoint_resume_demo` shows
 the local half of this on one machine: a coupled run saved with
 `save_state`, resumed with `load_state` in a freshly built graph and
-continued bitwise identically -- the coupling group's `_meta` warm
+continued bitwise identically -- the {term}`coupling group <Coupling group>`'s `_meta` warm
 starts and a calibrated parameter included -- next to a restart from
 the node states alone, which is not the same run.
 

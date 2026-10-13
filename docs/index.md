@@ -15,7 +15,7 @@ MADDENING is the base framework on which
 :class-card: msf-card
 
 Every {term}`Graph step` compiles into a single {term}`XLA` op. Take
-`jax.grad` through 1000-step rollouts; vmap across initial conditions for free.
+`jax.grad` through 1000-step rollouts; {term}`vmap` across initial conditions for free.
 :::
 
 :::{grid-item-card} Node-graph composition
@@ -53,8 +53,8 @@ MADDENING is split into a small **core** ({term}`node <SimulationNode>` ABC,
 typed edges, {term}`graph manager <GraphManager>`), a **scheduler** that
 resolves coupling and multi-rate timing, an **{term}`XLA`-compilation** path,
 a **surrogate** training subsystem, a **multi-GPU** layer (Cartesian and
-graph-partitioned sharding plus sharded sparse Krylov solvers), an
-**FMI 3.0 export** path, and a **cloud** layer for distributing all of it.
+graph-partitioned {term}`sharding <Sharding>` plus {term}`sharded <Sharded>` sparse Krylov solvers), an
+**{term}`FMI` 3.0 export** path, and a **cloud** layer for distributing all of it.
 MIME plugs in at the node level — same runtime, microrobotics-specific
 physics + metadata.
 

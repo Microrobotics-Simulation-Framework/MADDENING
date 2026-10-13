@@ -5,7 +5,7 @@ to `127.0.0.1` it needs no configuration: a direct connection from this
 machine is served without a credential.  This page is for the other case,
 a server another machine reaches over the network.  Such a server asks
 every request for a bearer token.  The steps below choose the bind
-address, set the token, confine checkpoints to one directory, call the
+address, set the token, confine {term}`checkpoints <Checkpoint>` to one directory, call the
 server with the token, and test it in-process.
 
 ```{note}
@@ -264,7 +264,7 @@ environment.  The [quickstart](quickstart.md#deploy-to-cloud) says more.
 
 - It does not encrypt anything; see the note at the top.
 - It does not limit what its holder can do.  Whoever holds the token can
-  build nodes, run steps and write files under the checkpoint root, as
+  build {term}`nodes <Node>`, run steps and write files under the checkpoint root, as
   someone at the keyboard could.  Do not hand it to a party you would not
   let run code on the host.
 - Request sizes are bounded, but that is a backstop against mistakes, not

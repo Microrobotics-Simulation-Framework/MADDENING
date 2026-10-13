@@ -1,24 +1,24 @@
 # Inspecting a graph
 
 A `GraphManager` can describe itself: its structure as text or as a
-diagram, its state, parameters, coupling convergence and memory as
+diagram, its state, parameters, {term}`coupling <Coupling>` convergence and memory as
 tables, and the software it is running on as a version report.  All of
-it is new in 0.4.0 and marked **experimental**: the methods may still
+it is new in 0.4.0 and marked **{term}`experimental <EXPERIMENTAL>`**: the methods may still
 change in a minor release.
 
 Every method on this page is **read-only**.  It does not write the
-state, `_meta`, `gm.params`, a node's parameters, the dirty or compiled
+state, `_meta`, `gm.params`, a {term}`node <Node>`'s parameters, the dirty or compiled
 flags, the schedule or a cache, and it does not compile or trace the
 step.  On a graph that is not ready to be read as it stands -- never
-compiled, modified since its last compile, or left holding JAX tracers
+compiled, modified since its last compile, or left holding {term}`JAX` tracers
 by `jax.grad` -- it says so instead of fixing it (see "Graphs that are
 not ready" below).
 `tests/core/test_inspection_read_only.py` checks this for every method
 on every kind of graph by fingerprinting the whole graph around each
 call.
 
-One thing does run.  Where a coupling group has a transform or a mapping
-on an edge between its members, `coupling_report()` asks that edge what
+One thing does run.  Where a {term}`coupling group <Coupling group>` has a transform or a mapping
+on an {term}`edge <Edge>` between its members, `coupling_report()` asks that edge what
 it delivers, and traces the edge's rule once on **every** call to find
 out (under `jax.eval_shape`: shapes and dtypes, never values).  The step
 is not compiled or traced again and nothing on the graph changes, but a
@@ -115,8 +115,8 @@ Execution order
 
 - **Nodes**: the type (a wrapper shows what it wraps, as
   `ShardedStencilNode(HeatNode)`), timestep and rate divider, the
-  coupling group and how many times a sub-cycled node runs per coupling
-  pass, each state field as `dtype[shape]`, and for a sharded node the
+  coupling group and how many times a {term}`sub-cycled <Sub-cycled>` node runs per coupling
+  pass, each state field as `dtype[shape]`, and for a {term}`sharded <Sharded>` node the
   wrapper, the mesh axes and which state axis is split.  A sharded axis
   reads `32@devices`.
 - **Edges**: `source.field -> target.input`, whether the source is a state
@@ -134,7 +134,7 @@ Execution order
   `atol`/`rtol` for `"mixed"` and `"interface"`), `max_iterations`,
   diagnostics, strict convergence, and any other setting that is not its
   default.
-- **External inputs** and the **execution order**: the compiled schedule,
+- **{term}`External inputs <External input>`** and the **execution order**: the compiled schedule,
   a coupling group as one block, and how often each block fires.
 
 Long node names wrap onto their own line and are never split.
@@ -233,7 +233,7 @@ assert all(r["nan"] == 0 and r["inf"] == 0 for r in table)
 
 The statistics are computed on the host from a copy of each array.  A
 field holding NaN or inf is flagged.  `include_meta=True` adds the
-internal `_meta` entries (the multi-rate step counter, the coupling
+internal `_meta` entries (the {term}`multi-rate <Multi-rate>` step counter, the coupling
 diagnostics and warm starts).
 
 ### Parameters
@@ -319,7 +319,7 @@ notes:
 ```
 
 This counts **state memory only**: it is a floor on what a run needs, not
-an estimate of it.  For a sharded node, `per_device_bytes` is one shard
+an estimate of it.  For a sharded node, `per_device_bytes` is one {term}`shard <Shard>`
 and `devices` the number of devices it is spread over;
 `python -m maddening.examples.advanced.sharding_demo` shows it, and the
 wrapper in `print_graph()`, on four emulated CPU devices.
@@ -390,8 +390,8 @@ See "What a converged step returns under each norm" in
 **A dead band (`atol > 0`), on any group.**  Leave `atol` at `0.0` in 0.4.0.  A field at or below
 `atol` leaves the residual, and a change that has to cross it is not seen until it reaches a field
 the norm keeps, so a group that sets it can report `converged=True` after one pass with a kept
-field thousands of tolerances from its fixed point (MADD-ANO-254, open; under every norm: 4.5e5 to
-7.4e5 tolerances on a Jacobi pair; 4.6e3 to 1.8e4 on a Gauss-Seidel ring of three swept against its
+field thousands of tolerances from its {term}`fixed point <Fixed point>` (MADD-ANO-254, open; under every norm: 4.5e5 to
+7.4e5 tolerances on a {term}`Jacobi` pair; 4.6e3 to 1.8e4 on a {term}`Gauss-Seidel` ring of three swept against its
 data flow; and under Gauss-Seidel 4.3e3 to 7.7e3, 1.6e5 in the other sweep order, on a pair of
 2-vectors, a pair with two fields a member, a pair with one edge from a member to itself and a
 group of ONE member with two such edges).  `compile()` warns and `validate()` says so for every
@@ -416,7 +416,7 @@ exactly 0 and `spectral_usable=True` beside a bound 5.6e-8 to 7.5e-8 of the dist
 point, under `"mixed"` and `"l2"` and both schedules.  Carry a value that is narrowed on its way
 as a *state field*: the same pair with the same transform on a state field is counted, and its
 bound read 30 to 39 times the distance.  (`convergence_norm="interface"` refuses a flux edge at
-`compile()`.)  **What a geometry-dependent mapping delivers is counted at the rounding of its
+`compile()`.)  **What a {term}`geometry-dependent mapping <Geometry-dependent mapping>` delivers is counted at the rounding of its
 kernel's weights as well** (experimental): float32 positions far into a grid make every value
 field of the group that coarse, whatever the fields' own dtype; see "Under `"l2"` and `"mixed"`"
 in the guide to geometry-dependent mappings (MADD-ANO-261).
@@ -479,7 +479,7 @@ cells in float32, 14 passes per step (CPU, 4 cores, jax 0.11.0; the pair of
 
 **Against the same step without diagnostics,** measured as each process's own peak (`VmHWM`, one
 fresh process per measurement; CPU, 4 cores, float32, jax 0.11.0): one step of a group of 2,000 to
-10,000 unknowns (two fields coupled cell by cell through a three-point stencil, two scalar
+10,000 unknowns (two fields coupled cell by cell through a three-point {term}`stencil <Stencil>`, two scalar
 parameters per node) peaked at **2.1 to 2.3 times** the memory with diagnostics on, 0.61 to 0.62 GB
 against 0.27 to 0.29 GB.  What the step adds to the built graph was 6 to 7 times larger (0.40 GB
 against 0.06 to 0.07 GB), most of it a fixed cost that did not grow between 2,000 and 10,000
@@ -488,7 +488,7 @@ a large group (six times in the table's last row): a group that nearly fills a d
 without diagnostics will not fit with them.
 
 So on a large group take the report every so often (a second graph with `diagnostics=True`, or a
-restart from a checkpoint), not in every step.  The first step also compiles the analysis: about
+restart from a {term}`checkpoint <Checkpoint>`), not in every step.  The first step also compiles the analysis: about
 6 s more here.  Measured
 once on a two-spring pair in float32 (an RTX A2000 laptop GPU, jax 0.11.0,
 `benchmarks/results/gpu_eigvals_probe/RESULT.md`): a step takes 0.3 ms with diagnostics off and
@@ -607,7 +607,7 @@ evaluation a pass, a row of 1000 entries, `"interface"`).
 smallest `spectral_error_bound` over the true distance among the reports that set the flag, before
 the guard): the scatter layout, which adds a row up one entry after another, read 0.68 behind 100
 entries, 0.24 behind 300 and 0.002 behind 3e4, on jax 0.10.2, 0.11.0 and 0.11.2 alike.  The gather
-layout and the dense kinds are summed in an order XLA chooses, which depends on the jax version,
+layout and the dense kinds are summed in an order {term}`XLA` chooses, which depends on the jax version,
 the dtype and the operator's shape: one row of either held at every length on jax 0.11 (1.8x at
 300 entries, 1.09x at 3000), but jax 0.10.2 sums the gather layout's float32 rows of 1e4 entries
 and more in order (0.002 to 0.007 of the distance), and a dense matrix of three rows of 3000
@@ -731,8 +731,8 @@ without being imported, and listing the devices compiles nothing.
 `fit_multiple_shooting`) or a `FIMReport` (from `fim`) gives a short
 summary -- whether the fit converged, its losses and the iterate it
 returned, the identifiability guard's verdict and the fitted values; the
-FIM's rank, conditioning, weakest direction and each parameter's
-Cramér–Rao bound -- where `repr()` lists every field, as before.
+{term}`FIM`'s rank, conditioning, weakest direction and each parameter's
+{term}`Cramér–Rao bound` -- where `repr()` lists every field, as before.
 
 <!-- snippet: continues -->
 ```python

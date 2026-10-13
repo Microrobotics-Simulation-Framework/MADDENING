@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "maddening"
-version = "0.4.0"
+version = "0.4.1"
 description = "Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph"
 readme = "README.md"
 license = "LGPL-3.0-or-later"
@@ -125,7 +125,11 @@ gpu-viz = ["pygfx>=0.16", "rendercanvas>=2.0", "glfw>=2.0", "scikit-image>=0.20"
 # OpenUSD integration (USD read/write, codeless schemas)
 usd = ["usd-core>=21.8"]
 
-# WebRTC streaming (GStreamer + signaling)
+# WebRTC streaming (GStreamer + signaling).  Not pip-installable on its own:
+# GStreamer and its WebRTC plugins come from the system package manager, and
+# PyPI ships PyGObject as source only, so pip compiles it, which needs the
+# cairo and GObject-introspection headers (docs/user_guide/installation.md,
+# "Streaming prerequisites").  For that reason `all` leaves it out.
 streaming = ["PyGObject>=3.42", "websockets>=11.0"]
 
 # SBOM generation tool, for running cyclonedx-py by hand.
@@ -158,7 +162,11 @@ client = [
 ]
 
 # ── Meta extras ────────────────────────────────────────────────────
-# Everything (all features + RunPod cloud)
+# Every feature extra that installs from wheels alone, plus the RunPod and
+# Lambda cloud providers: all but `usd` (name it beside `all`) and
+# `streaming` (system packages first; see its comment).  Until 0.4.1 it held
+# PyGObject, so `pip install maddening[all]` and `[dev]` failed without the
+# C headers (MADD-ANO-296).  CI resolves `all` and `dev` from wheels alone.
 all = [
     "matplotlib>=3.5",
     "rich>=12.0",
@@ -176,7 +184,6 @@ all = [
     "glfw>=2.0",
     "scikit-image>=0.20",
     "skypilot[runpod,lambda]>=0.11",
-    "PyGObject>=3.42",
     "zstandard>=0.22",
 ]
 
@@ -248,7 +255,15 @@ dev = [
     # docs/developer_guide/typing.md.  A floor here; the ci extra pins the
     # exact release the typing_tiers.json ceilings were measured with.
     "pyright>=1.1.414",
+    # What tests/conftest.py and the test suite import beyond `all`: the
+    # `verify` extra (hypothesis), the starlette floor tests/api needs (see
+    # the ci extra) and the build backend tests/test_packaging_py_typed.py
+    # uses.  Until 0.4.1 they were missing, so a `pip install -e ".[dev]"`
+    # checkout could not collect the tests.
+    "starlette>=1.7.0",
+    "hatchling>=1.21",
     "maddening[all]",
+    "maddening[verify]",
 ]
 
 [project.urls]

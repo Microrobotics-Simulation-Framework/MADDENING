@@ -50,8 +50,9 @@ Install only what you need. Each extra adds one capability:
 | `viz3d` | PyVista 3D server-side rendering | `pip install maddening[viz3d]` |
 | `gpu-viz` | pygfx GPU-accelerated 3D viewer | `pip install maddening[gpu-viz]` |
 | `usd` | {term}`OpenUSD` graph serialization | `pip install maddening[usd]` |
-| `streaming` | GStreamer {term}`WebRTC` streaming | `pip install maddening[streaming]` |
+| `streaming` | GStreamer {term}`WebRTC` streaming (system packages first: [Streaming prerequisites](#streaming-prerequisites)) | `pip install maddening[streaming]` |
 | `compression` | zstandard for binary-encoder compression (v0.2 #6) | `pip install maddening[compression]` |
+| `verify` | Hypothesis, for `maddening.testing`: verifying your own nodes (`verify_node`, the order and GCI studies; see [Verification](../developer_guide/verification.md)) | `pip install maddening[verify]` |
 
 Mix and match freely:
 
@@ -59,6 +60,34 @@ Mix and match freely:
 pip install maddening[viz,surrogates]           # plots + neural surrogates
 pip install maddening[cuda12,api,network]       # GPU server with ZMQ
 ```
+
+### Streaming prerequisites
+
+WebRTC streaming runs on GStreamer, which pip cannot install: GStreamer and its
+plugins come from your system's package manager. On Ubuntu 24.04 these are the
+packages the project's streaming test image installs:
+
+```bash
+sudo apt install gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 gir1.2-gst-plugins-bad-1.0 \
+    gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+    gstreamer1.0-plugins-ugly gstreamer1.0-nice
+```
+
+The Python bindings, PyGObject, then come one of two ways:
+
+- **From pip,** as the `streaming` extra installs them. PyPI publishes PyGObject
+  as source only, so pip compiles it, and the build needs the C headers:
+  `sudo apt install libcairo2-dev libgirepository-2.0-dev pkg-config python3-dev`,
+  then `pip install maddening[streaming]`. Without the headers the build stops
+  with `Dependency "cairo" not found`.
+- **From the system:** `sudo apt install python3-gi`, then use the system Python
+  3.12, or a virtual environment created with `--system-site-packages`, and
+  install MADDENING without the `streaming` extra. The project's Docker images do
+  this.
+
+Until both GStreamer and PyGObject are present, constructing a `SelkiesSession`
+raises an `ImportError` that names them. `all` leaves `streaming` out for this
+reason (below).
 
 ## Cloud Deployment
 
@@ -115,14 +144,26 @@ pip install maddening[client,viz]
 ## Everything
 
 ```bash
-pip install maddening[all]       # every feature extra but usd, + the RunPod and Lambda cloud providers
+pip install maddening[all]       # every feature extra but usd and streaming, + the RunPod and Lambda cloud providers
 pip install maddening[all,usd]   # the same, with OpenUSD (usd-core)
-pip install maddening[dev]       # all + pytest and the other test tools (still without usd)
+pip install maddening[dev]       # all + verify + the test tools (still without usd and streaming)
 ```
 
 `all` installs every package of the feature extras in the table above except
-`usd-core`, the one package of the `usd` extra; name `usd` beside it to get
-OpenUSD.
+two: `usd-core`, the one package of the `usd` extra (name `usd` beside it to get
+OpenUSD), and the `streaming` extra's PyGObject, which needs system packages
+first ([Streaming prerequisites](#streaming-prerequisites)). Everything `all`
+installs comes from wheels, so it needs no compiler. Before 0.4.1, `all` included
+PyGObject, and `pip install maddening[all]` failed without the C headers
+(`MADD-ANO-296`).
+
+## Development and tooling extras
+
+| Extra | What it is for |
+|-------|----------------|
+| `dev` | Working on MADDENING itself: `all`, `verify`, and everything the test suite imports (pytest, httpx, fsspec, FMPy, the build backend, pyright with a floor). Install it editable from a checkout: `pip install -e ".[dev]"`. Before 0.4.1 it lacked hypothesis and two other test tools, so such a checkout could not collect the tests. |
+| `ci` | What the CI jobs install: the test tools of `dev` with pyright pinned to the exact release the typing ceilings were measured with, and without the display packages. |
+| `sbom` | `cyclonedx-bom`, to run `cyclonedx-py` by hand. `scripts/generate_sbom.py` does not need it: it installs its own copy in a separate environment. |
 
 ## Using uv
 

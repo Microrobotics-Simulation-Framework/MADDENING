@@ -2308,6 +2308,9 @@ another: enable(b) after a compile kept JAX writing to the first directory, and
 with MADDENING_COMPILATION_CACHE_DIR set every GraphManager.compile() re-
 pointed an explicit enable() or warm_cache(cache_dir=) at the variable (never
 released).
+`296` (resolved): pip install maddening[all] and maddening[dev] failed without
+the cairo and GObject-introspection C headers: the all extra held PyGObject,
+which PyPI ships as source only.
 
 ## The account of each area
 

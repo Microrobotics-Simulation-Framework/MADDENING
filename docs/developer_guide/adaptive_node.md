@@ -198,11 +198,15 @@ So, for every array you precompute, one of these must hold:
 2. it derives only from parameters declared `ParamSpec(trainable=False)`; or
 3. you publish it through `static_data` and declare where it came from with
    `static_data_deps`, which makes `compile()` refuse the graph if the
-   dependency is trainable:
+   dependency is trainable. `static_data` is a property, and each array in it
+   is wrapped in a `StaticArray` (a bare array raises `MigrationError`):
 
    ```python
+   from maddening.core.static_data import StaticArray
+
+   @property
    def static_data(self):
-       return {"phi_sensor": self._phi_sensor}
+       return {"phi_sensor": StaticArray(self._phi_sensor, replication="replicate")}
 
    def static_data_deps(self):
        return {"phi_sensor": ("sensor_x",)}

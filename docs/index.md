@@ -72,7 +72,7 @@ nodes:
   Swap:     Hot-swap registry — at runtime a physics node can be replaced by a trained surrogate without restarting the graph.
   Sky:      SkyPilot orchestration provisions GPU VMs (RunPod, Lambda, AWS, GCP) and tears them down when the job ends.
   ZMQ:      ZeroMQ rendezvous wires distributed graph fragments and streams state to clients.
-  WRTC:     WebRTC streams rendered viewport frames from the remote VM to the local browser or IDE. Tested end to end on CPU (a GStreamer WebRTC peer decodes the frames over a container-internal link, x264enc encoding), including the cloud container's entry point streaming the simulation it runs. The stream is encoded in software (x264enc) on every host; there is no GPU encoder in 0.4.0. Tested from a GPU host with the simulation on CUDA on 2026-10-12, and the same day over the internet, from a four-GPU cloud host to a laptop through a TURN relay over TCP, by a scripted viewer and in a real browser (the shipped client page, set to use the relay). Not tested: media over UDP across a provider's network without a relay (NAT traversal).
+  WRTC:     WebRTC streams rendered viewport frames from the remote VM to the local browser or IDE. Tested end to end on CPU (a GStreamer WebRTC peer decodes the frames over a container-internal link, x264enc encoding), including the cloud container's entry point streaming the simulation it runs. The stream is encoded in software (x264enc) on every host; there is no GPU encoder in 0.4.0. Tested from a GPU host with the simulation on CUDA on 2026-10-12, and the same day over the internet, from a four-GPU cloud host to a laptop through a TURN relay over TCP, by a scripted viewer and in a real browser (the shipped client page, set to use the relay). Media over UDP across a provider's network without a relay (NAT traversal) is not tested.
   API:      FastAPI + WebSocket server — remote control of the graph and live state subscriptions.
   USD:      Codeless USD schemas + a serialiser turn the graph and its trajectory into a USD stage MICROROBOTICA can render.
   MIM:      MIME extends SimulationNode with biocompatibility, anatomical regime, and SOUP classification — same coupling, same autodiff.
@@ -199,6 +199,7 @@ developer_guide/coupling_algorithm_guide
 developer_guide/deprecation_policy
 developer_guide/api_freeze_proposal
 developer_guide/wavelet_adaptive_node
+developer_guide/verification
 ```
 
 ```{toctree}

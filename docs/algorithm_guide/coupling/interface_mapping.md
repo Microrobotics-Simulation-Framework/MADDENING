@@ -1,7 +1,7 @@
 # Interface mapping
 
-When two coupled nodes discretise their shared interface differently
-(a coarse and a fine rod, a surface mesh and a point cloud), an edge
+When two coupled {term}`nodes <Node>` discretise their shared interface differently
+(a coarse and a fine rod, a surface mesh and a point cloud), an {term}`edge <Edge>`
 needs a **mapping** that turns a field on the source interface into a
 field on the target interface before the node consumes it.
 
@@ -31,9 +31,9 @@ class Mapping(Protocol):
 
 `apply` maps a source field (`(n_source,)` or `(n_source, C)`) to the
 target; `apply_T` is the transpose.  `weights` is the mapping's entry of
-the graph parameter pytree and `geom` is the geometry of a mapping that
-depends on a moving interface (experimental, see *Geometry-dependent
-mappings* below; static mappings ignore it).  A mapping whose weights are applied through a structure the
+the graph parameter {term}`pytree <Pytree>` and `geom` is the geometry of a mapping that
+depends on a moving interface ({term}`experimental <EXPERIMENTAL>`, see
+*{term}`Geometry-dependent mappings <Geometry-dependent mapping>`* below; static mappings ignore it).  A mapping whose weights are applied through a structure the
 parameter tree does not hold may also define `structure_digest()`; see
 [Sparse mappings](#sparse-mappings).
 
@@ -48,7 +48,7 @@ receives them as a traced input, exactly like node constants (see
 * `jax.grad` of a trajectory loss reaches the mapping weights (learned
   edges, sensitivity of a coupled result to the interface operator);
 * a replaced matrix takes effect on the next step without recompiling;
-* the IFT rule of a coupling group carries the dependence, so a mapped
+* the {term}`IFT` rule of a {term}`coupling group <Coupling group>` carries the dependence, so a mapped
   edge inside a coupling group is differentiable end-to-end.
 
 `gm.params["mappings"]` is validated like the node entries: an unknown
@@ -77,14 +77,14 @@ the step: only the criterion changes side.
 Why: read as delivered, 30 marker forces scattered onto `N` cells put
 `N` entries into the norm of which a few dozen change, and the criterion
 loosens as the grid grows.  On a two-way marker and grid pair
-(`rtol=1e-4`, Gauss-Seidel) the marker forces at a `converged=True` exit
-were 23, 39, 134 and 459 tolerances from their fixed point at `N` = 1e3,
+(`rtol=1e-4`, {term}`Gauss-Seidel`) the marker forces at a `converged=True` exit
+were 23, 39, 134 and 459 tolerances from their {term}`fixed point <Fixed point>` at `N` = 1e3,
 1e4, 1e5 and 1e6; read on the compact side they are 3.3 to 3.6 at every
 `N` (the table is in the
 [coupling algorithm guide](../../developer_guide/coupling_algorithm_guide.md)).
 With the mixed norm, which reads every field of the group whole, the
 same pair stops as early as the diluted criterion did: prefer the
-interface norm where a small field drives a large one.
+{term}`interface norm <Interface norm>` where a small field drives a large one.
 
 **This needs the transfer to be on the edge.**  The figures above are of
 a pair whose grid field comes back to the markers through a gather
@@ -262,8 +262,8 @@ that parameter -- a fit, or any `params=` pytree -- leaves the weights at
 the constructor's geometry. Nothing refuses it or warns. This is
 **MADD-ANO-022**. A value *written* into the running graph is refused
 (**MADD-ANO-063**): `gm.params` at the next run, `to_dict()` and
-`save_state()`, `PUT /graph/params` with a 400, a checkpoint at
-`POST /checkpoint/load`, and an exported FMU leaves the parameter fixed,
+`save_state()`, `PUT /graph/params` with a 400, a {term}`checkpoint <Checkpoint>` at
+`POST /checkpoint/load`, and an exported {term}`FMU` leaves the parameter fixed,
 because the node would use it while the mapping kept the old points and a
 saved config would not load. See
 [Calibrating a parameter that a mapped edge's grid derives from](../../user_guide/parameters.md#calibrating-a-parameter-that-a-mapped-edges-grid-derives-from)
@@ -413,7 +413,7 @@ points.
 
 The config carries the recipe; a checkpoint (`save_state`) carries the
 actual `params["mappings"]` weights, which may have been trained by
-`sysid` or edited.  Loading a config rebuilds the geometric weights; a
+{codeterm}`sysid` or edited.  Loading a config rebuilds the geometric weights; a
 checkpoint loaded afterwards overwrites them — **the checkpoint wins**
 (`tests/core/test_mapping_spec_serialisation.py`).  Because the config
 cannot carry them, `gm.to_dict()` emits a `UserWarning` naming the edge
@@ -422,7 +422,7 @@ recipe rebuilds, so trained weights are not lost silently; save a
 checkpoint and load it after the config.  Which weights an optimiser may
 move is metadata, not data, so it *is* in the config:
 `gm.set_param_spec(edge.key, "H", ParamSpec())` round-trips through both
-JSON and USD.  The FMI exporter never exposes mapping weights, so the
+JSON and USD.  The {term}`FMI` exporter never exposes mapping weights, so the
 exported `modelDescription.xml` is identical with and without a mapping
 on an edge.
 
@@ -558,7 +558,7 @@ levels](../../developer_guide/verification.md#verifying-a-coupled-model-in-three
 
 The graph snapshots `mapping.params_pytree()` into
 `gm.params["mappings"][edge.key]`, and checkpoints, `POST
-/checkpoint/load`, system identification, the FMU's state archive and
+/checkpoint/load`, {term}`system identification <System identification>`, the FMU's state archive and
 `to_dict()`'s "live weights differ" warning all read that entry as a flat
 table of arrays.  For a mapping of any class other than
 `StaticLinearMapping`, `add_edge` therefore refuses, with a `ValueError`
@@ -567,7 +567,7 @@ naming the edge, a `params_pytree()` that is not
 * a plain `dict` -- empty for a mapping without weights;
 * keyed by Python identifiers (a key is a member name in a checkpoint
   archive and a key of a config's `param_specs`);
-* holding under each key one concrete JAX array of a floating-point
+* holding under each key one concrete {term}`JAX` array of a floating-point
   dtype, of any shape, all finite -- not a nested container, not a NumPy
   array or a Python number (`jnp.asarray(value)` gives it a dtype that no
   longer depends on `jax_enable_x64`), not an integer or complex array.
@@ -624,7 +624,7 @@ of which a nearest-neighbour selection uses one entry per row.  A
 
 Use a sparse mapping when the dense matrix does not fit in memory or is
 mostly zeros: a nearest-neighbour transfer, a cell-average projection, a
-stencil or supermesh operator computed offline.  Keep the dense kinds for
+{term}`stencil <Stencil>` or supermesh operator computed offline.  Keep the dense kinds for
 small interfaces and for RBF interpolation, whose matrix is full.
 
 ### The three kinds
@@ -778,7 +778,7 @@ recorded in the spec, so a reloaded mapping is applied the way it was
 built.  The two forms hold the same matrix, and agree with one another
 and with the dense conservative kind to rounding.
 
-**The order of the sum and a coupling report's float floor**
+**The order of the sum and a {term}`coupling <Coupling>` report's float floor**
 (MADD-ANO-257, open).  "To rounding" is `(k + 2) eps` of a row of `k`
 entries, and an in-order sum of `k` terms of one sign reaches a good
 part of it where the terms are nearly equal: the rounding is then
@@ -798,7 +798,7 @@ digits on jax 0.10.2, 0.11.0 and 0.11.2):
 | float32, `"mixed"` | 6.3 | 4.9 | 2.09 | 0.66 | 0.22 | 0.069 | 0.023 | 0.0067 | 0.0022 |
 | float64 floor, `"interface"` | 8.0 | 5.0 | 2.08 | 0.63 | 0.22 | 0.068 | 0.023 | 0.0065 | 0.0022 |
 
-The gather layout and the dense kinds carry the same rounding: XLA
+The gather layout and the dense kinds carry the same rounding: {term}`XLA`
 reduces a row in an order of its own, which depends on the jax version,
 the dtype and the shape.  Rows of up to 100 entries held by 2.2x or more
 in both forms (one, three and sixteen rows; float32; the three versions
@@ -913,7 +913,7 @@ hundred thousand points on every push
 (`tests/core/test_sparse_mapping_builders.py`).
 
 Not in 0.4.0: a sparse mapping on a moving interface (`geom` is ignored),
-sharded graphs, and sparse RBF kinds.
+{term}`sharded <Sharded>` graphs, and sparse RBF kinds.
 
 ## Geometry-dependent mappings
 
@@ -939,7 +939,7 @@ as it resolves the value.  The geometry is ordinary node state: it is
 integrated by its node, batched by `run_sweep`, differentiated by
 `jax.grad`, and saved by a checkpoint.  The mapping declares
 `needs_geometry = True` and a static `geometry_shape` (see the `Mapping`
-protocol's optional attributes), and must be a pure function of its three
+protocol's optional attributes), and must be a {term}`pure function <Pure function>` of its three
 arguments.
 
 ### The time level a geometry is read at
@@ -949,7 +949,7 @@ Two rules cover every call site.
 * **Source-anchored** (`geometry=("source", g)`): the geometry is read
   exactly as an ordinary edge `source.g -> target` would be read there,
   from the same state the edge's value is read from.  Where the value is
-  interpolated between two snapshots (a sub-cycled member of a coupling
+  interpolated between two snapshots (a {term}`sub-cycled <Sub-cycled>` member of a coupling
   group), the geometry is interpolated between the same two snapshots
   with the same weight, componentwise, and the mapping is applied to the
   interpolated value at the interpolated geometry.  Those two snapshots
@@ -957,7 +957,7 @@ Two rules cover every call site.
   iterate and the in-pass state -- not the source at two times: see the
   note under the table.
 * **Target-anchored** (`geometry=("target", g)`): the geometry is field
-  `g` of the `state` argument of the hook the boundary inputs are being
+  `g` of the `state` argument of the hook the {term}`boundary inputs <Boundary inputs>` are being
   resolved for, `update` or `compute_boundary_fluxes`.
 
 | Call site | Value | Source-anchored geometry | Target-anchored geometry |
@@ -965,10 +965,10 @@ Two rules cover every call site.
 | Plain step, forward edge | the source's value from this step | the source's `g` from this step | the target's pre-step `g` (the state `update` receives) |
 | Plain step, back edge | the previous step | the source's `g` of the previous step | the target's pre-step `g` |
 | Plain step, the target's flux hook | as for its `update` | as for its `update` | the target's **post-update** `g`: the edges are resolved again for the hook |
-| Multi-rate, slow source | the state the source holds between its steps | the same held state | the target's current state |
+| {term}`Multi-rate`, slow source | the state the source holds between its steps | the same held state | the target's current state |
 | Multi-rate, a slow node's flux hook | as for its `update` at this base step | as for its `update` | the `g` the node holds after this base step: post-update when it fires, the held `g` when it does not |
 | Group member's `update`, Gauss-Seidel | the in-pass state | the in-pass `g` | the member's pre-step `g`, at every pass |
-| Group member's `update`, Jacobi | the incoming iterate | the incoming iterate's `g` | the member's pre-step `g` |
+| Group member's `update`, {term}`Jacobi` | the incoming iterate | the incoming iterate's `g` | the member's pre-step `g` |
 | Group member's flux, seeded before a pass | the incoming iterate | the incoming iterate's `g` | the incoming iterate's `g` of the member |
 | Group member's flux after its update | the in-pass state | the in-pass `g` | the member's in-pass, post-update `g` |
 | Sub-cycled member, `boundary_interpolation="linear"`, sub-step `k` of `d` | `v_prev + a (v_cur - v_prev)`, `a = (k + 1) / d`: `v_prev` the pass's incoming iterate, `v_cur` the in-pass state | `g_prev + a (g_cur - g_prev)` of the same two iterates, then the mapping | the member's state before this sub-step |

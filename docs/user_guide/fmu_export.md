@@ -1,8 +1,8 @@
 # Exporting a graph as an FMU
 
-MADDENING exports a compiled graph as an FMI 3.0 co-simulation FMU.  The
+MADDENING exports a compiled graph as an {term}`FMI` 3.0 co-simulation {term}`FMU`.  The
 FMU binary holds no simulation state: it is a thin C wrapper that forwards
-every FMI call to a Python *sidecar* holding the JAX-JITted graph, so XLA's
+every FMI call to a Python *{term}`sidecar <Sidecar>`* holding the {term}`JAX`-JITted graph, so {term}`XLA`'s
 compile cost is paid once, not on every instantiation.
 
 ```
@@ -43,7 +43,7 @@ compiled and unchanged since.  The sidecar runs the graph's compiled step,
 which bakes in every structural value it reads when it is traced, so each
 of the three refuses a graph that has changed since its `compile()`.  That
 covers a structural `node.params` write (`HeatNode`'s `stencil_order`, say),
-a node, edge, external input or coupling group added or removed, and a
+a {term}`node <Node>`, {term}`edge <Edge>`, {term}`external input <External input>` or {term}`coupling group <Coupling group>` added or removed, and a
 node's `static_data`.  `build_model_description` refuses such a graph, and
 so it does a graph never compiled.  `FmuSidecar` refuses a graph's compiled
 step once that graph has changed or been compiled again.  `FmuTcpBridge`
@@ -70,9 +70,9 @@ missing, saying so.  FMPy is not a runtime dependency of MADDENING
 
 The importer then loads `plant.fmu` as usual; the wrapper reads
 `resources/endpoint.txt` (or `MADDENING_FMU_ENDPOINT`) and connects.  A
-communication step of `h` runs `h / master_dt` graph steps.  Pass
+communication step of `h` runs `h / master_dt` {term}`graph steps <Graph step>`.  Pass
 `master_dt=gm.timestep`, the simulated time one graph step advances; it is
-also the description's default `stepSize`.  On a graph with a sub-cycling
+also the description's default `stepSize`.  On a graph with a {term}`sub-cycling <Sub-cycling>`
 coupling group it is the group's largest member timestep, not the smallest
 node timestep.  The description records it as `md.graph_timestep`, and the
 bridge refuses any other `master_dt`, and a description whose
@@ -226,7 +226,7 @@ its own check of the Terminated state, for clients other than the wrapper.
 **Variables.**  Outputs are `<node>.<field>`.  External inputs are
 `<node>.<field>` of the target boundary field (start value 0, description
 and unit from the target node's `boundary_input_spec`).  Parameters are
-`<node>.params.<key>`, with the `ParamSpec` bounds as `min` / `max`.  A
+`<node>.params.<key>`, with the {codeterm}`ParamSpec` bounds as `min` / `max`.  A
 `log` or `logit` bound is open, so it is advertised as the outermost value
 inside it that `ParamSpec.check` accepts in the parameter's type: the next
 float in, unless the transform's own arithmetic rounds that onto the bound.
@@ -251,11 +251,11 @@ ran `float32(0.1)` (MADD-ANO-218); a graph whose supplied values the cast
 changes says so once per input, with a `UserWarning` naming the keyword.
 
 The stability filter is by node: a node's outputs, parameters and external
-inputs enter the FMU only if the node is `STABLE`, or `EVOLVING` with
+inputs enter the FMU only if the node is {codeterm}`STABLE`, or {codeterm}`EVOLVING` with
 `include_evolving=True`.  An input of any other node is
 held at zero and listed in `md.held_inputs`, like an input
 `selected_inputs` leaves out, and the builder warns.  Naming it in
-`selected_inputs` is a `ValueError`.  Until 0.4.0's fix an `EXPERIMENTAL`
+`selected_inputs` is a `ValueError`.  Until 0.4.0's fix an {codeterm}`EXPERIMENTAL`
 node's input was exported while its outputs and parameters were not.
 
 Every `start`, `min` and `max` is written in its type's lexical form, which
@@ -329,7 +329,7 @@ the floor.  A name the graph does not declare is a `ValueError`.
 `selected_outputs=[(node, field), ...]` exports a subset of the outputs.
 A pair that names no output this FMU can export is a `ValueError` naming
 the node and the field: a node the graph does not have, a field that is not
-one of its node's state fields, or a node whose stability level the FMU
+one of its node's state fields, or a node whose {term}`stability level <Stability level>` the FMU
 does not export.  Until 0.4.0's fix such a pair exported nothing in
 silence, so a misspelt field gave an FMU without that output.  An entry
 that is not a pair of names (`"spring.position"`, the form `selected_inputs`
@@ -363,7 +363,7 @@ consumed when it was constructed (`LBMPipeNode.pipe_radius`) or declares in
 input would read (a ball's `elasticity` with no table) would be a knob that
 does nothing, so it is left out and listed, with the reason, in
 `md.fixed_parameters`.  So is one from which a node derives the points an
-interface mapping was built from (a uniform `HeatNode`'s `length` under a
+{term}`interface mapping <Interface mapping>` was built from (a uniform `HeatNode`'s `length` under a
 mapping on its `grid_x`): the step would use a new value and the mapping
 would keep the old points' weights.  The bridge applies that list to its sidecar: no
 door into the parameter tree -- `fmi3Set*`, `fmi3SetFMUState`, the
@@ -387,7 +387,7 @@ by one frame: a JSON object (`{"op": "set"|"get"|"step"|"get_state"|
 "set_state"|"reset"|"terminate"|"hello", ...}`) or, once negotiated, a
 *binary* frame for bulk payloads; see "Wire protocol" below and
 `maddening.fmi.tcp_bridge` for the exact schema.  Nothing but libc is
-required on the importer's side, which is why ZMQ is not used for the FMU
+required on the importer's side, which is why {term}`ZMQ` is not used for the FMU
 path.
 
 ## Wire protocol
@@ -567,7 +567,7 @@ bridge enforces however its sidecar was built.  An importer therefore
 cannot use an FMU-state archive to install a constant the graph declares
 invalid.  An archive cannot change interface-mapping weights either
 (`params["mappings"]`): they are not FMI variables, so no `set` reaches
-them, and an archive that replaced them made the FMU compute a coupling its
+them, and an archive that replaced them made the FMU compute a {term}`coupling <Coupling>` its
 description does not describe (MADD-ANO-119).  A Boolean takes true / false
 or exactly 0 / 1 on both doors.  An integer leaf takes a whole number of
 its own range, judged without rounding it: the check used to compare
@@ -595,7 +595,7 @@ instantiated, is not a new value.  A graph runs whatever its constructor
 was given, bounds being metadata to it, so an FMU can be exported with a
 parameter outside its bounds; until 0.4.0's fix both restore paths then
 refused the snapshot the FMU had handed out itself, while
-`GraphManager.load_state` restored the graph's checkpoint.  A `set` is
+`GraphManager.load_state` restored the graph's {term}`checkpoint <Checkpoint>`.  A `set` is
 still held to the bounds whatever it sets, the starting value included.
 
 ```{warning}
@@ -609,7 +609,7 @@ Nor is a non-finite reading in a coupling group's report: the slots
 `coupling_diagnostics()` reads are written by every step and are not what
 the model continues from, and `inf` is an ordinary value there
 (`gradient_relative_error_bound` where the bound does not certify, at an
-iteration cap on a curved map; the experimental `geometry_plane_limit` and
+iteration cap on a curved map; the {term}`experimental <EXPERIMENTAL>` `geometry_plane_limit` and
 `geometry_plane_margin` on every step of a group whose positions are
 constants of the pass).  A snapshot holding one restores on both doors;
 until 0.4.0's fix the FMU refused the snapshot it had just handed out.  A

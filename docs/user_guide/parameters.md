@@ -8,7 +8,7 @@ step_fn(state, external_inputs, params)
 
 `state` is what the integrators advance, `external_inputs` is what the
 outside world supplies each step, and `params` is every time-invariant
-constant a node reads that someone might want to differentiate or change
+constant a {term}`node <Node>` reads that someone might want to differentiate or change
 at runtime — stiffness, mass, diffusivity, gravity.  `GraphManager.params`
 holds the compile-time snapshot:
 
@@ -30,9 +30,9 @@ gm.params
 ```
 
 Every run method takes an optional `params=`; `None` means the snapshot.
-An explicit pytree is a *traced input*: a new value takes effect without
+An explicit {term}`pytree <Pytree>` is a *traced input*: a new value takes effect without
 recompiling, and `jax.grad` / `jax.jvp` / `jax.jacfwd` reach it — through
-coupling groups too, because the implicit-function-theorem rule carries
+{term}`coupling groups <Coupling group>` too, because the {term}`implicit-function-theorem <Implicit function theorem>` rule carries
 the parameter dependence.
 
 <!-- snippet: continues -->
@@ -76,7 +76,7 @@ the node), a parameter a node bakes into a static when it is constructed
 (`HeatNode`'s `grid_points` on a non-uniform grid, `WaveletAdaptiveNode`'s
 `mass` -- declared by `static_data_deps`), or geometry a node consumed in
 `__init__`.  (A leaf only *this* graph does not exercise -- a ball's
-`elasticity` with no table edge -- is not one of them: the node reads it as
+`elasticity` with no table {term}`edge <Edge>` -- is not one of them: the node reads it as
 soon as the input arrives, and the value carried in `gm.params` is then the
 one used, so it is kept and serialised.)  Changing one in `gm.params` is a `ValueError` naming the leaf
 and why, raised by every run method, `check_params`, `to_dict` and
@@ -86,12 +86,12 @@ reloaded as a different model.  To change such a value, rebuild the node
 with it; `gm.reset_params()` drops the edit.  Whether the step reads a leaf
 is decided from the node's `static_data_deps` declaration and, failing
 that, from one trace of the compiled step and one of the node's own hooks
-with every declared boundary input supplied (both taken only when a leaf
+with every declared {term}`boundary input <Boundary inputs>` supplied (both taken only when a leaf
 differs from its node's value, once per compile); a value that also reaches
 the node is not refused here, because the node's own value is the
 reference -- `PUT /graph/params` writes both, so it takes the decision
 itself (see "Writing parameters over REST" below) -- and a traced leaf
-(inside a fit or an FIM) is never compared.  An explicit `params=` pytree is not
+(inside a fit or an {term}`FIM`) is never compared.  An explicit `params=` pytree is not
 refused either: it is never serialised, and a leaf the step ignores may be
 one your own code consumes (a residual that seeds the initial state from
 `initial_velocity`); the live leaves a partial pytree is completed from are
@@ -110,7 +110,7 @@ silently.
 
 A value that carries a floating dtype of its own (an array, a numpy
 scalar) keeps it; a value that carries none (a Python float, a list of
-them) is placed at JAX's canonical float precision — float32, or float64
+them) is placed at {term}`JAX`'s canonical float precision — float32, or float64
 under `jax_enable_x64`.  Nothing is narrowed below that, so a graph run
 under x64 has float64 constants as well as float64 arithmetic.
 
@@ -221,12 +221,12 @@ nothing.  It detects "no
 path at all": a value a node consumes at construction *and* reads again
 later passes, so a node that bakes a parameter should declare it in
 `static_data_deps`, which refuses it on every surface.  Likewise
-`POST /checkpoint/load` refuses, and undoes, a checkpoint whose parameters
+`POST /checkpoint/load` refuses, and undoes, a {term}`checkpoint <Checkpoint>` whose parameters
 include another value of one the node consumed at construction (a
 checkpoint of a pipe built with another radius); before, the load
 succeeded and every later `/sim/step` failed.  More generally the load asks
 of every parameter it changes what `PUT /graph/params` asks, by the same
-code: a non-finite value, one outside its `ParamSpec` bounds, one the
+code: a non-finite value, one outside its {codeterm}`ParamSpec` bounds, one the
 node's constructor refuses with the graph's other values (a rod past its
 Fourier limit at this graph's timestep), one that moves a mapped edge's
 points -- each is a 400 and nothing is loaded.  Finiteness and the bounds
@@ -244,7 +244,7 @@ given, and refuses a boolean or text for a numeric parameter.
 
 `gm.params` is populated by `compile()` and **survives a recompile**: a
 calibrated leaf whose node, key, shape and dtype still exist is carried
-over when you add an edge or an external input, replace a node, or the
+over when you add an edge or an {term}`external input <External input>`, replace a node, or the
 profiler recompiles behind your back.  Leaves that no longer fit are
 dropped with a `RuntimeWarning`.  `gm.reset_params()` is the explicit
 way back to the constructor snapshot.  A checkpoint loaded before the
@@ -254,8 +254,8 @@ first compile compiles the graph so its params are not lost.
 Writing `gm.params` takes effect on the next step with no recompile, and
 is the way to change a constant mid-run.  A `node.params` write reaches
 the graph the next time anything reads `gm.params` -- your code,
-`save_state`, `to_dict`, the FMU export, `GET /graph/params`, a
-`jax.jit` of a sysid loss handed `gm.params` -- or runs it (`step`,
+`save_state`, `to_dict`, the {term}`FMU` export, `GET /graph/params`, a
+`jax.jit` of a {term}`sysid` loss handed `gm.params` -- or runs it (`step`,
 `run`, every `run_scan*`, the fitters, `windowed_loss`), or compiles it,
 whichever comes first: one sync point takes it in.  A constant
 `gm.params` carries is copied into it (no recompile); anything else --
@@ -343,7 +343,7 @@ assert float(gm.params["nodes"]["ball"]["elasticity"]) == float(jnp.float32(0.7)
 ```
 
 The graph's *state* survives the same recompile, and so does the
-internal bookkeeping that goes with it: a multi-rate graph keeps its
+internal bookkeeping that goes with it: a {term}`multi-rate <Multi-rate>` graph keeps its
 sub-step phase and a coupling group keeps its predictor history and IQN
 warm start, so a mid-run edit changes no number.  Only a change that
 moves a node's rate divider restarts the phase, because the sub-step it
@@ -353,14 +353,14 @@ way to zero all of it.
 A *partial* pytree passed to `gm.step(params=...)` / `gm.run_scan` /
 `gm.run` is completed from the **live** `gm.params` (a missing node or
 key keeps its calibrated value, not its constructor constant).  The raw
-compiled step (`gm._compiled_step`, what the FMI sidecar calls) refuses
+compiled step (`gm._compiled_step`, what the {term}`FMI` {term}`sidecar <Sidecar>` calls) refuses
 an incomplete pytree instead of guessing.
 
 ### Warnings when several threads run graphs
 
 Much of what this page promises is said as a Python warning: a
 compile-time advisory, a leaf dropped at a recompile, a rank decided at
-the precision floor.  Python keeps one list of warning filters for the
+the {term}`precision floor <Precision floor>`.  Python keeps one list of warning filters for the
 whole process, so what one thread does to that list, every thread lives
 with.
 
@@ -368,7 +368,7 @@ To check a write, MADDENING runs the node's own code a second time -- a
 trace of the step to see which leaves it reads, the constructor with the
 new value, `initial_state()` for the state's layout -- and silences what
 that code warns, because the real run says it.  The same is done when a
-sharded wrapper checks its inner node's state and when the profiler
+{term}`sharded <Sharded>` wrapper checks its inner node's state and when the profiler
 compiles its one-iteration variant.  That silence covers **the thread
 that is probing and no other**, and nothing is saved or put back: graphs,
 servers and profilers running in other threads keep every warning of
@@ -484,7 +484,7 @@ to end on a spring recorded with noise: the FIM's rank-2-of-3 verdict
 for `(k, c, m)`, `fit` holding the undetermined scale (`excited_rank`,
 `hold_declined`), `fit_lm` recovering `k` and `c` after a `ParamSpec`
 freeze and under a `mask=`, `params_table()` before and after, and the
-Cramér–Rao bounds the fit lands within.  Its residual is a `run_sweep`
+{term}`Cramér–Rao bounds <Cramér–Rao bound>` the fit lands within.  Its residual is a `run_sweep`
 rollout, which does not advance the graph.
 
 Record data that can tell the parameters apart.  `run_scan` leaves the
@@ -501,7 +501,7 @@ unconverged, including a window that diverged).  On a multi-rate graph
 each window also restarts on the sub-step its first sample was recorded
 at, which needs to know where the record began: pass `start_step=` (0
 for a record taken from `compile()` or `reset_state()`, `n` after
-`gm.run(n)`; experimental).  A multi-rate graph without it warns that 0
+`gm.run(n)`; {term}`experimental <EXPERIMENTAL>`).  A multi-rate graph without it warns that 0
 is assumed; a record that began elsewhere would be replayed on the wrong
 phase in every window.  A coupling group's predictor history and IQN-IMVJ
 warm starts are not in the observations either, so they are replayed:
@@ -1141,7 +1141,7 @@ trainable parameter while its step reads the parameter directly.
 
 * Initial conditions (`initial_*`): they are state, not dynamics, and are
   `trainable=False` by default.
-* Structural constants (`n_cells`, stencil order, shapes, grid geometry):
+* Structural constants (`n_cells`, {term}`stencil <Stencil>` order, shapes, grid geometry):
   changing one changes the trace; they stay Python-side and require a
   recompile.
 * `static_data` (meshes, precomputed operators): constants baked into the
@@ -1151,4 +1151,4 @@ trainable parameter while its step reads the parameter directly.
   leaf a fit can move.  See [A node that draws random
   numbers](../developer_guide/node_authoring.md#a-node-that-draws-random-numbers).
 * Anything in `state`: the adaptive error norm, history logging and
-  coupling residuals would see it.
+  {term}`coupling <Coupling>` residuals would see it.

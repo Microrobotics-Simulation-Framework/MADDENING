@@ -19,7 +19,7 @@ stay as warnings (units are documentation, not contract).
 ```
 
 ```{versionchanged} v0.3.0
-The deprecated `EdgeValidationWarning`, `ShapeMismatchWarning`, and
+The {term}`deprecated <DEPRECATED>` `EdgeValidationWarning`, `ShapeMismatchWarning`, and
 `DtypeMismatchWarning` aliases were **removed** per the v0.2.1
 deprecation cycle.  `UnitMismatchWarning` now roots at
 {class}`UserWarning` directly.
@@ -27,9 +27,9 @@ deprecation cycle.  `UnitMismatchWarning` now roots at
 
 In v0.2 we added compile-time validation that walks every
 {class}`~maddening.core.graph_manager.EdgeSpec` and compares the source
-field's runtime shape, dtype, and units against the target node's
+field's runtime shape, dtype, and units against the target {term}`node <Node>`'s
 {class}`~maddening.core.node.BoundaryInputSpec`.  The intent is that a
-lab newcomer wiring a 20-edge graph gets *every* mistake flagged in one
+lab newcomer wiring a 20-{term}`edge <Edge>` graph gets *every* mistake flagged in one
 {meth}`~maddening.core.graph_manager.GraphManager.compile` pass, instead
 of debugging one failure at a time at runtime.
 

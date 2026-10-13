@@ -1,11 +1,11 @@
 # Unit-Aware Edge Transforms
 
 **Module**: `maddening.core.transforms_unit`
-**Stability**: stable
+**Stability**: {term}`stable <STABLE>`
 
 ## Overview
 
-When {term}`coupling <Coupling>` nodes that use different physical unit systems (e.g. an {term}`LBM`
+When {term}`coupling <Coupling>` {term}`nodes <Node>` that use different physical unit systems (e.g. an {term}`LBM`
 fluid solver in lattice units coupled to a rigid body in SI), the {term}`edge <Edge>`
 between them must apply a unit conversion.  MADDENING supports this via:
 
@@ -111,7 +111,7 @@ The returned callables are:
 
 - **JAX-traceable**: work inside `jax.jit`, `jax.lax.scan`, `jax.lax.fori_loop`
 - **Differentiable**: `jax.grad` flows through them (they are scalar multiplications)
-- **vmap-compatible**: work with `jax.vmap` for parameter sweeps
+- **{term}`vmap`-compatible**: work with `jax.vmap` for parameter sweeps
 
 ### Optional registration
 

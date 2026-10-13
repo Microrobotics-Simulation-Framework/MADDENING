@@ -1,10 +1,10 @@
 # Geometry-dependent mappings
 
-*Experimental in 0.4.0.  The keyword `geometry=` of `add_edge`, the
+*{term}`Experimental <EXPERIMENTAL>` in 0.4.0.  The keyword `geometry=` of `add_edge`, the
 `multilinear_grid` kind and the registry flag `needs_geometry` may change
 in a minor release.*
 
-An interface mapping transfers a field from the points of one node to the
+An {term}`interface mapping <Interface mapping>` transfers a field from the points of one {term}`node <Node>` to the
 points of another.  The mappings of
 [Interface mapping](../algorithm_guide/coupling/interface_mapping.md) are
 built once, from positions that never change.  A **geometry-dependent**
@@ -12,7 +12,7 @@ mapping reads the positions from the graph's state at every step, so the
 points may move: markers carried by a flow, a body that crosses a grid.
 
 You say where the positions are with `geometry=(anchor, field)` on the
-edge: `anchor` is `"source"` or `"target"`, the edge's own source or
+{term}`edge <Edge>`: `anchor` is `"source"` or `"target"`, the edge's own source or
 target node, and `field` is a state field of that node.
 
 ## An example
@@ -92,7 +92,7 @@ The geometry is ordinary node state.  It is integrated by its node, saved
 by `save_state` and restored by `load_state`, batched by `run_sweep`, and
 `jax.grad` differentiates through it.  The mapping itself has no weights:
 its entry of `gm.params["mappings"]` is `{}`.  `to_dict` / `from_dict`
-and a USD stage carry the edge's `geometry`, and an FMU of such a graph
+and a USD stage carry the edge's `geometry`, and an {term}`FMU` of such a graph
 steps as the graph does.
 
 ## What is refused
@@ -104,13 +104,13 @@ names the edge and says what to do.
 | Where | Refused |
 |---|---|
 | `add_edge` | `geometry=` without `mapping=`, or with a static mapping (it would be ignored) |
-| `add_edge` | a geometry-dependent mapping without `geometry=` |
+| `add_edge` | a {term}`geometry-dependent mapping <Geometry-dependent mapping>` without `geometry=` |
 | `add_edge` | anything but `("source", <field>)` or `("target", <field>)`: a geometry held by a third node is not supported |
 | `compile` | a field the anchor node's state does not hold, or one of its boundary fluxes |
 | `compile` | a field that is not float32 or float64, or whose shape is not the mapping's `geometry_shape` |
 | `compile` | a `multilinear_grid` whose grid the geometry's dtype cannot resolve to 1/16 of a cell (a warning from `validate()` at 1/1024) |
-| `compile` | an edge with a sharded node at either end |
-| `compile` | `convergence_norm="interface"` on a coupling group with a geometry-dependent mapping on an internal edge, where the mapping is not a `multilinear_grid` or the group sub-cycles |
+| `compile` | an edge with a {term}`sharded <Sharded>` node at either end |
+| `compile` | `convergence_norm="interface"` on a {term}`coupling group <Coupling group>` with a geometry-dependent mapping on an internal edge, where the mapping is not a `multilinear_grid` or the group sub-cycles |
 | `run_adaptive`, `run_adaptive_scan` | any graph with a geometry edge |
 | `replace_node`, `POST /surrogate/activate`, `POST /surrogate/deactivate` | a replacement that does not hold the geometry field with the same shape and a float32 or float64 dtype; nothing is changed (the REST routes answer 409) |
 | `DatasetGenerator` | a target node fed through a geometry edge |
@@ -143,14 +143,13 @@ names the edge and says what to do.
   than eight independent interface scalars has no flag with or without
   a geometry (the spectral estimate takes eight Krylov steps).
 
-  *Why.*  A multilinear stencil is one polynomial of the positions
+  *Why.*  A multilinear {term}`stencil <Stencil>` is one polynomial of the positions
   inside a lattice cell and another in the next, so the pass's Jacobian
   jumps where a position crosses a lattice plane, or a face of the
   grid's hull (outside it the kernel clamps).  The three numbers are the
   linearisation at the returned iterate: they describe the polynomial
   the pass is in the lattice cells its positions are in *there*, and
-  `spectral_error_bound` is the distance to *that polynomial's* fixed
-  point, which is the pass's only if it lies in those cells.  Three
+  `spectral_error_bound` is the distance to *that polynomial's* {term}`fixed point <Fixed point>`, which is the pass's only if it lies in those cells.  Three
   rules in turn tried to certify that it does, and an independent audit
   of each found `spectral_usable` set beside a wrong number near a
   lattice plane: a bound 0.13 times the true distance (MADD-ANO-242);
@@ -170,7 +169,7 @@ names the edge and says what to do.
   where the origin is: with one marker 5e-4 from coordinate zero (its
   position weighted by 2,008) `rho_spectral` read 0.245 for 0.153 in
   float32.
-* **Coupling diagnostics read a geometry in one case.**  The step, the
+* **{term}`Coupling` diagnostics read a geometry in one case.**  The step, the
   coupling passes and their gradients read the geometry everywhere.
   `coupling_diagnostics()` reports the bounds of a group that resolves a
   geometry-dependent mapping (`rho_spectral`, `spectral_error_bound`,
@@ -196,7 +195,7 @@ names the edge and says what to do.
     product misses reads `G / (G + 32 res)`, where the term moves a field
     by `G` and `res` is the field's float resolution: 0.22, under the
     tolerance, on a deposit so weak that it moved the grid's field by
-    nine resolutions.  The spectral radius reported there was 0.003
+    nine resolutions.  The {term}`spectral radius <Spectral radius>` reported there was 0.003
     against 0.025.
   - **An honest report can be withheld beside a lattice plane.**
     Where a member reads, in the same sweep, positions that another
@@ -204,14 +203,14 @@ names the edge and says what to do.
     step of a lattice plane -- `sqrt(eps)` of a spacing: 3.45e-4 in
     float32, 1.5e-8 in float64 -- the check's step carries it across
     the plane and the difference is not a derivative.  Of 2829 drawn
-    float32 examples of two such Gauss-Seidel groups (1489 within 2e-5
+    float32 examples of two such {term}`Gauss-Seidel` groups (1489 within 2e-5
     of a spacing of a plane), 47 read over 0.05, two over 0.2 and one
     0.59; of a thousand further than 2e-5 from a plane none read over
     5e-3.  An independent audit that placed fixed points at every
     distance from a plane had 180 honest reports withheld in 65,714,
     each with a position the pass reads within that step of a plane (up
     to 2.9e-4 of a spacing in float32, 6.8e-9 in float64): 45 in
-    float32 and 135 in float64, two of them weakly coupled Jacobi groups
+    float32 and 135 in float64, two of them weakly coupled {term}`Jacobi` groups
     (MADD-ANO-246).
   - **An honest float32 report is withheld behind a strongly cancelling
     gather.**  A Gauss-Seidel group whose gather samples a field that
@@ -254,7 +253,7 @@ names the edge and says what to do.
   the iterate and the fixed point of such a pass.
 * **Everywhere else the report says so.**  For any other group that
   resolves a geometry-dependent mapping (another mapping kind, a
-  sub-cycled group, the interface norm), `coupling_diagnostics()` reports `iterations`,
+  {term}`sub-cycled <Sub-cycled>` group, the {term}`interface norm <Interface norm>`), `coupling_diagnostics()` reports `iterations`,
   `total_iterations`, `residual` and `converged`, and no bound or
   estimate.  Every bound is NaN, every `*_usable` flag is `False`, and
   the entry's `not_usable_reason` says which case it is.
@@ -363,7 +362,7 @@ names the edge and says what to do.
   **The advisory is asked once; the report reads the floor at every
   step.**  `compile()` asks of the state it is called with.  Markers
   that move afterwards, by their own update, by `set_node_state` or
-  from a loaded checkpoint, are not asked again by it.  The run-time
+  from a loaded {term}`checkpoint <Checkpoint>`, are not asked again by it.  The run-time
   reading is in the report: for such a group
   `coupling_diagnostics()[key]` carries `residual_precision_floor`, the
   float floor of the residual at the state that step returned (in
@@ -601,7 +600,7 @@ gather is read at the grid field and the scatter as delivered.
 |---|---|
 | The target's `update` | the `g` of the state `update` receives |
 | The target's flux hook (`compute_boundary_fluxes`) | the post-update `g` |
-| Multi-rate, the flux hook of a node slower than the base step | the `g` the node holds after the base step: post-update when it fires, the held `g` when it does not |
+| {term}`Multi-rate`, the flux hook of a node slower than the base step | the `g` the node holds after the base step: post-update when it fires, the held `g` when it does not |
 | A slow source's value and source-anchored geometry | what the source holds between its steps |
 
 The full table (coupling passes, sub-cycled members, back edges), and the

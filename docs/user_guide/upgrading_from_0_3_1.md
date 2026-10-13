@@ -2,8 +2,8 @@
 
 This page lists what a graph written for MADDENING 0.3.1 can run into on
 0.4.0, in the order you meet it: installing, building the graph,
-compiling, stepping, saving and loading, the HTTP API, FMU export,
-sharding, and the names that are deprecated.  For each change it says
+compiling, stepping, saving and loading, the HTTP API, {term}`FMU` export,
+{term}`sharding <Sharding>`, and the names that are {term}`deprecated <DEPRECATED>`.  For each change it says
 when it bites, what you see, and what to do.  Where 0.4.0 refuses
 something 0.3.1 accepted, the refusal's text is quoted as 0.4.0 raises it,
 and a short block shows the refusal and then the fix.  Every Python block
@@ -38,10 +38,10 @@ python -m maddening info        # the versions and devices JAX sees
 - On an NVIDIA GPU, JAX computes float32 matrix products at reduced
   precision by default.  A graph now traces every program it builds at
   full float32 precision (`gm.matmul_precision`, `"highest"` unless you set
-  it), and the lattice Boltzmann nodes pin their own products, so GPU
+  it), and the lattice Boltzmann {term}`nodes <Node>` pin their own products, so GPU
   results in those paths change slightly (by up to about 1e-4 relative);
-  set `gm.matmul_precision = None` (experimental) to keep JAX's own setting
-  for tensor-core speed in an MLP or FNO surrogate node.  For float32
+  set `gm.matmul_precision = None` ({term}`experimental <EXPERIMENTAL>`) to keep JAX's own setting
+  for tensor-core speed in an {term}`MLP` or {term}`FNO` {term}`surrogate <Surrogate>` node.  For float32
   matrix products of your own outside a graph, set
   `JAX_DEFAULT_MATMUL_PRECISION=highest`.  See
   [Installation](installation.md).
@@ -215,7 +215,7 @@ In 0.3.1 a group went on naming a removed node, and every compile and step
 failed until a node of that name came back.  Now the node leaves the
 group, and a group left with one member is removed, with a `UserWarning`.
 To rebuild a member and keep its group, add the group again after the
-node and its edges.
+node and its {term}`edges <Edge>`.
 
 ```text
 UserWarning: Removing node 'b' removed the coupling group of ['a', 'b'] with it (one member would remain).  A node added back under the name is not a member: add the group again (add_coupling_group) after the node and its edges.
@@ -279,7 +279,7 @@ LBMPipeNode("pipe", 1.0, nx=8, ny=8, nz=8, propeller_x=4)
 
 ### An edge and an external input on one field
 
-A declared external input replaces whatever an edge delivers to its field
+A declared {term}`external input <External input>` replaces whatever an edge delivers to its field
 on every step, with zeros when it is not fed, so the edge never reached
 the node.  `compile()` now raises, and `gm.validate()` lists the same text
 as an error.  Keep one of the two: leave out the `add_external_input`
@@ -310,11 +310,11 @@ chain(declare_input=False).compile()       # keep the edge: no declaration
 
 ### The default coupling solver, and what `converged` means
 
-- Coupling groups default to `solver="ift"`: a step's coupling loop stops
+- {term}`Coupling groups <Coupling group>` default to `solver="ift"`: a step's coupling loop stops
   when the group has converged instead of after a fixed number of passes,
-  and its gradient is taken by the implicit function theorem.
+  and its gradient is taken by the {term}`implicit function theorem <Implicit function theorem>`.
   `solver="fori"` still works, warns, and goes in the next minor release.
-- `converged=True` means "within tolerance of the fixed point": the test
+- `converged=True` means "within tolerance of the {term}`fixed point <Fixed point>`": the test
   applies to an error estimate, `residual / (1 - rho)`, not to the last
   change alone.  Expect a different `residual` and sometimes more passes.
   A group that now stops at `max_iterations` reports `converged=False`:
@@ -363,7 +363,7 @@ something the convergence test could not see.  `compile()` refuses them:
 - **A flux edge inside a group that the loop reads from the state.**  A
   flux is what `compute_boundary_fluxes` returns; it is not a field of the
   producer's state.  `convergence_norm="interface"` measures the values
-  internal edges carry, and a sub-cycled member's `"linear"` or
+  internal edges carry, and a {term}`sub-cycled <Sub-cycled>` member's `"linear"` or
   `"quadratic"` boundary interpolation interpolates them, so neither can
   read a flux.  Use `"mixed"` or `"l2"` for the norm, `"constant"` for the
   interpolation, or carry the quantity in a state field.
@@ -442,7 +442,7 @@ counters(max_iterations=1).compile()        # one staggered pass
   node on a common base step.  Timesteps more than about 1e9 apart, or
   with no common step the computation finds, no longer compile.
 - **`gm.timestep` is the time one `step()` advances.**  On a graph with a
-  sub-cycling group it is the group's largest member timestep.  Compute a
+  {term}`sub-cycling <Sub-cycling>` group it is the group's largest member timestep.  Compute a
   step count as `duration / gm.timestep`; the live runner's clock, a USD
   stage's `baseDt` and an FMU's default step follow it.
 
@@ -588,7 +588,7 @@ with warnings.catch_warnings():
   `external_inputs` are refused; delete the entry the graph is not to run
   with.  A graph saved by 0.3.1 after a second `add_external_input` holds
   both, and ran the later one.
-- **A node saved inside a sharded wrapper** is rebuilt unsharded, as the
+- **A node saved inside a {term}`sharded <Sharded>` wrapper** is rebuilt unsharded, as the
   node it wraps, with a `UserWarning` naming the call that wraps it again:
   a config does not carry the device mesh.  0.3.1 dropped the wrapper
   without a word.
@@ -679,7 +679,7 @@ deployment with the token.
   reports its peer as `"testclient"`, so a test suite that used
   `TestClient(app)` gets 401: give it the token, or build it as a loopback
   client.  Serve with uvicorn's `--no-proxy-headers`.
-- **Checkpoint paths are relative to `checkpoint_root`**
+- **{term}`Checkpoint` paths are relative to `checkpoint_root`**
   (`SimulationServer(checkpoint_root=...)`, by default `./checkpoints`),
   and a path that leaves it is refused.
 - **Request bodies are strict.**  A number field given `true`, `"0.5"` or
@@ -689,7 +689,7 @@ deployment with the token.
   or `geometry` is added in Python with `gm.add_edge`.
 - **`POST /graph/nodes` answers 400 where 0.3.1 answered 201** for a name
   containing `/`, `#` or `->`, an empty name, the names `NaN`, `Infinity`
-  and `-Infinity`, and a `HeatNode` timestep above its stencil's stability
+  and `-Infinity`, and a `HeatNode` timestep above its {term}`stencil <Stencil>`'s stability
   limit; a repeated request for one of them is a 400, not a 409.  An array dimension over the cap is a
   422.
 - **A cloud launch opens no API port by default** (`JobConfig.ports` is
@@ -772,7 +772,7 @@ on both ends, to a value different from `MADDENING_API_TOKEN`.
   the wrong fields; it now raises `TypeError`.  Build it with keywords.
 - **`build_model_description` refuses what it used to round or skip**: a
   `selected_outputs` pair that names no state field, and a
-  `default_step_size` that is not a whole number of graph steps.
+  `default_step_size` that is not a whole number of {term}`graph steps <Graph step>`.
 - **FMU-state blobs are `npz`, not pickle.**  A snapshot written before
   0.4.0 is refused rather than unpickled; regenerate any blob you stored.
 
@@ -842,15 +842,15 @@ build_model_description(gm, model_name="Ball", selected_outputs=[("ball", "posit
 - Around a `HeatNode` it takes only `boundary="edge"` (the default):
   `"zero"` and `"periodic"` are refused, since the sharded node would have
   computed another model than the unsharded one.  A cold end is a
-  boundary input, as unsharded: the `left_temperature` and
+  {term}`boundary input <Boundary inputs>`, as unsharded: the `left_temperature` and
   `right_temperature` inputs (in a graph, `gm.add_external_input(<node>,
   "left_temperature")`, which defaults to `0.0`).
 - Around an `LBMNode` it takes only `boundary="periodic"`, which you pass
   (the default `"edge"` is refused).  A `heat_source`
   or `body_force` of a shape the unsharded node refuses is refused too.
 - `ShardedUnstructuredNode` refuses a Cartesian stencil node (one with a
-  halo), a per-cell state that is not one row per layout cell, and a
-  per-cell input the length of one shard's slab.
+  {term}`halo <Halo>`), a per-cell state that is not one row per layout cell, and a
+  per-cell input the length of one {term}`shard <Shard>`'s slab.
 
 ```text
 ValueError: ShardedStencilNode: HeatNode 'rod' declares halo_boundary() == 'edge', the one fill of the halos at the edges of the global grid it takes, but was given boundary='zero'.  With another fill the sharded node would silently compute a different model from the unsharded one, or silently ignore the fill.  Pass boundary='edge'.  A HeatNode end held at a temperature is a boundary input, exactly as unsharded: pass left_temperature=0.0 / right_temperature=0.0 for a Dirichlet T=0 end (in a graph, gm.add_external_input(<node>, 'left_temperature') and 'right_temperature', which default to 0.0).  There is no periodic HeatNode.
@@ -943,7 +943,7 @@ DeprecationWarning: CouplingGroup solver='fori' is deprecated and will be remove
 
 `calibrate` fitted a function of a parameter dictionary.  `sysid.fit`
 fits the graph's own parameters (`gm.params`), within each parameter's
-`ParamSpec` bounds; here it recovers gravity from a recorded fall:
+{codeterm}`ParamSpec` bounds; here it recovers gravity from a recorded fall:
 
 <!-- snippet: continues -->
 ```python
@@ -975,7 +975,7 @@ assert abs(float(result.params["nodes"]["ball"]["gravity"]) + 9.81) < 0.01
 ```
 
 The [parameters guide](parameters.md#system-identification-maddeningsysid)
-covers `sysid` in full.
+covers {codeterm}`sysid` in full.
 
 **A registry of your own.**  `validate_anomaly_registry()` requires
 `resolution_status` on every entry and checks its value, rejects unknown

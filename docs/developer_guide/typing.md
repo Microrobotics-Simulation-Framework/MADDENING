@@ -8,7 +8,7 @@ whole-tree cleanliness.
 | Phase | When | What |
 |---|---|---|
 | **1** (done) | v0.4.0 development | `pyrightconfig.json` in *basic* mode over `src/maddening`; a `typecheck` CI job that is **visible but non-blocking**; the baseline below.  No source annotations are changed in this phase. |
-| **2 (current)** | v0.4.0, after the STABLE list settled | Annotate the surfaces tagged `@stability(StabilityLevel.STABLE)` (the [stability report](stability_report.md) is the authoritative list, regenerated and equality-checked in CI; 17 STABLE-tagged surfaces in 11 modules at v0.4.0) *and* the internal packages that refactors touch, replace bare `dict` parameters with `TypedDict`/`Mapping` types, ship a `py.typed` marker ([PEP 561](https://peps.python.org/pep-0561/)), and make the pyright check **blocking in two tiers**: tier 1 (`__init__.py`, `core`, `nodes`, `fmi`, `cloud`, `sysid`, `serialization`, `testing`, `compliance`) must be at zero errors; tier 2 (`viz`, `usd`, `api`, `surrogates`, which sit on untyped or optional third-party libraries) gets every public signature annotated, so a `py.typed` package never exposes an `Any`-returning public call, while its module bodies are only ratcheted: the error count may not rise above the recorded baseline. |
+| **2 (current)** | v0.4.0, after the {term}`STABLE` list settled | Annotate the surfaces tagged `@stability(StabilityLevel.STABLE)` (the [stability report](stability_report.md) is the authoritative list, regenerated and equality-checked in CI; 17 STABLE-tagged surfaces in 11 modules at v0.4.0) *and* the internal packages that refactors touch, replace bare `dict` parameters with `TypedDict`/`Mapping` types, ship a `py.typed` marker ([PEP 561](https://peps.python.org/pep-0561/)), and make the pyright check **blocking in two tiers**: tier 1 (`__init__.py`, `core`, `nodes`, `fmi`, `cloud`, `sysid`, `serialization`, `testing`, `compliance`) must be at zero errors; tier 2 (`viz`, `usd`, `api`, `surrogates`, which sit on untyped or optional third-party libraries) gets every public signature annotated, so a `py.typed` package never exposes an `Any`-returning public call, while its module bodies are only ratcheted: the error count may not rise above the recorded baseline. |
 
 Whole-tree cleanliness is explicitly *not* a goal of either phase.
 
@@ -189,7 +189,7 @@ for a later pass (see *What phase 2 did not do*).
 it into the wheel.  Without it a conforming type checker **must ignore
 every annotation in the package**, so all of the work above would be
 invisible to a consumer of `pip install maddening`.  Measured on a
-throwaway project importing `GraphManager` and `HeatNode` and making four
+throwaway project importing {codeterm}`GraphManager` and `HeatNode` and making four
 deliberate mistakes:
 
 | checker | without `py.typed` | with |
@@ -273,7 +273,7 @@ What the big buckets are:
   (135): attribute access on values typed `X | None` (matplotlib artists
   and figures in `api/frame_renderer*.py`, `viz/history_viewer.py`; optional
   network layers in `surrogates/architectures/*.py`) and on `pxr`/`pyvista`
-  objects that have no stubs.  Concentrated in viz/USD/surrogate modules,
+  objects that have no stubs.  Concentrated in viz/USD/{term}`surrogate <Surrogate>` modules,
   none of which is STABLE.
 - `reportUndefinedVariable` (2): string annotations (`"Path"`,
   `"subprocess.CompletedProcess"`) whose names are only imported inside the
@@ -303,7 +303,7 @@ What the big buckets are:
 
 194 modules including examples, ~1498 function definitions, 57 % with a
 return annotation, 235 parameters annotated as bare `dict` (the phase-2
-`TypedDict` candidates: node states, edge payloads, node/graph config).
+`TypedDict` candidates: {term}`node <Node>` states, {term}`edge <Edge>` payloads, node/graph config).
 
 ## Phase 2 checklist
 
@@ -318,7 +318,7 @@ Delivered on `feat/pep561-phase2` (2026-09-20) except where noted.
    `surrogates`).  The `TypedDict` conversion in the original wording is
    **deliberately not done here**: it changes the representation of the
    data structure every node touches, and the original motivation was
-   pytree layout and performance as much as typing.  It is phase 3 item 1
+   {term}`pytree <Pytree>` layout and performance as much as typing.  It is phase 3 item 1
    and needs its own review.  Where an annotation wanted one, the
    parameter is `Mapping[str, Any]` / `dict[str, Any]` with a comment
    naming the shape, so phase 3 can find every site by grepping for those

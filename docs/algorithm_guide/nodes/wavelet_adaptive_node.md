@@ -5,7 +5,7 @@ bibliography: ../../bibliography.bib
 # WaveletAdaptiveNode
 
 **Module**: `maddening.nodes.adaptive.wavelet`
-**Stability**: experimental
+**Stability**: {term}`experimental <EXPERIMENTAL>`
 **Algorithm ID**: `MADD-NODE-010`
 **Version**: 1.1.0
 
@@ -71,8 +71,8 @@ boundary (`MADD-ANO-003`).
 - **Basis.** The Deslauriers–Dubuc interpolating wavelet basis of order 4 on
   the isotropic Mallat multiresolution (one level per refinement, $2^d - 1$
   detail subbands per level), built by a lifting scheme (predict the midpoint
-  from the four nearest coarse samples, add the detail), matrix-free in JAX.
-  The Dirichlet basis pins the wall values to zero and shrinks the stencil to
+  from the four nearest coarse samples, add the detail), matrix-free in {term}`JAX`.
+  The Dirichlet basis pins the wall values to zero and shrinks the {term}`stencil <Stencil>` to
   linear at the walls; it is built dense at construction and the multi-D
   Dirichlet basis is the tensor product of the 1-D one. Columns are
   $L^2$-normalised ($W_n$).
@@ -119,7 +119,7 @@ boundary (`MADD-ANO-003`).
   Now the set changes only where a magnitude gap crosses $\tau$ or the
   Dörfler bulk falls on a cumulative sum -- isolated parameter values (no
   switch in the same sweep) -- and every parameter leaf is cast to the
-  node's dtype before the source reads it, so spellings give the same
+  {term}`node <Node>`'s dtype before the source reads it, so spellings give the same
   bits. The seed is *every
   level-0 function* -- the coarse block plus the first detail band,
   $(2 n_c)^d$ periodic or $(2 n_c + 1)^d$ Dirichlet -- and $k$ is validated
@@ -265,7 +265,7 @@ boundary (`MADD-ANO-003`).
 | Default budget vs seed | all default `(boundary, dim, n_levels <= 2, n_coarse <= 3)` up to 529 functions | The seed (level 0) is inside `k` and every active coefficient is solved -- the 13 cheapest of the 16 default configurations on which it used to be dropped (`test_the_default_budget_holds_the_whole_level_zero_seed_so_no_coefficient_is_dropped`) |
 | Budget $k$ | $n_{\max}/16$ (default) – $n_{\max}$ | At $k = n_{\max}/16$ on 128 points the sensor reading is within $4.5 \times 10^{-4}$ (relative, float64) of the full-basis one over $\theta \in \{0.04, 0.30, 0.42, 0.50, 0.92\}$ and never changes sign (`MADD-VER-015`). The error is **not** monotone in $k$ and no rate in $k$ is claimed |
 | Gradient-capture ratio | 0.99 – 1.01 | $\theta = 0.42$, 1-D 128 points, 2-D $16^2$, 3-D $8^3$, Dirichlet 95 points: the local basis reproduces the full-basis gradient at the default budget, so the cold-start check passes silently |
-| `jax.grad` vs central differences | $1.5 \times 10^{-9}$ (θ), $4 \times 10^{-11}$ (σ) relative | Active set asserted unchanged across the step; through `jit`, `scan` and the compiled graph step |
+| `jax.grad` vs central differences | $1.5 \times 10^{-9}$ (θ), $4 \times 10^{-11}$ (σ) relative | Active set asserted unchanged across the step; through `jit`, `scan` and the compiled {term}`graph step <Graph step>` |
 | Order of the basis | 4 | 2 and 6 construct and round-trip; the operator's order stays 2 regardless |
 
 ## Known Limitations and Failure Modes
@@ -280,7 +280,7 @@ boundary (`MADD-ANO-003`).
    the operator and the sensor row stale; rebuild the node. `compile()`
    refuses a graph that unfreezes them.
 4. **Steady only.** `update` ignores `dt` and `boundary_inputs` because the
-   base class's hooks do not receive them, so the node is an edge *source*
+   base class's hooks do not receive them, so the node is an {term}`edge <Edge>` *source*
    and cannot time-step or consume an edge; a time-dependent wavelet node
    needs the freeze question in the developer guide answered.
 5. **Dense operator.** $A$ is an $n_{\max} \times n_{\max}$ constant of the
@@ -417,6 +417,6 @@ Every entry is stored in `self.params`, so `cls(name=..., timestep=...,
 
 | Version | Date | Change |
 |---------|------|--------|
-| 1.0.0 | 2026-09-21 | Ported onto the 0.4.0 `AdaptiveNode` API: parameters in the graph pytree, `{c, mask}` state, CDD as a `while_loop`, gathered frozen solve, dense full-basis gradient, declared and measured order 2 |
+| 1.0.0 | 2026-09-21 | Ported onto the 0.4.0 `AdaptiveNode` API: parameters in the graph {term}`pytree <Pytree>`, `{c, mask}` state, CDD as a `while_loop`, gathered frozen solve, dense full-basis gradient, declared and measured order 2 |
 | 1.1.0 | 2026-09-24 | Phase-3 audit: conditioning guard (`CONDITION_LIMIT`, `condition_estimate`, `physical_condition_number`); CDD rounding floor and index-order tie-break, a third loop exit and `resolved` in the diagnostics; leaves cast to the dtype before the source; periodised periodic source; non-integral structural counts and unknown keys refused. The masked-CG path is bounded with its stopping tolerance, and a non-converging eager CG solve is named rather than surfacing as lineax's error |
 | 1.0.1 | 2026-09-22 | Merged-tree audit: `k` sized and validated against the real CDD seed (level 0, not the coarse block) -- 16 default configurations were silently truncating the gathered solve; an oversized set is refused / NaN-poisoned; the assembly checks symmetry before symmetrising; construction is legal inside a trace; `selection_diagnostics()`; a periodic sensor at 1.0 snaps to point 0 |

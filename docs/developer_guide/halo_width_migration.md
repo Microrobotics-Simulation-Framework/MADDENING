@@ -5,10 +5,10 @@ orphan: false
 # `halo_width` migration guide (v0.2 → v0.3.0)
 
 ```{versionchanged} v0.2
-Per-axis halo widths via
+Per-axis {term}`halo <Halo>` widths via
 {meth}`SimulationNode.halo_width() <maddening.core.node.SimulationNode.halo_width>`,
-returning a ``dict[int, int]`` (``{axis: width}``).  Pointwise nodes
-return ``{}``; stencil nodes return a non-empty dict.  The legacy
+returning a ``dict[int, int]`` (``{axis: width}``).  Pointwise {term}`nodes <Node>`
+return ``{}``; {term}`stencil <Stencil>` nodes return a non-empty dict.  The legacy
 boolean ``requires_halo`` property was retained as a derived
 fallback (``bool(self.halo_width())``) and any subclass overriding
 ``requires_halo`` directly emitted a
@@ -24,14 +24,14 @@ instead of ``halo_width`` now raise
 
 ## Why this changed
 
-Pencil decomposition (the Cartesian multi-GPU sharding path,
+Pencil decomposition (the Cartesian multi-GPU {term}`sharding <Sharding>` path,
 {class}`~maddening.cloud.multigpu.sharded_node.ShardedStencilNode`,
 added in v0.2.1) needs to know each axis's halo width, not just
-"do you need a halo at all": it pads every sharded axis by that
+"do you need a halo at all": it pads every {term}`sharded <Sharded>` axis by that
 axis's width on each side, `[halo | interior | halo]`, before
 `update_padded` runs.  The boolean was load-bearing
 once — when stencils were 1-D and one axis per node — but it
-silently lost information the moment we shipped 3-D LBM.
+silently lost information the moment we shipped 3-D {term}`LBM`.
 
 {class}`~maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode`
 (added in v0.3.0) takes no halo width from the node.  A node's
@@ -40,7 +40,7 @@ neighbours there are the partition layout's ghost cells, handed to
 written for it declares `halo_width() == {}`.  Since v0.4.0 that
 wrapper refuses a node that declares a non-empty `halo_width()`: that
 is the Cartesian contract, and such a node would read the partition
-layout as the wrong cells.  Shard a stencil node with
+layout as the wrong cells.  {term}`Shard` a stencil node with
 `ShardedStencilNode`.  (Until v0.4.0 this guide said the unstructured
 wrapper needed each axis's halo width too.)  The
 [sharding topology guide](sharding_topology.md) sets the two layouts

@@ -5,7 +5,7 @@ bibliography: ../../bibliography.bib
 # [Node Name]
 
 **Module**: `maddening.nodes.[module]`
-**Stability**: [experimental | evolving | stable | deprecated]
+**Stability**: [{term}`experimental <EXPERIMENTAL>` | {term}`evolving <EVOLVING>` | {term}`stable <STABLE>` | {term}`deprecated <DEPRECATED>`]
 **Algorithm ID**: `MADD-NODE-[XXX]`
 **Version**: [semantic version of this algorithm implementation]
 
@@ -16,7 +16,7 @@ bibliography: ../../bibliography.bib
 
 ## Summary
 
-[1-2 sentence description of what this node simulates.]
+[1-2 sentence description of what this {term}`node <Node>` simulates.]
 
 ## Governing Equations
 
@@ -34,12 +34,12 @@ finite difference/finite element/lattice Boltzmann, order of accuracy.]
 ## Implementation Mapping
 
 [Trace every term in the governing equations and discretization to the
-specific Python/JAX function that implements it. This is mandatory for
+specific Python/{term}`JAX` function that implements it. This is mandatory for
 {term}`IEC 62304` Class C detailed design traceability (Clause 5.4).]
 
 | Equation Term | Implementation | Notes |
 |---------------|---------------|-------|
-| $\alpha \nabla^2 T$ (diffusion) | `maddening.nodes.heat.HeatNode.update` | 2nd-order central FD stencil |
+| $\alpha \nabla^2 T$ (diffusion) | `maddening.nodes.heat.HeatNode.update` | 2nd-order central FD {term}`stencil <Stencil>` |
 | $S$ (source term) | `maddening.nodes.heat.HeatNode.update` | Added after diffusion |
 | Time integration ($\partial T / \partial t$) | Forward Euler in `maddening.nodes.heat.HeatNode.update` | 1st-order explicit |
 | Boundary conditions | `state.at[0].set(left_T)` | JAX primitive: `jax.numpy.ndarray.at[].set()` |

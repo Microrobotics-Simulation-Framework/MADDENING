@@ -44,7 +44,7 @@ Write examples so that a wrong one fails:
 - **Assert something.** A snippet that only constructs objects proves they
   import. Print a value, or wrap a comparison in `bool(...)` /
   `round(..., n)` so the expected output is exact and stable.
-- **No arrays, addresses or raw floats in expected output.** `repr` of a JAX
+- **No arrays, addresses or raw floats in expected output.** `repr` of a {term}`JAX`
   array carries dtype and formatting that change between releases; object
   addresses change every run. Compare instead:
   `>>> bool(jnp.allclose(x, 0.5 * jnp.ones(8)))`.
@@ -106,7 +106,7 @@ Items combine, separated by commas, with `reason:` last:
 
 | Category | Use it for |
 |---|---|
-| `fragment` | An intentionally partial excerpt: a method body, a dict entry, or calls on a `gm` or node the prose builds but the block does not |
+| `fragment` | An intentionally partial excerpt: a method body, a dict entry, or calls on a `gm` or {term}`node <Node>` the prose builds but the block does not |
 | `pseudo-code` | Placeholders (`...`, `XXX`, `bounds={...}`) that stand for the reader's own code |
 | `legacy` | A removed or pre-migration API, shown for comparison |
 | `cloud` | Anything that names a cloud launch path (below) |
@@ -120,7 +120,7 @@ block's code rather than marking it `no-run`. A `no-run` block is not
 unchecked either: its `maddening` imports must resolve, every keyword
 argument it passes to a callable it imports from `maddening` must be one
 that callable takes, and every `gm.<method>(...)` it calls must exist on
-`GraphManager` with those keywords (every guide spells a graph `gm`). Only
+{codeterm}`GraphManager` with those keywords (every guide spells a graph `gm`). Only
 the import statements are executed, never the block.
 
 **Cloud launch paths never run.** A block that names `/cloud/launch`,
@@ -184,7 +184,7 @@ Required sections:
 | Stability Conditions | Analytical/empirical stability bounds |
 | State Variables | Field, shape, units, description |
 | Parameters | Parameter, type, default, units, description |
-| Boundary Inputs | Field, shape, default, description |
+| {term}`Boundary Inputs <Boundary inputs>` | Field, shape, default, description |
 | References | `[@Key]` citations with inline descriptions |
 | Verification Evidence | Links to benchmarks and test files |
 | Changelog | Version, date, change |
@@ -266,14 +266,14 @@ MADDENING follows strict [Semantic Versioning](https://semver.org/):
 - **MINOR** (0.X.0): New features, backward-compatible
 - **PATCH** (0.0.X): Bug fixes, documentation
 
-API stability levels:
+API {term}`stability levels <Stability level>`:
 
 | Level | Meaning | SemVer Guarantee |
 |-------|---------|-----------------|
-| **stable** | Breaking changes only in major versions | Full |
-| **evolving** | May change in minor versions with deprecation warning | One minor version notice |
-| **experimental** | May change without notice | None |
-| **deprecated** | Scheduled for removal; the replacement is named in the docstring | Removed when the level it held allows: a `stable` surface in a major release, after two minor releases of notice; an `evolving` one in a minor release, after one; an `experimental` one in any minor release |
+| **{term}`stable <STABLE>`** | Breaking changes only in major versions | Full |
+| **{term}`evolving <EVOLVING>`** | May change in minor versions with deprecation warning | One minor version notice |
+| **{term}`experimental <EXPERIMENTAL>`** | May change without notice | None |
+| **{term}`deprecated <DEPRECATED>`** | Scheduled for removal; the replacement is named in the docstring | Removed when the level it held allows: a `stable` surface in a major release, after two minor releases of notice; an `evolving` one in a minor release, after one; an `experimental` one in any minor release |
 
 The table is a summary; [the deprecation policy](deprecation_policy.md) is the
 rule, and also covers the two deprecated levels, `PROVISIONAL` and

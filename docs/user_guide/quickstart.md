@@ -123,14 +123,14 @@ such an argument.  See
 ```{note}
 **Advisories on multi-node graphs.**
 
-* A *disconnected* node (no edges or external inputs into the rest
+* A *disconnected* node (no edges or {term}`external inputs <External input>` into the rest
   of the graph) emits a `UserWarning` from `gm.compile()`.
   Disconnected-but-intentional nodes run correctly — the warning is
   advisory, not an error.
 * A *feedback loop* is logged at `INFO` level through
   ``logging.getLogger("maddening.core.graph_manager")`` (no
   warning).  Back-edges are staggered to the previous timestep, so
-  intentional coupling loops also run correctly.
+  intentional {term}`coupling <Coupling>` loops also run correctly.
 
 Both messages are designed to surface unintentional graph mistakes
 without breaking deliberate constructions.
@@ -150,7 +150,7 @@ A field also has one declaration.  `gm.add_external_input` for a field
 that is already declared with another shape or dtype raises a
 `ValueError` naming both, and so does loading a file that holds two: the
 shape and dtype are what the step casts a supplied value to, what the
-FMU export types the input as and what `to_dict()` saves, and until 0.4.0
+{term}`FMU` export types the input as and what `to_dict()` saves, and until 0.4.0
 the last of two won.  Declaring it again with the same shape and dtype is
 accepted and changes nothing.
 ```
@@ -158,8 +158,7 @@ accepted and changes nothing.
 ### An edge from a node to itself
 
 An edge may start and end at the same node.  Which of its own values the
-node then reads depends on one thing, whether the node is in a coupling
-group:
+node then reads depends on one thing, whether the node is in a {term}`coupling group <Coupling group>`:
 
 - **outside a coupling group** the edge is a back edge, like the staggered
   edge of any loop: the node reads its own value from the *previous* step,
@@ -219,7 +218,7 @@ only cycles of two or more nodes, so it leaves such an edge explicit.
 "Implicit" is what a *converged* group gives.  The first pass of a group
 reads the previous step, so `max_iterations=1` returns the explicit value,
 and the plain iteration converges only while `|k dt| < 1`; past that the
-group needs an `acceleration`.  That, sub-cycled members, multi-rate
+group needs an `acceleration`.  That, {term}`sub-cycled <Sub-cycled>` members, {term}`multi-rate <Multi-rate>`
 graphs and edges from a node's own flux are in
 [An edge from a node to itself](../developer_guide/coupling_algorithm_guide.md#an-edge-from-a-node-to-itself)
 in the coupling guide.
@@ -248,7 +247,7 @@ gm.reset_state()
 ```
 
 `run_scan` (like `step` and `run`) writes its result back into the
-graph, and under `jax.grad` that result is made of JAX tracers.  The
+graph, and under `jax.grad` that result is made of {term}`JAX` tracers.  The
 gradient is correct either way, and the graph puts itself back to the
 state it had before the transform — with a `RuntimeWarning` — the next
 time you use it.  Setting the state you actually want, as above, is
@@ -306,7 +305,7 @@ an SSH tunnel:
 Because there is no TLS, the token crosses the network in cleartext:
 prefer the tunnel, or a TLS-terminating reverse proxy, to a public port.
 `/docs` is not served when the token is enforced (Swagger UI cannot send
-a bearer header when it fetches its own schema).  WebRTC signaling on
+a bearer header when it fetches its own schema).  {term}`WebRTC` signaling on
 8443 authenticates separately, once you set `MADDENING_STREAM_SECRET` and
 share it with the viewer.  The container streams its simulation there (a
 time series of its scalar state fields, at `StreamConfig.fps`): it logs
@@ -329,7 +328,7 @@ token, because both ends are loopback:
     ssh -L 5555:127.0.0.1:5555 root@<vm-ip> -p <ssh-port>
 
 To publish the port instead, bind a non-loopback address. That turns on
-**ZMQ CURVE encryption**, and the socket refuses to open without a shared
+**{term}`ZMQ` CURVE encryption**, and the socket refuses to open without a shared
 secret:
 
     # both machines
@@ -371,4 +370,4 @@ is worth checking before concluding that the simulation is idle.
 
 - **[Installation Guide](installation.md)** — all extras, GPU setup, cloud providers
 - **[DESIGN.md](https://github.com/Microrobotics-Simulation-Framework/MADDENING/blob/main/DESIGN.md)** — architecture decisions, node authoring contract
-- **`examples/`** — coupling, adaptive timestepping, surrogates, servers
+- **`examples/`** — coupling, adaptive timestepping, {term}`surrogates <Surrogate>`, servers

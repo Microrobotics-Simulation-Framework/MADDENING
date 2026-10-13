@@ -7,9 +7,9 @@ contract. This page is about *using* it and about what porting it onto the
 0.4.0 API taught us; the method is in the
 [algorithm guide](../algorithm_guide/nodes/wavelet_adaptive_node.md).
 
-> **Stability.** `EXPERIMENTAL`, one level below the `EVOLVING` base class.
+> **Stability.** {codeterm}`EXPERIMENTAL`, one level below the {codeterm}`EVOLVING` base class.
 > The wavelet engine under `maddening.nodes.adaptive.wavelets` is importable
-> and tagged `EXPERIMENTAL` function by function; the node is the surface
+> and tagged `EXPERIMENTAL` function by function; the {term}`node <Node>` is the surface
 > the freeze round covers.
 
 ## Quick start
@@ -38,8 +38,7 @@ band*, `(2 * n_coarse) ** dim` periodic or `(2 * n_coarse + 1) ** dim`
 Dirichlet. A `k` below the seed is refused with both numbers in the message.
 `k = n_max` turns adaptivity off.
 
-Inside a graph the node is an edge **source**: it declares no boundary
-inputs and `update` reads neither `dt` nor `boundary_inputs`, because the
+Inside a graph the node is an {term}`edge <Edge>` **source**: it declares no {term}`boundary inputs <Boundary inputs>` and `update` reads neither `dt` nor `boundary_inputs`, because the
 problem is steady. Edges out of `c` work as for any node; to expose the
 field rather than the coefficients, map through `node.field` in the consumer
 or add a transform.
@@ -99,7 +98,7 @@ ratio read 0.97 because it measured through the same truncated solve. Now:
   with NaN under a trace -- the truncation cannot happen silently;
 - `assemble_operator` measures `max|A - A^T| / max|A|` *before* symmetrising
   and refuses above `SYMMETRY_TOL = 1e-12` (correct assembly ~1e-16, a
-  one-sided stencil 1.07), so the symmetrisation can no longer turn a
+  one-sided {term}`stencil <Stencil>` 1.07), so the symmetrisation can no longer turn a
   first-order stencil into a consistent second-order one that passes the
   order gate;
 - a periodic sensor at `1.0` snaps to grid point 0, its periodic image,
@@ -110,7 +109,7 @@ ratio read 0.97 because it measured through the same truncated solve. Now:
 Every constant of the node is built on the host from static settings
 (`assemble_operator` runs under `jax.ensure_compile_time_eval`; `levels` and
 `diagonal` are NumPy arrays), so a function that builds a fresh node -- or a
-fresh `GraphManager` holding one -- per call traces under `jax.jit`. This is
+fresh {codeterm}`GraphManager` holding one -- per call traces under `jax.jit`. This is
 what a `residual_fn` for `sysid.fim` that constructs its graph inside the
 call needs; it used to fail in the assembly with a
 `TracerArrayConversionError` whose traceback pointed at `sysid.py`. Build
@@ -171,7 +170,7 @@ engine-level `cdd_select_with_iterations` returns the same count.
   eager solve that does not converge is re-raised as a `ValueError` naming
   `kappa`, the tolerance, the budget and the fixes; under a trace the
   error still comes from lineax when the step runs (the node cannot catch
-  a runtime error inside XLA without lineax's `throw=False`, which
+  a runtime error inside {term}`XLA` without lineax's `throw=False`, which
   `ift_linear_solve` does not expose -- one of its open API questions).
   The bound is also conservative for the `"level"` and `"dk"`
   preconditioners (periodic `mass=3e-3` in float32 refused while the
@@ -213,8 +212,8 @@ full-basis gradient is bitwise zero.
 
 - **Compile time was the whole cost.** The 30-step CDD unroll the node was
   first written with cost 7–10 s of XLA compile in *every* outer `jit`
-  (nested `jit` is inlined, so `update`, `grad` and the graph step each paid
-  it again); a bare `vmap` for the synthesis matrix paid ~60 eager primitive
+  (nested `jit` is inlined, so `update`, `grad` and the {term}`graph step <Graph step>` each paid
+  it again); a bare {codeterm}`vmap` for the synthesis matrix paid ~60 eager primitive
   compiles per size; and the base class calls the hooks eagerly, where one
   gathered solve cost 4.9 s and one frozen gradient 6.3 s on first use. Now:
   CDD is a `lax.while_loop`, assembly is NumPy, and the hook bodies are
@@ -245,7 +244,7 @@ freeze is the moment they are cheap to act on.
    of floats into an array leaf, so a structural location like `sensor` must
    be declared `trainable=False` *and* declared in `static_data_deps`, or it
    is a silently dead gradient. Nothing in the base class says so.
-3. **The hooks are called eagerly by the diagnostics**, and an eager JAX
+3. **The hooks are called eagerly by the diagnostics**, and an eager {term}`JAX`
    function is compiled primitive by primitive. Any subclass with a
    non-trivial solve will find its cold start dominated by compile time until
    it jits its own hook bodies; the base class could jit the objective

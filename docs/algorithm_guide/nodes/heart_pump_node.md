@@ -5,7 +5,7 @@ bibliography: ../../bibliography.bib
 # HeartPumpNode
 
 **Module**: `maddening.nodes.heart_pump`
-**Stability**: experimental
+**Stability**: {term}`experimental <EXPERIMENTAL>`
 **Algorithm ID**: `MADD-NODE-008`
 **Version**: 1.0.0
 
@@ -52,14 +52,14 @@ There is no spatial order: the arterial compartment is lumped, with no spatial e
 `NodeMeta.discretization` names *forward* Euler, which would place every
 right-hand-side term at $t^n$.  As written above, the inflow is evaluated
 at $\phi^{n+1}$ — the **end** of the step — while the outflow uses $P^n$.
-The node's own `derivatives()` evaluates the same waveform at $\phi^n$, so
+The {term}`node <Node>`'s own `derivatives()` evaluates the same waveform at $\phi^n$, so
 the explicit path and the `derivatives()`-based paths
 (`integrate_node`, `implicit_residual`) integrate inflow waveforms offset
 by one timestep.  Both samplings are 1st order, so the declared order is
 unaffected.  Recorded as **MADD-ANO-012**.
 
 `backpressure` is also cast to float32 unconditionally, which pins the
-coupling variable to single precision under any caller precision
+{term}`coupling <Coupling>` variable to single precision under any caller precision
 (**MADD-ANO-013**).
 ```
 
@@ -140,7 +140,7 @@ and non-oscillatory for $\Delta t < RC$. With the defaults ($R = C = 1$) that is
 
 | Field | Shape | Default | Description |
 |-------|-------|---------|-------------|
-| `backpressure` | scalar | `venous_pressure` | Downstream pressure feedback, e.g. from an LBM outlet |
+| `backpressure` | scalar | `venous_pressure` | Downstream pressure feedback, e.g. from an {term}`LBM` outlet |
 
 ## Boundary Fluxes
 

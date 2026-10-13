@@ -1,6 +1,6 @@
 # Node Authoring Guide
 
-This guide covers everything required to add a new `SimulationNode` to MADDENING. Every requirement here is derived from the [Documentation Architecture](https://github.com/Microrobotics-Simulation-Framework/MADDENING/blob/main/DOCUMENTATION_ARCHITECTURE.md) and enforced by CI.
+This guide covers everything required to add a new {codeterm}`SimulationNode` to MADDENING. Every requirement here is derived from the [Documentation Architecture](https://github.com/Microrobotics-Simulation-Framework/MADDENING/blob/main/DOCUMENTATION_ARCHITECTURE.md) and enforced by CI.
 
 ## The Contract
 
@@ -44,14 +44,14 @@ What your gradients will do:
 
 A calibration or optimisation through such a node follows these
 gradients: it stalls on a zero, or walks the wrong way. Until event
-localisation lands (an implicit-function-theorem derivative of the event
+localisation lands (an {term}`implicit-function-theorem <Implicit function theorem>` derivative of the event
 time, planned for 0.5.0), do one of the following:
 
 - **Smooth the switch.** Use a penalty or regularised contact force (a
   stiff spring active below the surface, a `softplus` in place of a hard
   threshold, a regularised friction law) so that the dynamics are
   differentiable and the event time is implicit in them. The smoothing
-  length is a modelling choice. Say what it is in the node's `NodeMeta`.
+  length is a modelling choice. Say what it is in the node's {codeterm}`NodeMeta`.
 - **Do not differentiate through the event.** Fit over intervals that
   contain no switch, or treat the event time as a separate parameter you
   estimate some other way.
@@ -63,12 +63,12 @@ time, planned for 0.5.0), do one of the following:
 
 ### Derivative rules and coupling groups
 
-Most nodes need no derivative rule: JAX differentiates `update()` as it
+Most nodes need no derivative rule: {term}`JAX` differentiates `update()` as it
 is.  A node that wraps code JAX cannot trace (an external kernel, a
 callback) needs one, and the kind of rule decides where the node can go.
 
 - **A reverse-mode-only rule (`jax.custom_vjp`) cannot be differentiated
-  inside a coupling group on the default solver.**  `solver="ift"`
+  inside a {term}`coupling group <Coupling group>` on the default solver.**  `solver="ift"`
   differentiates a group in forward mode, also under `jax.grad`, and
   JAX cannot run a `custom_vjp` forward.  The gradient raises
   `NotImplementedError: Differentiation rule for 'custom_lin' not
@@ -269,7 +269,7 @@ Every node **must** have a `meta` ClassVar. Required fields:
 |-------|----------|-------------|
 | `algorithm_id` | Yes | `MADD-NODE-XXX` format (get next available from existing nodes) |
 | `algorithm_version` | Yes | Semantic version of this algorithm implementation |
-| `stability` | Yes | `StabilityLevel.EXPERIMENTAL` for new nodes |
+| `stability` | Yes | {codeterm}`StabilityLevel.EXPERIMENTAL <EXPERIMENTAL>` for new nodes |
 | `description` | Yes | One-line description |
 | `assumptions` | Yes | Tuple of strings — every physical/mathematical assumption |
 | `limitations` | Yes | Tuple of strings — every known failure mode |
@@ -295,7 +295,7 @@ Copy `docs/algorithm_guide/nodes/_template.md` and fill in every section:
 docs/algorithm_guide/nodes/your_node.md
 ```
 
-**Mandatory sections**: Summary, Governing Equations, Discretization, Implementation Mapping, Assumptions and Simplifications, Validated Physical Regimes, Known Limitations and Failure Modes, Stability Conditions, State Variables, Parameters, Boundary Inputs, References, Verification Evidence, Changelog.
+**Mandatory sections**: Summary, Governing Equations, Discretization, Implementation Mapping, Assumptions and Simplifications, Validated Physical Regimes, Known Limitations and Failure Modes, Stability Conditions, State Variables, Parameters, {term}`Boundary Inputs <Boundary inputs>`, References, Verification Evidence, Changelog.
 
 **Implementation Mapping**: Trace every equation term to a specific Python/JAX function. No silent omissions. Terms handled by JAX primitives (e.g., `jnp.fft.rfftn()`) must be documented as such.
 
@@ -336,7 +336,7 @@ CI validates that every `[@Key]` citation in algorithm guides resolves to an ent
 - Verify `jax.grad` compatibility if the node supports differentiation
 - Verify `jax.vmap` compatibility if the node supports batching
 
-**Verification benchmark** (`tests/verification/test_your_node_*.py`) — mandatory for physics nodes:
+**{term}`Verification benchmark`** (`tests/verification/test_your_node_*.py`) — mandatory for physics nodes:
 - Compare against analytical solution or published reference data
 - Register with `@verification_benchmark`:
 
@@ -359,7 +359,7 @@ def test_your_analytical_comparison():
 - Verify finiteness, structure preservation, determinism for random inputs
 - Test conservation laws and energy dissipation where applicable
 - See the [Verification Guide](verification.md) for the full checklist
-- A verified node is the first of three levels: the edges it is coupled through
+- A verified node is the first of three levels: the {term}`edges <Edge>` it is coupled through
   (`verify_mapping`) and the coupled graph (`verify_graph_order`) have checks of
   their own, in [Verifying a coupled model in three
   levels](verification.md#verifying-a-coupled-model-in-three-levels)
@@ -378,7 +378,7 @@ def test_your_node_always_finite(state, dt):
 ```
 
 **Integration test** — mandatory:
-- Test the node within a `GraphManager` (add node, connect edges, run steps)
+- Test the node within a {codeterm}`GraphManager` (add node, connect edges, run steps)
 
 ### 6. Apply the `@stability` Decorator
 
@@ -391,7 +391,7 @@ class YourNode(SimulationNode):
     ...
 ```
 
-New nodes start as `EXPERIMENTAL`. Promote to `STABLE` when:
+New nodes start as `EXPERIMENTAL`. Promote to {codeterm}`STABLE` when:
 - At least one verification benchmark passes
 - Algorithm guide is complete
 - API has been stable for at least one minor release
@@ -542,14 +542,14 @@ What a save does not carry, whatever the class does:
   [Live values, recompiles and partial pytrees](../user_guide/parameters.md#live-values-recompiles-and-partial-pytrees);
 - anything that is not in `params` because it cannot be: a callable, a
   device mesh, a partition layout;
-- state. A config and a stage carry structure; a checkpoint
+- state. A config and a stage carry structure; a {term}`checkpoint <Checkpoint>`
   (`gm.save_state`) carries the state and the live `gm.params`.
 
 **A node inside a wrapper, door by door.** The two doors differ here:
 
 | Saved from | `to_dict()` then `from_dict()` | `save_graph_to_usd` then `load_graph_from_usd` |
 |---|---|---|
-| a sharded wrapper (`ShardedStencilNode`, `ShardedPointwiseNode`, `ShardedUnstructuredNode`) | reloaded **unsharded**, as the node it wraps, with a `UserWarning` that names the call that wraps it again | the stage names the wrapper's class, and the load raises: `KeyError` ("... is not allowed by this load") by default or with a `node_registry` that names only the wrapped node's class, `TypeError` once the wrapper's class is allowed (named in `node_registry`, or `allow_import=True`), because the wrapper is not built from `name, timestep, **params`; MADD-ANO-036 |
+| a {term}`sharded <Sharded>` wrapper (`ShardedStencilNode`, `ShardedPointwiseNode`, `ShardedUnstructuredNode`) | reloaded **unsharded**, as the node it wraps, with a `UserWarning` that names the call that wraps it again | the stage names the wrapper's class, and the load raises: `KeyError` ("... is not allowed by this load") by default or with a `node_registry` that names only the wrapped node's class, `TypeError` once the wrapper's class is allowed (named in `node_registry`, or `allow_import=True`), because the wrapper is not built from `name, timestep, **params`; MADD-ANO-036 |
 | a `HybridNode` | the entry's type is `HybridNode`, and `from_dict` raises: `KeyError` when the registry has no `HybridNode`, `TypeError` when it has | the load raises: `KeyError` by default or with a `node_registry` without `HybridNode`, `TypeError` once `HybridNode` is allowed |
 
 So a graph that holds a wrapper is saved from the node it wraps: save the
@@ -706,14 +706,14 @@ Requirements:
 - Inside a coupling group, compute a flux from the state, or from inputs
   that do not come from another member's flux in a loop: a flux is not part
   of what a group iterates, so fluxes that read each other in a loop are
-  refused at `compile()` (see "Robin coupling" below for the way out).
+  refused at `compile()` (see "Robin {term}`coupling <Coupling>`" below for the way out).
 - Read every input with `boundary_inputs.get(name, default)`, never
   `boundary_inputs[name]`: the hook is called without the inputs that are
   not available yet.  `validate()` asks it for its flux names with none, and
   lists a hook that indexes an input as an `ERROR` naming the node and the
   input; and the first of the two sweeps that compute a coupling group's
   fluxes leaves out an input whose flux does not exist yet.
-- On a multi-rate graph, a node slower than the base step holds its state
+- On a {term}`multi-rate <Multi-rate>` graph, a node slower than the base step holds its state
   between the base steps it fires on, and the hook is called on **every**
   base step with the state the node holds after that step and the
   boundary inputs resolved at that step: a reader gets the flux of the
@@ -794,7 +794,7 @@ on `heat_chain`, two 64-cell rods at `stencil_order=4`:
 | traced coefficients | **557** | 287 |
 | Python coefficients (shipped) | 271 | 287 |
 
-**XLA constant-folded every one of those 314 primitives away, so the
+**{term}`XLA` constant-folded every one of those 314 primitives away, so the
 lowered program was byte-identical and the HLO count could not see the
 regression** — while the graph builder did 2.3x the work on every
 compile.  The `+28` between the first and last rows is the real cost of
@@ -936,12 +936,12 @@ USD by `tests/usd/test_usd_a_node_that_draws_random_numbers.py`).
 | `to_dict` / `from_dict`, USD | A config holds the node and not its state: it carries the seed, and the rebuilt graph draws the stream from its first sample. So does `reset_state()`. |
 | `get_node_state` / `set_node_state` | Carry the key data; a recorded state written back resumes the stream there. |
 | A coupling group | One sample per step, the same on every pass of the solve (below). |
-| A multi-rate graph | A slow node draws when it fires (below); a slow group draws one sample per solve it applies; a sub-cycled member draws once per sub-step, the same on every pass. |
+| A multi-rate graph | A slow node draws when it fires (below); a slow group draws one sample per solve it applies; a {term}`sub-cycled <Sub-cycled>` member draws once per sub-step, the same on every pass. |
 | `run_adaptive`, `run_adaptive_scan` | Two draws per accepted step, none for a rejected attempt; the error estimate reads the noise as error (below). |
 | `jax.grad` | The derivative at a fixed key (below), plain and through a coupling group under `solver="ift"`. |
 | `maddening.sysid` | A record holds the key data of every sample, so `windowed_loss` replays the recorded draws and is exactly zero at the parameters that made the record. The seed is not a leaf of `gm.params`. |
 | `verify_node` | The battery accepts the key leaf as it draws it (below). |
-| FMU export | The key data is a `UInt32` output and the FMU state resumes the stream. Only a `STABLE` node enters an FMU (or an `EVOLVING` one with `include_evolving=True`); the seed is not an FMU parameter. |
+| {term}`FMU` export | The key data is a `UInt32` output and the FMU state resumes the stream. Only a `STABLE` node enters an FMU (or an {codeterm}`EVOLVING` one with `include_evolving=True`); the seed is not an FMU parameter. |
 | REST | `GET /graph/state/{node}` returns the key data as a list of integers; a `PUT` of it and the checkpoint routes resume the stream; a write that is not key data is a 400 naming the field. |
 
 ### Three behaviours that surprise
@@ -958,7 +958,7 @@ solvers and all three norms, and through the return rule of
 `convergence_norm="interface"` (which recomputes some fields by one more
 pass).  It could not be otherwise: a new sample on every pass would change
 the map between passes, and an iteration on a map that changes has no
-fixed point to converge to.  The group converges to the fixed point *of
+{term}`fixed point <Fixed point>` to converge to.  The group converges to the fixed point *of
 that step's sample*, and `coupling_diagnostics()` reports what it would
 with the noise replaced by the constant it drew.  A sub-cycled member
 takes several sub-steps per pass and draws once in each, again the same on
@@ -1052,7 +1052,7 @@ channel; v0.2.1 added per-device materialisation under
 Added the `replication="partition"` variant of
 {class}`~maddening.core.static_data.StaticArray`, paired with
 {class}`~maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode`
-for graph-partitioned (non-Cartesian) sharding.  See
+for graph-partitioned (non-Cartesian) {term}`sharding <Sharding>`.  See
 [{doc}`sharding_topology`](sharding_topology.md) for the choice
 criteria and the partition-assignment handoff contract.
 ```
@@ -1077,7 +1077,7 @@ under multi-GPU sharding:
 
 * {meth}`update_padded <maddening.core.node.SimulationNode.update_padded>` —
   the entry point `ShardedStencilNode` calls instead of `update()`.
-  Receives halo-padded state plus, when the node declares sharded
+  Receives {term}`halo <Halo>`-padded state plus, when the node declares sharded
   statics, a `static_padded` dict and a `shard_info` map of
   `{spatial_axis: (global_offset, local_extent)}` (the offset is a
   traced JAX scalar — `lax.dynamic_slice` works, Python integer
@@ -1125,11 +1125,11 @@ under multi-GPU sharding:
   (e.g. total drag force on an immersed body).  The wrapper applies
   `lax.psum` across every mesh axis that splits the grid after
   `update_padded` returns, so the host sees the correct global sum
-  instead of per-shard partials.  A mesh axis the `axis_map` leaves
+  instead of per-{term}`shard <Shard>` partials.  A mesh axis the `axis_map` leaves
   unused holds a copy of the same block on every device and is not
   summed over.  Default returns `set()`.
 
-Pointwise nodes ignore all three and keep using `update()`.  Stencil
+Pointwise nodes ignore all three and keep using `update()`.  {term}`Stencil`
 nodes that don't shard can still declare `static_data` for cache
 hygiene without touching `update_padded`.  See the
 {class}`HeatNode <maddening.nodes.heat.HeatNode>` source for an
@@ -1230,7 +1230,7 @@ pass that field as `flux_field_a` / `flux_field_b`.  The group then iterates
 `q` together with `u` and measures its convergence; on two affine nodes whose
 flux loop has gain 0.56 that leaves each state within 1.0e-6 of its value in
 the coupled solution, as a fraction of that value, where the flux edges left
-them 0.49 (Gauss-Seidel) and 0.77 (Jacobi) off by the same measure.  Whether
+them 0.49 ({term}`Gauss-Seidel`) and 0.77 ({term}`Jacobi`) off by the same measure.  Whether
 a flux reads an input is decided by tracing `compute_boundary_fluxes` on the
 inputs the node is handed, whether or not `boundary_input_spec()` declares
 them; a hook that cannot be traced (one that computes on values, such as
@@ -1238,7 +1238,7 @@ them; a hook that cannot be traced (one that computes on values, such as
 
 ## Transform Registration
 
-Edge transforms are Python callables applied to data as it flows along edges. For local development, inline lambdas work fine. For **USD serialization** (and eventually IEC 62304 traceability), transforms must be registered with a unique name.
+Edge transforms are Python callables applied to data as it flows along edges. For local development, inline lambdas work fine. For **USD serialization** (and eventually {term}`IEC 62304` traceability), transforms must be registered with a unique name.
 
 ### Registering a transform
 
@@ -1295,7 +1295,7 @@ python scripts/check_transforms.py
 ## New Node Checklist
 
 - [ ] `SimulationNode` subclass with `initial_state()` and `update()`
-- [ ] `update()` is JAX-traceable (jit, grad, vmap compatible)
+- [ ] `update()` is JAX-traceable (jit, grad, {term}`vmap` compatible)
 - [ ] If `update()` branches on the node's own state (contact, threshold, stick-slip), its gradient behaviour across the switch is stated in `NodeMeta.limitations` and pinned by a test ([Events inside `update()`](#events-inside-update-what-the-gradient-means), MADD-ANO-021)
 - [ ] If `update()` draws random numbers, the key's raw data is in the state and the seed is an `int` constructor parameter declared `trainable=False` ([A node that draws random numbers](#a-node-that-draws-random-numbers))
 - [ ] `boundary_input_spec()` overridden (declares expected boundary inputs)

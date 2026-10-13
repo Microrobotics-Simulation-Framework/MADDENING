@@ -5,7 +5,7 @@ bibliography: ../../bibliography.bib
 # AdaptiveNode
 
 **Module**: `maddening.nodes.adaptive`
-**Stability**: evolving
+**Stability**: {term}`evolving <EVOLVING>`
 **Algorithm ID**: `MADD-NODE-009`
 **Version**: 1.1.0
 
@@ -15,7 +15,7 @@ bibliography: ../../bibliography.bib
 padded basis of `n_max` candidates but solve only on a data-dependent **active
 set**. It implements the *frozen-active-set adjoint*: the selection step is
 committed as a non-differentiable forward operation and the gradient flows
-through the frozen-basis linear solve by the implicit function theorem
+through the frozen-basis linear solve by the {term}`implicit function theorem <Implicit function theorem>`
 [@Blondel2022]. The pattern is basis-agnostic — the wavelet, sparse-grid or
 hierarchical-basis subclass supplies the selection rule and the solve
 [@CohenDahmenDeVore2001; @VasilyevPaolucci1996] — and comes with a diagnostic
@@ -137,7 +137,7 @@ names which one the evidence points at; `on_blind="raise"` refuses.
 | $c_i = 0$ for $i \notin M$ | `maddening.nodes.adaptive.base.AdaptiveNode.update` | `jnp.where(mask, c, 0)` after every solve (also at cold start) |
 | Cold-start state at the constructor parameters | `maddening.nodes.adaptive.base.AdaptiveNode.initial_state` | Selection with `is_cold_start=True`, solve, blindness gate |
 | $\nabla_\theta J_{\text{full}}$ | `maddening.nodes.adaptive.base.AdaptiveNode.compute_full_basis_gradient` | Default: `jax.grad` of `objective` through `solve_frozen` with an all-true mask |
-| Gradient-capture ratio $\rho$ | `maddening.nodes.adaptive.base.AdaptiveNode.gradient_capture_ratio` | Active set re-selected at the evaluated $\theta$; sentinel `1.0` when $\|\nabla J_{\text{full}}\|$ is negligible. `blindness_ratio` is a deprecated alias |
+| Gradient-capture ratio $\rho$ | `maddening.nodes.adaptive.base.AdaptiveNode.gradient_capture_ratio` | Active set re-selected at the evaluated $\theta$; sentinel `1.0` when $\|\nabla J_{\text{full}}\|$ is negligible. `blindness_ratio` is a {term}`deprecated <DEPRECATED>` alias |
 | Cold-start policy (warn / raise / ignore) | `maddening.nodes.adaptive.base.AdaptiveNode.check_gradient_capture` | A low ratio warns under the default `"warn"`, whatever its cause, naming which of the two the evidence points at; only `"raise"` refuses |
 | Double-`where` guard for a masked operand | `maddening.nodes.adaptive.base.AdaptiveNode.mask_safe` | Sanitises the *input* of an operation that is singular off the active set |
 | Vanishing-frozen-gradient check | `maddening.nodes.adaptive.base.AdaptiveNode.frozen_gradient_vanishes_at` | Re-thresholded finite difference along the escape direction. Necessary for a Palais trap, not sufficient: `False` rules one out, `True` also fires at an ordinary stationary point. `is_trapped_at` is a deprecated alias |
@@ -157,7 +157,7 @@ names which one the evidence points at; `on_blind="raise"` refuses.
    coefficients.
 4. The masked operator is non-singular on the active set (the framework does
    not check this).
-5. The physical parameters live in the graph parameter pytree, not in the
+5. The physical parameters live in the graph parameter {term}`pytree <Pytree>`, not in the
    state; the state carries only coefficients, the mask and any extra fields
    the subclass declares.
 
@@ -166,7 +166,7 @@ names which one the evidence points at; `on_blind="raise"` refuses.
 | Parameter | Verified Range | Notes |
 |-----------|---------------|-------|
 | `n_max` | 16 – 256 | Toy problems in the test suite (1-D sine basis, dense SPD system) |
-| Active-set budget `K` | 4 – 256 | Top-K budgets 4 – 256 of up to 256 modes, all constructible with the default cold-start policy. **The gradient-capture ratio is a function of `K` alone, not of the active fraction `K / n_max`:** on the 1-D sine reference problem it measures 0.163 / 0.565 / 0.855 / 0.999 at `K` = 4 / 8 / 16 / 32, *at every* `n_max` (`tests/nodes/adaptive/test_blindness_diagnostics.py::test_gradient_capture_ratio_tracks_the_active_set_budget_not_symmetry` pins this, and `docs/developer_guide/adaptive_node.md` states it the same way; re-measured at `c51cd6a`, 2026-09-19). The 0.7 threshold is therefore crossed **between `K` = 8 and `K` = 16**, and on this problem construction *warns* at `K` ≤ 8 (it is not rejected); the missing first-order term is then percent-level — see the row below. Size the node from `K`, and read the ratio back with `check_gradient_capture()` on your own problem rather than inferring it from either number |
+| Active-set budget `K` | 4 – 256 | Top-K budgets 4 – 256 of up to 256 modes, all constructible with the default cold-start policy. **The gradient-capture ratio is a function of `K` alone, not of the active fraction `K / n_max`:** on the 1-D sine reference problem it measures 0.163 / 0.565 / 0.855 / 0.999 at `K` = 4 / 8 / 16 / 32, *at every* `n_max` (`tests/nodes/adaptive/test_blindness_diagnostics.py::test_gradient_capture_ratio_tracks_the_active_set_budget_not_symmetry` pins this, and `docs/developer_guide/adaptive_node.md` states it the same way; re-measured at `c51cd6a`, 2026-09-19). The 0.7 threshold is therefore crossed **between `K` = 8 and `K` = 16**, and on this problem construction *warns* at `K` ≤ 8 (it is not rejected); the missing first-order term is then percent-level — see the row below. Size the {term}`node <Node>` from `K`, and read the ratio back with `check_gradient_capture()` on your own problem rather than inferring it from either number |
 | Jump contribution to $dJ/d\theta$ | $2.5\times10^{-1}$ (K=8) → $\sim10^{-8}$ (K=64) | Fraction of $\|J\|$ omitted by the returned gradient per unit $\theta$, 1-D sine toy over $[0.40, 0.42]$. Treat the frozen gradient as trustworthy only in the large-budget end of this range |
 | Trainable parameters | 1 | The diagnostic constants were calibrated on 1-D and 2-D parameter spaces; above `D_threshold = 5` run `frozen_gradient_vanishes_at` between optimiser steps, reading a `False` as "not a trap" rather than a `True` as "trap" |
 | `gradient_capture_threshold` | 0.7 | Design-study choice; states measured at 0.86 (good), 0.17 (partial), 0.0 (trap) |
@@ -256,7 +256,7 @@ Subclasses may add fields through `extra_initial_state()`.
 | `blindness_gate` | bool | True | — | Run the cold-start diagnostic in `initial_state` (recorded in `self.params`, so it survives a round trip) |
 | `on_blind` | str | `"warn"` | — | `"warn"` / `"raise"` / `"ignore"` policy for a low ratio (recorded in `self.params`) |
 | `dtype` | dtype | canonical float | — | dtype of `c` |
-| subclass `**params` | float / int | — | problem-defined | Physical constants; floats become leaves of the graph parameter pytree with the subclass's `ParamSpec`s. An injected `params` key that is not a constructor parameter is refused with a `ValueError` naming it, by `update`, the cold start and every diagnostic |
+| subclass `**params` | float / int | — | problem-defined | Physical constants; floats become leaves of the graph parameter pytree with the subclass's {codeterm}`ParamSpec`s. An injected `params` key that is not a constructor parameter is refused with a `ValueError` naming it, by `update`, the cold start and every diagnostic |
 
 ## Boundary Inputs
 
@@ -288,9 +288,9 @@ Subclasses may add fields through `extra_initial_state()`.
   `tests/nodes/adaptive/test_blindness_diagnostics.py` (blindness ratios
   of about 0.86 / 0.17 / 0.0 at $\theta = 0.42 / 0.48 / 0.5$, trap
   detection and escape), `tests/nodes/adaptive/test_traceability.py` (jit,
-  scan, vmap, no gradient leak through the selection),
-  `tests/nodes/adaptive/test_graph_integration.py` (GraphManager, params
-  pytree, checkpoint round trip),
+  scan, {term}`vmap`, no gradient leak through the selection),
+  `tests/nodes/adaptive/test_graph_integration.py` ({term}`GraphManager`, params
+  pytree, {term}`checkpoint <Checkpoint>` round trip),
   `tests/nodes/adaptive/test_active_set_switch.py` (the jump at a switch, the
   1/h divergence of finite differences across one, the exact in-region
   gradient against the selected branch, and the integral/jump reconstruction

@@ -21,7 +21,7 @@ retyped or edited it. Its numbers, statuses and counts are the ones its authors
 measured when they wrote it, so some are out of date. Where it and the tree
 disagree, the tree is right:
 
-- the anomaly registry, `docs/validation/known_anomalies.yaml`, for the status
+- the {term}`anomaly registry <Anomaly registry>`, `docs/validation/known_anomalies.yaml`, for the status
   of an entry;
 - the generated [stability report](../developer_guide/stability_report.md) for
   stability labels;
@@ -215,44 +215,44 @@ registry at commit `db22bb27`.
 The `### Fixed` entries of the changelog in which every registry number names
 one of these defects.
 
-- **A coupling group's float floor is counted at its coarsest member's resolution** (MADD-ANO-255, never released): each field was counted at its own dtype's eps, so a float64 field of `n` values computed from one float32 value (or float32 values from a 16-bit one) diluted the floor and `spectral_error_bound` read 0.21x the distance at `n = 2e4` with its flags set. What an internal edge delivers counts too (a transform that narrows to float32 between float64 members: such a pair read its bound at 1e-7 of the distance with the flags set); a narrowing inside a node's own `update` cannot be seen and is not counted. Nothing changes in a group of one dtype whose edges keep it; otherwise the floor, and so `precision_limited`, can only rise. A position (the geometry field of a geometry-dependent mapping) keeps its own dtype's eps.
+- **A {term}`coupling group <Coupling group>`'s float floor is counted at its coarsest member's resolution** (MADD-ANO-255, never released): each field was counted at its own dtype's eps, so a float64 field of `n` values computed from one float32 value (or float32 values from a 16-bit one) diluted the floor and `spectral_error_bound` read 0.21x the distance at `n = 2e4` with its flags set. What an internal {term}`edge <Edge>` delivers counts too (a transform that narrows to float32 between float64 members: such a pair read its bound at 1e-7 of the distance with the flags set); a narrowing inside a {term}`node <Node>`'s own `update` cannot be seen and is not counted. Nothing changes in a group of one dtype whose edges keep it; otherwise the floor, and so `precision_limited`, can only rise. A position (the geometry field of a {term}`geometry-dependent mapping <Geometry-dependent mapping>`) keeps its own dtype's eps.
 - **Under `convergence_norm="interface"` the dead band of an edge read at its source asks the field and what the edge delivers** (MADD-ANO-256, never released), and **`diagnostics=True` no longer asks for memory quadratic in the group** (a step raised `RESOURCE_EXHAUSTED` at 1e5 entries; the guide now gives the measured cost against the group's size).
-- **`validate()` and `compile()` advise on a dead band (`atol > 0`) declared on any coupling group** (MADD-ANO-254, open): a change that has to cross a field inside the band is not seen until it reaches a field the norm keeps, and such a group can report `converged=True` after one pass thousands of tolerances from its fixed point (a Jacobi pair; a Gauss-Seidel ring of three swept against its data flow; Gauss-Seidel pairs whose loop passes its lagged read twice, and one member with two edges to itself). Leave `atol` at `0.0` in 0.4.0; a pair with one scalar field a member held where it was measured and is advised on all the same.
-- **A coupling group that solves the positions of a `multilinear_grid` mapping has no usable flag in 0.4.0** (MADD-ANO-252, never released; EXPERIMENTAL tier). Where the group's pass reads a position from the iterate, or builds one and reads it in the same pass (a source-anchored geometry inside the group; the target-anchored geometry of a member that computes fluxes), `spectral_usable` and `gradient_bound_usable` are `False` on every step: `rho_spectral`, `spectral_error_bound` and `gradient_relative_error_bound` are reported as computed, uncertified, and `not_usable_reason` names the positions and says so. To keep the flags, fix every position during the pass: anchor the geometry at a target that `update` reads, or keep the node that holds the positions outside the group. Beside a lattice plane the flags had stood on a distance bound 17 to 1,874 times under the distance and on a gradient bound 15 to 70,000 times under the error; three rules that tried to certify the numbers there were each found short, so 0.4.0 certifies none (`docs/user_guide/geometry_dependent_mappings.md`, Limits).
+- **`validate()` and `compile()` advise on a dead band (`atol > 0`) declared on any coupling group** (MADD-ANO-254, open): a change that has to cross a field inside the band is not seen until it reaches a field the norm keeps, and such a group can report `converged=True` after one pass thousands of tolerances from its {term}`fixed point <Fixed point>` (a {term}`Jacobi` pair; a {term}`Gauss-Seidel` ring of three swept against its data flow; Gauss-Seidel pairs whose loop passes its lagged read twice, and one member with two edges to itself). Leave `atol` at `0.0` in 0.4.0; a pair with one scalar field a member held where it was measured and is advised on all the same.
+- **A coupling group that solves the positions of a `multilinear_grid` mapping has no usable flag in 0.4.0** (MADD-ANO-252, never released; {term}`EXPERIMENTAL` tier). Where the group's pass reads a position from the iterate, or builds one and reads it in the same pass (a source-anchored geometry inside the group; the target-anchored geometry of a member that computes fluxes), `spectral_usable` and `gradient_bound_usable` are `False` on every step: `rho_spectral`, `spectral_error_bound` and `gradient_relative_error_bound` are reported as computed, uncertified, and `not_usable_reason` names the positions and says so. To keep the flags, fix every position during the pass: anchor the geometry at a target that `update` reads, or keep the node that holds the positions outside the group. Beside a lattice plane the flags had stood on a distance bound 17 to 1,874 times under the distance and on a gradient bound 15 to 70,000 times under the error; three rules that tried to certify the numbers there were each found short, so 0.4.0 certifies none (`docs/user_guide/geometry_dependent_mappings.md`, Limits).
 - **Checks of state values hold after a state write** (MADD-ANO-248 and 249, never released): a geometry written with another shape after `compile()` (`set_node_state`) was broadcast by a mapping kind that does not check its own shape; the next `step()`/`run*` now raises `ValueError` naming the edge. `UnderflowRangeWarning` is due again at the first step after `set_node_state`, `load_state`, `PUT /graph/state` or `reset_state`, and reads the state that step starts from too (a state below `tiny` was flushed to zero unwarned); a graph written to before every step is asked at the first eight such steps of a compile and then once per 1024 stored states, since the check costs several steps of a small graph.
-- **A checkpoint's mapping weights are installed or the load fails, never dropped** (MADD-ANO-236, never released): a checkpoint of a sparse mapped edge loaded into the dense edge of the same key (and the reverse) returned normally and installed nothing, because the two kinds name their weights `W` and `H`. `load_state` and `POST /checkpoint/load` now refuse it, and refuse saved mapping weights the graph has no leaf for.
+- **A {term}`checkpoint <Checkpoint>`'s mapping weights are installed or the load fails, never dropped** (MADD-ANO-236, never released): a checkpoint of a sparse mapped edge loaded into the dense edge of the same key (and the reverse) returned normally and installed nothing, because the two kinds name their weights `W` and `H`. `load_state` and `POST /checkpoint/load` now refuse it, and refuse saved mapping weights the graph has no leaf for.
 - **A geometry's dtype rules hold after `compile()`** (MADD-ANO-237, never released): a `multilinear_grid` geometry compiled as float64 and then written as float32 by `set_node_state` stepped with every sample 0.0 on a grid float32 cannot resolve. The next `step()`/`run*` now raises `ValueError` naming the edge (`TypeError` for a dtype that is not float32 or float64); write the geometry back in float64.
 - **`fit_lm` no longer reports `converged=True` beside a small jump of the residual read from a long rejected step** (MADD-ANO-216's residual case, never released): the one-sided test divided the jump by the linearisation's change over the whole step, so a late bounce 22 float spacings from the iterate read 341 and 456 against a threshold of `2**10` on the stock ball. A rejected step reading above `2**5` is now read again across the one float spacing where the residual departs most (a few residual evaluations, at the end of the run only); the run ends `converged=False` with the existing warning. Action: none.
 - **`gradient_relative_error_bound` covers the constants one pass resolves** (MADD-ANO-234, never released): with a constant in it whose tangent at the returned iterate is rounding (the centre or curve of a nonlinearity evaluated on its centre) it read 1.09 for a relative error of 1.134, usable. Such a constant, and a gain whose whole value moves the pass by less than the residual's float floor, is no longer in the bound; the docstring says which constants are. Action: none.
 - **`coupling_diagnostics()` describes the step that ran when the state is written afterwards** (MADD-ANO-231, never released): the float floor under `spectral_error_bound`, `precision_limited` and `spectral_usable` was measured on the live state, so `set_node_state` after a step moved that step's report (a bound of 0.0, flag set, with every member written to zero). The graph now keeps what the step left. A checkpoint saved after a member was written says so (an optional archive member), and the graph that loads it reports that group's bound as NaN and its `*_usable` flags False with a `not_usable_reason` until it steps; `_reports` is now a reserved node name. Action: none.
-- **`coupling_diagnostics()`: three numbers that read wrong with their flag set, and one found beside them** (MADD-ANO-222, 225, 226, 229, never released): `gradient_relative_error_bound` at the float floor took the change along one stand-in direction (5.1e-6 for 3.0e-5); `rho_spectral` read settled past eight interface scalars (0.273 for 0.219), from sampled rounding on a float32 group far from normal (0.250 for 0.206), and lost a loop below a field's rounding on a sub-cycled group (1e-12 for 1.25e-4).
+- **`coupling_diagnostics()`: three numbers that read wrong with their flag set, and one found beside them** (MADD-ANO-222, 225, 226, 229, never released): `gradient_relative_error_bound` at the float floor took the change along one stand-in direction (5.1e-6 for 3.0e-5); `rho_spectral` read settled past eight interface scalars (0.273 for 0.219), from sampled rounding on a float32 group far from normal (0.250 for 0.206), and lost a loop below a field's rounding on a {term}`sub-cycled <Sub-cycled>` group (1e-12 for 1.25e-4).
   The gradient bound's undirected distance now takes an operator norm; a Krylov space still growing at the cap is never settled (`spectral_usable=False` above seven interface scalars, eight where they are the whole state); a certificate over every perturbation of the measured size replaces the samples; a sub-cycled boundary value is differentiated as `(1 - alpha) a + alpha b` (values unchanged, gradients of sub-cycled groups move at rounding level).
   Action: none; expect `spectral_usable=False` on more float32 and 16-bit groups whose Jacobian is far from normal (usable fraction on the search's draws 0.979 to 0.976).
 - **`rho_spectral` and `spectral_usable` under `diagnostics=True`** (MADD-ANO-221, 223, 224, never released): the spectral estimate took a Krylov direction below 1e-5 of a product for rounding in every dtype, took the compressed radius by repeated squaring, and called a spectrum settled on the Arnoldi residual alone; `rho_spectral` read 0.379 for 0.5 (float64), 0.0512 for 0.0500 (float32) and 0.941 for 0.735 (twelve non-normal scalars), and `spectral_error_bound` 0.61x the distance, each with `spectral_usable=True`.
   The breakdown test is now eight units of the products' own rounding, the radius is `eigvals`, and one more Jacobian-vector product (nine per group per step, was eight) checks the estimate against itself: where it moves the radius by more than 5% of `1 - rho_spectral` the flag is `False`.
   Action: none. The three the targeted search found beside these (MADD-ANO-222, 225 and 226: a loop below a float32 field's rounding, a radius read settled past eight interface scalars, the gradient bound at the float floor) are resolved by the `coupling_diagnostics()` entry above.
 - **A params write is held to the points a mapped edge was built from whatever a fit or a checkpoint load did first** (`MADD-ANO-215`): `PUT /graph/params`, `POST /checkpoint/load` and a `gm.params` write refuse a `length` under a mapping when another leaf's live value differs from the one the node was built with, or is written in the same request; a structural value the live leaves allow is no longer refused for the built ones.
-- **`convergence_norm="interface"` reads every internal edge as the step delivers it, and a static mapping onto more entries than its source holds at its source** (MADD-ANO-195, 211 and 213, never released): the norm, its float floor, the spectral bound's reading and the report applied an edge's transform and left its interface mapping out, so a mapped edge was judged on its source field -- a 9% change of the delivered value read 0.0071 of the tolerance, and `spectral_error_bound` 0.064-0.32x the distance in what the edge delivers, usable.
+- **`convergence_norm="interface"` reads every internal edge as the step delivers it, and a static mapping onto more entries than its source holds at its source** (MADD-ANO-195, 211 and 213, never released): the norm, its float floor, the spectral bound's reading and the report applied an edge's transform and left its {term}`interface mapping <Interface mapping>` out, so a mapped edge was judged on its source field -- a 9% change of the delivered value read 0.0071 of the tolerance, and `spectral_error_bound` 0.064-0.32x the distance in what the edge delivers, usable.
   One function now gives all four the step's value (the mapping with the step's weights, then the transform), or the source field itself where a static mapping delivers more entries than its source holds (the compact side; a tie is read as delivered): pooled into the norm, 30 marker forces scattered onto a grid left a converged group's forces 23 to 459 tolerances from their fixed point at 1e3 to 1e6 cells, and read at their source they are 3.3 to 3.6 at every size.  The step records the floor of a group with an edge read through its mapping (`reading_floor`), and a delivered value wider than its source field is resolved at the source's `eps` (a stalled float32 pair behind edges that cast to float64 read 6.7e-7x, usable).  A field that several internal edges read (a star's hub) was counted once per edge by the norm and once by the bound's analysis, which read 0.26-0.73x the true distance, usable; such a group's report is now analysed on the same reading.
   Action: none; a group without a mapped internal edge keeps its states, reports and compile counts bit for bit, except the floor of an interface edge that widens its dtype under x64 and the spectral keys of an interface group with a field read by several internal edges (with `diagnostics=True`; 8 more Jacobian-vector products per step).  MADD-ANO-212 (a Gauss-Seidel read of a difference within one field: bound 0.054x, usable) is open for 0.5.0.
-- **sysid round-9 fixes: bounded transforms in the fitters** (MADD-ANO-104 corrected, MADD-ANO-202, 203, never released): `fit_lm` no longer ends on the bound of a `log`/`logit` parameter that an early step carried to the edge of its range (20 of 60 starts under x64 on the parameter guide's spring) -- a step is read on the transform's tangent where that moves the value less, and the range a fit steps in ends `sqrt(eps)` of the bounds inside each bound; the fitters make one evaluation of `theta -> params`, so `best_loss` is the loss of exactly the arrays returned and a leaf a fit does not move is never run through its transform (a damping left out by `mask=` at 2.0 under a wide `logit` was run at 2.0266, the stiffness beside it fitted to 30.06 for 30);
+- **{term}`sysid` round-9 fixes: bounded transforms in the fitters** (MADD-ANO-104 corrected, MADD-ANO-202, 203, never released): `fit_lm` no longer ends on the bound of a `log`/`logit` parameter that an early step carried to the edge of its range (20 of 60 starts under x64 on the parameter guide's spring) -- a step is read on the transform's tangent where that moves the value less, and the range a fit steps in ends `sqrt(eps)` of the bounds inside each bound; the fitters make one evaluation of `theta -> params`, so `best_loss` is the loss of exactly the arrays returned and a leaf a fit does not move is never run through its transform (a damping left out by `mask=` at 2.0 under a wide `logit` was run at 2.0266, the stiffness beside it fitted to 30.06 for 30);
   a fit that ends on its transform's edge, an Adam fit started on one and a fitted value its transform cannot resolve to `sqrt(eps)` of itself are each named in a warning; `node.params = {**node.params, "k": v}` writes `k` and no longer reverts the node's other calibrated constants.
   Action: declare a parameter that belongs on its bound with `transform=None`; read the new warnings; a `fit_lm` run with `log`/`logit` parameters takes another path to the same answer.  SYS-144 to SYS-147 are new.
-- **Warnings in a process with several threads** (MADD-ANO-204, never released): the library's sixteen warning probes (parameter writes, `PUT /graph/params`, the sharded wrappers, the profiler) used `warnings.catch_warnings()`, which silenced every thread while one probed and, for two that overlapped, could leave every warning ignored for good; a probe now silences its own thread only and saves no filters. Action: none; other code's `catch_warnings()` in threads is still unsafe (see "Warnings when several threads run graphs" in the parameters guide).
+- **Warnings in a process with several threads** (MADD-ANO-204, never released): the library's sixteen warning probes (parameter writes, `PUT /graph/params`, the {term}`sharded <Sharded>` wrappers, the profiler) used `warnings.catch_warnings()`, which silenced every thread while one probed and, for two that overlapped, could leave every warning ignored for good; a probe now silences its own thread only and saves no filters. Action: none; other code's `catch_warnings()` in threads is still unsafe (see "Warnings when several threads run graphs" in the parameters guide).
 - **sysid round-8 fixes** (MADD-ANO-174 to 177, never released): `fit_lm`'s loss and solves are framed by powers of two, so a float32 residual or parameter from `1e-30` to `1e30` no longer reports `converged=True` at a wrong point or its start, and `fit` lifts a flushed gradient; `fim`/`fim_core` flag an `F` flushed to zero; in-place and replaced-mapping `node.params` writes reach `gm.params`;
   a `log`/`logit` spec the leaf's dtype cannot hold is refused; float32 leaves in an x64 graph no longer creep; `fit_lm`'s floor verdict no longer follows units or an on-bound gradient's rounding; counts read integers in every spelling.
   Action: none; an ordinary `fit_lm` run moves in its last bits (the equilibrated solve's pivots).  SYS-131 and SYS-132 are new.
-- **FMU export, round-8 audit fixes** (MADD-ANO-167 to 169, never released): the bridge refuses to start when a `set_param_spec` since the description (or a sidecar spec) would enforce another `min` / `max` than the XML advertises, and holds every write to the advertised bounds too; a start, step end or restored time whose 16 ulps pass a tenth of the master step is refused, and no time slack exceeds a tenth of a step;
+- **{term}`FMU` export, round-8 audit fixes** (MADD-ANO-167 to 169, never released): the bridge refuses to start when a `set_param_spec` since the description (or a {term}`sidecar <Sidecar>` spec) would enforce another `min` / `max` than the XML advertises, and holds every write to the advertised bounds too; a start, step end or restored time whose 16 ulps pass a tenth of the master step is refused, and no time slack exceeds a tenth of a step;
   a `get` past what one reply frame carries is refused before anything is read (one 64 MiB frame took 6 GB), a repeated reference is read once; an open `log` / `logit` bound is advertised as the outermost value `ParamSpec.check` accepts (a float32 `logit(-1, 1)` max was refused).
   Action: build the description, sidecar and bridge after the last `set_param_spec`; start an FMU at a time its master step resolves; compute communication points as `start + k * h`; re-package an FMU with a float32 `logit` leaf (its token may change).
-- **sysid round-7 fixes** (MADD-ANO-150 to 153, never released): the identifiability guard holds an exact degeneracy under x64 and with float32 leaves in an x64 graph; `windowed_loss` replays coupling predictor and IQN-IMVJ warm starts across windows (zero loss at the truth); `fim` warns when its rank cutoff is below float32's normal range;
+- **sysid round-7 fixes** (MADD-ANO-150 to 153, never released): the identifiability guard holds an exact degeneracy under x64 and with float32 leaves in an x64 graph; `windowed_loss` replays {term}`coupling <Coupling>` predictor and IQN-IMVJ warm starts across windows (zero loss at the truth); `fim` warns when its rank cutoff is below float32's normal range;
   bool and non-number hyper-parameters and non-bool mask leaves are refused; `ParamSpec.check` refuses a `log`/`logit` value without a finite coordinate; the nominal width guard tests the width, not its square; `fit_lm` reaches its float64 floor.
   Action: pass real numbers and bool mask leaves; a fit with a predictor or IQN-IMVJ group, or under x64, may return a different (correct) point.  SYS-071 is verified; SYS-127 to 130 are new.
 - **FMU export, round-7 audit fixes** (MADD-ANO-147 to 149, never released): `build_model_description`, `FmuSidecar` and `FmuTcpBridge` refuse a graph changed since its `compile()` (an FMU built over a pending structural `node.params` write ran the old model); a `log` parameter without a lower bound advertises the smallest normal as `min`; the bridge's time tolerance is a millionth of the master step at any step, and the reported time stays within it of the simulated time;
-  an input of a node the FMU does not export is held at zero, not exported; the C wrapper holds FMI 3.0's co-simulation state machine (no `fmi3DoStep` before initialization, no set once terminated, no `fmi3EnterStepMode`, configuration mode or `fmi3SetTime`).  FMU-012 and -017's wording is fixed.
+  an input of a node the FMU does not export is held at zero, not exported; the C wrapper holds {term}`FMI` 3.0's co-simulation state machine (no `fmi3DoStep` before initialization, no set once terminated, no `fmi3EnterStepMode`, configuration mode or `fmi3SetTime`).  FMU-012 and -017's wording is fixed.
   Action: `compile()` before exporting; initialize an FMU instance before reading or stepping it; re-package an FMU whose graph has a `log` parameter without a lower bound (its token changed).
 - **The identifiability guard decides the same in any units** (MADD-ANO-135, never released): its tests, hold and tolerance measure an identity parameter relative to its size, as `fim(scale="relative")` does;
-  **bounds checks compare exactly** (MADD-ANO-136): a float32 `-1e-40` no longer passes a `(0, None)` bound through XLA's subnormal flush; **a value its type flushes to 0 is refused** (MADD-ANO-137) like one it overflows.
+  **bounds checks compare exactly** (MADD-ANO-136): a float32 `-1e-40` no longer passes a `(0, None)` bound through {term}`XLA`'s subnormal flush; **a value its type flushes to 0 is refused** (MADD-ANO-137) like one it overflows.
   Action: none; a `fit_lm` with an identity parameter in units far from 1 may return a different (correct) point.  The sysid/FMU inventory's SYS-063, -088, -109, FMU-024 and -039 are verified (144 of 147 rows).
 - **`fit_lm` no longer depends on the parameters' units, and a shrunken step cannot read as converged** (MADD-ANO-121, never released): the Marquardt floor is per column, and `converged` also needs the undamped Gauss-Newton step to be stationary;
   **every reader of `gm.params` sees a pending `node.params` write** (MADD-ANO-122, never released): one sync point, the `gm.params` getter, serves readers and runners alike, and the later write wins.  Action: none.
@@ -260,7 +260,7 @@ one of these defects.
   the token covers starts and bounds; terminate refuses step/set/initialize until reset; `fmi3GetClock`/`SetClock` are `fmi3Error`; `FmuTcpBridge(idle_timeout=None)` waits for ever; a node named `x.params.y` has settable parameters.
   Action: rebuild FMUs (their tokens change) and re-package them with their bridge's description.
 - **The FMU bridge and C wrapper refuse what they used to coerce or drop** (MADD-ANO-100 to 103, never released): a `master_dt` other than `md.graph_timestep`, a Boolean other than 0/1, an `fmi3Get`/`Set` of another type than the variable's, a repeated value reference, a numeric set of a Clock,
-  an archive missing an input; step size and communication point share one tolerance; a step takes at most `max_steps_per_request` (100000) graph steps and stops at `stop()`; `SetFMUState` checks the whole frame; the wrapper waits at most `MADDENING_FMU_TIMEOUT` (600 s).
+  an archive missing an input; step size and communication point share one tolerance; a step takes at most `max_steps_per_request` (100000) {term}`graph steps <Graph step>` and stops at `stop()`; `SetFMUState` checks the whole frame; the wrapper waits at most `MADDENING_FMU_TIMEOUT` (600 s).
   Action: pass `master_dt=gm.timestep`; read and write each FMU variable with the function of its type (`getFloat32` for a Float32).
 - **A `node.params` write after compile reaches the step at the next `compile()`** (MADD-ANO-093, never released: it was dropped); `fit_lm` reports `converged` at the float floor (its proposal is tested accepted or not; `step_tol` is relative, default 16 ulps); `windowed_loss` refuses a negative/NaN `continuity_weight` and a non-bool `mask_unconverged`;
   a clipped leaf on its bound has its full derivative into the range; a refused mask names the missing empty container.  Action: change a constant mid-run through `gm.params`; pass `step_tol` as a relative change.
@@ -280,7 +280,7 @@ one of these defects.
   `NaN`/`Infinity` is refused where you set the name, an unencodable FMI reply is an error
   reply rather than a dead worker thread, and `dumps_encoded()` writes `to_dict()` output
 - **`gm.compile()` drops every node's materialised statics**, including one
-  inside a wrapped node: `invalidate_static_cache` is now a `SimulationNode`
+  inside a wrapped node: `invalidate_static_cache` is now a {codeterm}`SimulationNode`
   method that forwards inwards, so a static rewritten in place is not baked in (MADD-ANO-081, never released)
 - A `.` in a node name no longer misroutes that node's FMU inputs and outputs (MADD-ANO-080, never released)
 
@@ -294,8 +294,8 @@ claim was checked in. Four inventories were built in this cycle:
 
 | Inventory | Row prefixes | Domains | What it covers |
 |---|---|---|---|
-| `docs/validation/coupling_claims.yaml` | `CPL` | `numeric` | Coupling groups: convergence, the error estimate, the bounds and their flags, acceleration, the IFT gradient. |
-| `docs/validation/sysid_fmu_claims.yaml` | `SYS`, `FMU` | `numeric` | `maddening.sysid`, `ParamSpec`, `fim`, and the FMU export and bridge. |
+| `docs/validation/coupling_claims.yaml` | `CPL` | `numeric` | Coupling groups: convergence, the error estimate, the bounds and their flags, acceleration, the {term}`IFT` gradient. |
+| `docs/validation/sysid_fmu_claims.yaml` | `SYS`, `FMU` | `numeric` | `maddening.sysid`, {codeterm}`ParamSpec`, `fim`, and the FMU export and bridge. |
 | `docs/validation/rest_runpod_claims.yaml` | `REST`, `RPD` | `server` | The HTTP API's routes and refusals, and the multi-GPU session runner. |
 | `docs/validation/mapping_claims.yaml` | `MAP` | `numeric` | Interface mappings: the kinds, sparse and geometry-dependent mappings, serialisation. |
 
@@ -315,13 +315,13 @@ description.
 
 ### The changelog's entries for the inventories (moved)
 
-- **REST and run_pod claims inventory** (`docs/validation/rest_runpod_claims.yaml`, prefixes `REST`, `RPD`): every documented claim about the HTTP API and the multi-GPU session runner with its conditions, oracle and a test that can fail -- 143 rows, 132 verified, 5 failing (strict xfails), 5 ambiguous, 1 untested; the surrogate and streaming endpoints are out of scope (experimental).
+- **REST and run_pod claims inventory** (`docs/validation/rest_runpod_claims.yaml`, prefixes `REST`, `RPD`): every documented claim about the HTTP API and the multi-GPU session runner with its conditions, oracle and a test that can fail -- 143 rows, 132 verified, 5 failing (strict xfails), 5 ambiguous, 1 untested; the {term}`surrogate <Surrogate>` and streaming endpoints are out of scope (experimental).
   Read the failing and ambiguous rows before relying on those claims; a new REST or `run_pod.py` claim gets a row in the same change (`testing_standards.md`).
-- **System identification and FMU claims inventory** (`docs/validation/sysid_fmu_claims.yaml`, `SYS-NNN` / `FMU-NNN`): every documented `sysid`, `ParamSpec` and FMU-export claim with its conditions, oracle and a test that can fail -- 147 rows, 139 verified, 4 failing (strict xfails), 4 ambiguous.
+- **{term}`System identification` and FMU claims inventory** (`docs/validation/sysid_fmu_claims.yaml`, `SYS-NNN` / `FMU-NNN`): every documented `sysid`, `ParamSpec` and FMU-export claim with its conditions, oracle and a test that can fail -- 147 rows, 139 verified, 4 failing (strict xfails), 4 ambiguous.
   `tests/compliance/test_coupling_claims.py` becomes `test_claims_inventories.py`, which checks every `docs/validation/*_claims.yaml` (each declares the id `prefixes` it owns).
 - **Coupling claims inventory** (`docs/validation/coupling_claims.yaml`): every documented coupling claim with its conditions, oracle and a test that can fail -- 130 rows, 114 verified, 6 failing (strict xfails), 10 ambiguous -- checked by `tests/compliance/test_coupling_claims.py`.
   Read the failing and ambiguous rows before relying on those claims; a new coupling claim gets a row in the same change (`testing_standards.md`).
-- **A domain matrix in the coupling and sysid+FMU claims inventories** (`domain_set: numeric`, a `domains:` mapping per row): for float32, float64, mixed dtypes, 16-bit, jit, gradients, vmap, multi-rate, sub-cycling, predictors and warm starts, `run_adaptive`, checkpoint restarts and sharding, each row names the test that exercises its claim there, `narrowed` (its conditions now exclude the domain) or `n/a`; `test_claims_inventories.py` checks it.
+- **A domain matrix in the coupling and sysid+FMU claims inventories** (`domain_set: numeric`, a `domains:` mapping per row): for float32, float64, mixed dtypes, 16-bit, jit, gradients, {term}`vmap`, {term}`multi-rate <Multi-rate>`, {term}`sub-cycling <Sub-cycling>`, predictors and warm starts, `run_adaptive`, checkpoint restarts and {term}`sharding <Sharding>`, each row names the test that exercises its claim there, `narrowed` (its conditions now exclude the domain) or `n/a`; `test_claims_inventories.py` checks it.
   It found four failing coupling domains (MADD-ANO-160 to 162, and a bfloat16 `rho_spectral` that is not float32-exact) and two minor sysid ones under x64 (SYS-024, SYS-071): eleven rows are `failing`, and many conditions are narrowed -- read a row's conditions before relying on it outside float32 (`testing_standards.md`, "The domain matrix").
 - **A server-domain matrix in the REST and run_pod claims inventory** (`domain_set: server`): for loopback and non-loopback binds, the token demanded or not, simultaneous requests on a real loopback server, the runner, an in-flight `/sim/run`, oversized and hostile input, SIGTERM mid-request, wrapper nodes and a restored graph -- and run_pod's dry-run, relabelled and mixed-commit records -- each row names the test that exercises its claim there, `narrowed` or `n/a` (`testing_standards.md`, "The server set").
   Every row is `verified`: the four defects it reached (a `HybridNode` write lost, a `/sim/run` 503 saying nothing changed after steps, runner routes behind a saturated worker pool, a checkpoint load restoring values a write refuses) are the round-7 REST fixes' own, and its cells pass against them; sixteen rows' conditions are narrowed, and REST-098 (no TLS) is now pinned by a test -- read a row's conditions before relying on it outside the domains it names.
@@ -342,7 +342,7 @@ that fail, and a CI that runs in shards against a time budget.
 - **The order "the mapping first, then the transform" is tested with transforms that do not commute with a mapping**: the test that pinned it scaled by two and passed with the two applications swapped, as did the property structures (negations and scalings only). It now uses an offset and a clip, `tests/core/test_an_edge_applies_its_mapping_before_its_transform.py` holds the order on every route that resolves an edge (the query, the step, the adaptive step, an edge to itself, additive edges, the edges at a coupling group including a sub-cycled member, a legacy closure), and the property structure `mapped-then-offset` holds it against the monolithic reference.
 - **The capacity test reads a rung's record before the way its process ended** (`benchmarks/multigpu/run_capacity.py`, new in this release): a rung that recorded a failed check and was then killed, timed out or crashed is `check failed` and the ramp exits 1 (it was classified by the ending, and the ramp could exit 0 with a ceiling while `--summarise` exited 1); a rung whose complete record passed and whose process was then ended from outside is `passed`, with a note saying how. Every record a rung or a soak can leave is tested with ten endings through the ramp and `--summarise` both.
 - **Tests for verdicts taken over a span of steps**: a `mask_unconverged` window whose early steps hit the cap and whose last step converged, the profiler's fractions on such a window, and the batched `strict_convergence` firing gate; the slow normal-contraction property asserts the bound where `spectral_usable` and holds the flag's share of its draws to a floor (it asserted the flag on every draw, which no claim promises). `docs/user_guide/inspection.md` states what `diagnostics=True` costs (a GPU measurement in `benchmarks/results/gpu_eigvals_probe/`; MADD-ANO-232 records a not-usable value that differs in kind between backends).
-- **The step-program gate lowers each graph from emptied jax caches** (`scripts/capture_step_programs.py`, `tests/core/test_step_program_digests.py`): eleven gate graphs failed in a slow-lane process with no program changed. The lowered text also says how many identical copies of its own helpers (`isinf`, `frexp`, `_where`) jax wrote out, which depends on what its bounded trace caches still hold. `graph_digests` now calls `jax.clear_caches()` before it builds a graph; the capture of 396eb59a is unchanged and still holds for all 24 graphs on jax 0.10.2, 0.11.0 and 0.11.2.
+- **The step-program gate lowers each graph from emptied {term}`jax <JAX>` caches** (`scripts/capture_step_programs.py`, `tests/core/test_step_program_digests.py`): eleven gate graphs failed in a slow-lane process with no program changed. The lowered text also says how many identical copies of its own helpers (`isinf`, `frexp`, `_where`) jax wrote out, which depends on what its bounded trace caches still hold. `graph_digests` now calls `jax.clear_caches()` before it builds a graph; the capture of 396eb59a is unchanged and still holds for all 24 graphs on jax 0.10.2, 0.11.0 and 0.11.2.
 - **REST write-sequence oracle: a run that fails part-way is held to a replay of the steps it counted** (`tests/property/injected_failures.py`): the rule "an empty graph's clock stays" was wrong for a graph emptied over the API, whose steps the streams go on counting, and failed the slow hundred-request machine; the server was consistent. A per-push example now runs an emptied and a never-filled graph with a later slice failing
 - **MADD-VER-002's acceptance band no longer admits the defect it measured**:
   `[0.7, 2.5]` -> `[1.7, 2.3]` around the theoretical 2.0 (measured 1.900); it
@@ -358,7 +358,7 @@ that fail, and a CI that runs in shards against a time budget.
   manufactured solution and fails the node on a shortfall (MADD-VER-005..008)
 - **The committed stability report is compared with a fresh generation** in
   CI: it had rotted to 42 of 85 surfaces, hiding every deprecation.  Four
-  surfaces that warn deprecated now carry the `DEPRECATED` tag
+  surfaces that warn {term}`deprecated <DEPRECATED>` now carry the `DEPRECATED` tag
 - **The coupled adjoint-identity property stops scaling by a cancelling
   inner product**: it divides by the norm of the terms contracted, not by
   the value they produce, which removes a latent float32 flake
@@ -413,10 +413,10 @@ that fail, and a CI that runs in shards against a time budget.
   over generated graphs; `windowed_loss` now rejects `sample_every <= 0`, a window
   wider than the data and observation leaves of unequal length instead of returning a meaningless loss
 - **Property tests for the sharded surface** (`tests/cloud/multigpu/`):
-  wrapper-contract, sharded-equals-unsharded, halo-exchange and round-trip
+  wrapper-contract, sharded-equals-unsharded, {term}`halo <Halo>`-exchange and round-trip
   invariants over generated meshes; two audit findings pinned as strict xfails
 - Property-test coverage for round trips, the REST and FMU-bridge surfaces
-  (stateful machines), the params pytree, `sysid`, retracing and binary frames
+  (stateful machines), the params {term}`pytree <Pytree>`, `sysid`, retracing and binary frames
 
 ## Verification evidence
 
@@ -428,7 +428,7 @@ that fail, and a CI that runs in shards against a time budget.
   --collect-only -q` (which keeps `addopts`' `-m 'not slow'`) for the lane,
   with all six shards together.  It was taken on the release-prep branch, in
   a local checkout (Python 3.12.3, pytest 9.0.3, jax and jaxlib 0.11.0,
-  Hypothesis 6.165.3, CPU, SkyPilot absent as on CI) with more optional
+  Hypothesis 6.165.3, CPU, {term}`SkyPilot` absent as on CI) with more optional
   extras installed than CI, which may therefore collect fewer.  CI's passed,
   skipped and xfailed counts for each jax lane are those of the tag's run.
   Before this release-time count, the line read 8634 collected on
@@ -477,7 +477,7 @@ two-to-four-node graphs — real node classes, commensurate timesteps,
 awkward-but-legal node names, edges with and without registered transforms,
 additive edges, declared units, live ("calibrated") parameter overrides,
 `ParamSpec` overrides including trainable interface-mapping weights,
-external inputs, and interface mappings built by the RBF / nearest-neighbour
+{term}`external inputs <External input>`, and interface mappings built by the RBF / nearest-neighbour
 / 1-D projection factories from either a node-field point reference or an
 inlined point set.  `test_round_trips.py` asserts that a config round trip
 preserves trajectory, parameter pytree (structure, dtype and bits) and
@@ -499,7 +499,7 @@ frames on it.  Each checks, after *every* operation, against an in-process
 model: a valid call must succeed and agree, a refused call must be a 4xx or
 error reply that changes nothing and keeps the connection, and the REST
 server must never answer 5xx.  The REST machine ends every example by
-rebuilding a `GraphManager` from the server's own `GET /graph` and replaying
+rebuilding a {codeterm}`GraphManager` from the server's own `GET /graph` and replaying
 its trajectory.  Three of the *Fixed* entries in this release came directly
 out of these machines.
 
@@ -570,7 +570,7 @@ of 20) — named for what one example *costs* rather than for a number, and 95
 call sites now name a tier.  **The same suite now measures 462 s under `dev`
 and 1365 s under `ci`**: the local default is a third faster, because the
 tiers took depth away from tests whose examples cost seconds and gave it to
-pure-function properties, and `ci` finally searches 3× deeper than `dev`
+{term}`pure-function <Pure function>` properties, and `ci` finally searches 3× deeper than `dev`
 instead of 1.02×.  The eleven sites that keep an absolute cap are the ones
 where the number encodes a real constraint — a search space Hypothesis
 exhausts anyway, or an example measured in seconds — and each says so in a
@@ -696,7 +696,7 @@ move with jaxlib.
 ### The compliance gates now fail
 
 `scripts/check_anomalies.py`, `check_impl_mapping.py`, `check_citations.py`
-and `check_transforms.py` are the IEC 62304 / MDCG evidence that this
+and `check_transforms.py` are the {term}`IEC 62304` / MDCG evidence that this
 project's documentation matches its code, and CI has run all four on every
 push since v0.3.0.  A mutation audit planted 28 defects across them and
 **22 passed**.  `check_transforms.py` was the worst: it scanned three
@@ -760,7 +760,7 @@ One rule applies to MADDENING's own registry only, in
 **every `affected_versions` is a PEP 440 range checked against the
 registry's `maddening_version`.**  A reachable entry's range must admit
 that version and a `resolved` entry's must not.  Until the release-record
-audit the only rule was a `startswith(">=")` test in the SOUP generator, and
+audit the only rule was a `startswith(">=")` test in the {term}`SOUP` generator, and
 `MADD-ANO-016` shipped `partially_resolved` with `>=0.1.0, <0.4.0` — a
 range saying 0.4.0 is unaffected beside a residual risk saying the 0.4.0
 behaviour has never been observed.  The convention, including `none` for a
@@ -768,7 +768,7 @@ defect introduced and fixed within one development cycle (which
 `MADD-ANO-018` and `-019` now carry), is in the registry's header comment,
 and the SOUP generator runs the same function.
 
-**`LBMNode`'s algorithm ID is now `MADD-NODE-011` (was `MADD-NODE-007`).** From 0.1.0 to 0.3.1 `LBMNode` and `RigidBodyNode` both carried `MADD-NODE-007`; `RigidBodyNode` keeps it, because a test shipped in every release pins it there, while `LBMNode`'s was first published in this release's algorithm guide. Code or records keyed on `LBMNode.meta.algorithm_id` must move to the new ID; `check_impl_mapping.py` now refuses a duplicate ID and a guide whose ID differs from its node's `NodeMeta`.
+**`LBMNode`'s algorithm ID is now `MADD-NODE-011` (was `MADD-NODE-007`).** From 0.1.0 to 0.3.1 `LBMNode` and `RigidBodyNode` both carried `MADD-NODE-007`; `RigidBodyNode` keeps it, because a test shipped in every release pins it there, while `LBMNode`'s was first published in this release's algorithm guide. Code or records keyed on `LBMNode.meta.algorithm_id` must move to the new ID; `check_impl_mapping.py` now refuses a duplicate ID and a guide whose ID differs from its node's {codeterm}`NodeMeta`.
 
 ## The multi-GPU session runner
 
@@ -821,7 +821,7 @@ conftest is the only setter of `XLA_FLAGS` (enforced by a grep test).
 The runner then grew to cover the whole sharding checklist, so that the
 session is comparison against references that already exist rather than
 judgement at a metered pod.  Five goals run first — `indivisible` (the
-stencil and pointwise refusals, and an uneven unstructured split),
+{term}`stencil <Stencil>` and pointwise refusals, and an uneven unstructured split),
 `halo` (every boundary mode and halo width on a 1-D and a 2×2 mesh, and
 the unstructured exchange, forward and adjoint, bit for bit against
 NumPy), `coupled`, `stencil` (a 2-D field with a sharded static, forward
@@ -839,8 +839,8 @@ every halo and stencil check.  A case the device count cannot express
 run*, which keeps its items open, and `--summarise` re-derives every
 verdict from the recorded value, limit and sense instead of trusting the
 recorded flag.  `stencil` runs `"edge"` ends (the wrapper's default) and
-Dirichlet ends held through a boundary input, besides periodic ones, so a
-wrapper that wrapped the halos of an axis it does not shard whatever
+Dirichlet ends held through a {term}`boundary input <Boundary inputs>`, besides periodic ones, so a
+wrapper that wrapped the halos of an axis it does not {term}`shard <Shard>` whatever
 `boundary` said can no longer pass the whole checklist.  **`coupled` is the one
 item nothing covered on any backend: a sharded field member and a
 replicated member in one coupling group, forward and adjoint**, under the
@@ -1136,7 +1136,7 @@ on GPU 0, bound to loopback.
 
 - The pod was launched with `maddening.cloud.launcher.CloudLauncher` on RunPod:
   four cards on demand (`use_spot=False`), the cloud image of the session
-  commit, `auto_teardown=True` with a 20-minute autostop (SkyPilot can tear a
+  commit, `auto_teardown=True` with a 20-minute autostop ({term}`SkyPilot` can tear a
   RunPod pod down but cannot stop it), a cap of $12 an hour and a budget of
   $40. SkyPilot found no cards in 13 regions and launched in the fourteenth,
   in the US.
@@ -1301,7 +1301,7 @@ yourself, or record the inputs in the node; deferred to 0.5.0.
 `MADD-ANO-195` — *The interface convergence norm reads a mapped edge's source
 field, not what the edge delivers* — was carried by no release (mapped edges
 are new in 0.4.0) and is **resolved**.  `convergence_norm="interface"`, the
-precision floor and the spectral bound's reading applied an edge's transform
+{term}`precision floor <Precision floor>` and the spectral bound's reading applied an edge's transform
 but not its mapping, so a mapped edge inside a coupling group was measured on
 its source field's scale: a 9% change of the delivered value read 0.0071
 against a threshold of 1, and `spectral_error_bound` 0.064-0.32x the distance
@@ -1347,7 +1347,7 @@ channel carried 0.58 to 0.80 of the imposed pressure drop, its centreline
 velocity was 0.48x what the imposed drop gives on the in-tree 64x16 case, and
 `compute_boundary_fluxes()["outlet_pressure_avg"]` reported the wrong
 pressure.  Nothing in the suite could see it: the only pressure-driven test
-normalised both profiles, and every LBM benchmark was body-force driven.  The
+normalised both profiles, and every {term}`LBM` benchmark was body-force driven.  The
 closure is now derived per face (with the transverse-momentum correction of
 Zou and He for D2Q9 and Hecht and Harting for D3Q19), documented in the new
 `LBMNode` algorithm guide, and pinned by tests that read magnitudes: the face
@@ -1408,7 +1408,7 @@ seam (1.15x the unsharded centreline velocity at v0.2.0 and v0.3.1, 2.10x
 once MADD-ANO-020's closure was corrected), and the wrapper's default
 `boundary="edge"` halo fill disagreed with the node's periodic streaming
 (-0.27% at the tags).  The first case is now refused at the first sharded
-step, and the second at construction: `ShardedStencilNode` keeps its STABLE
+step, and the second at construction: `ShardedStencilNode` keeps its {term}`STABLE`
 `"edge"` default and refuses any fill other than the one the node declares
 through `halo_boundary()`, so wrap an `LBMNode` with `boundary="periodic"`.
 See "[A sharded `LBMNode` is the unsharded node, or it
@@ -1771,7 +1771,7 @@ by 1.2 per step, while one node sits at 0.14 of its own bound
 node's `NodeMeta` and algorithm guide now state the bounds.  The numerics
 are unchanged.  `compile()` now warns about such a pair, naming both nodes,
 the growth factor and this entry, when the converged step grows (an
-unequal pair by its spectral radius); it recognises only bare or
+unequal pair by its {term}`spectral radius <Spectral radius>`); it recognises only bare or
 `identity` edges and never refuses the graph.  Keep
 `stiffness*dt <= damping <= (2*mass - stiffness*dt**2)/dt` on such a pair.
 
@@ -2020,7 +2020,7 @@ breaking-changes table).  `059` to `061` are the coupling and stepper
 fixes of "[The coupling runtime, second
 audit](#the-coupling-runtime-second-audit)": every coupling acceleration
 now acts on floating fields only (`059`), a group-internal flux edge that
-the interface norm or a sub-cycled member's linear interpolation would read
+the {term}`interface norm <Interface norm>` or a sub-cycled member's linear interpolation would read
 is refused at compile (`060`), and `run_adaptive` advances its clock by the
 step it accepts at `dt_min`, not by `dt_min` (`061`).  `062` is the `HeatNode`
 constructor's refusals of a non-positive length or timestep, a negative
@@ -2188,7 +2188,7 @@ resolution refusal: on a grid float32 cannot resolve, step() ran and every
 sample was 0.0.
 `238` (resolved): A coupling group whose member holds a floating field with
 no entries failed to trace under solver='ift' with diagnostics=True (and
-under a quasi-Newton acceleration whose interface fields have none); it
+under a {term}`quasi-Newton <Quasi-Newton>` acceleration whose interface fields have none); it
 stepped in 0.3.1.
 `240` (resolved; 0.1.0 to 0.3.1): under `convergence_norm="interface"` a converged group returned a field no internal edge reads computed from readings that had not settled, a one-way pair under Jacobi its target at the pre-step source; every field the norm does not measure whole is now returned as one plain pass computes it at the accepted iterate.
 `241` (resolved; 0.1.0 to 0.3.1): under `convergence_norm="interface"` the part of a field its edges deliver only through a mapping or a transform was a pass behind, or a blend of passes under a relaxation, with `converged=True`; the same return rule covers it.
@@ -2281,7 +2281,7 @@ returned a value 0.36 to 1.0 off with no error where lineax's stopping floor
 was zero (atol=0.0) or NaN, in 0.3.1; it now raises there.
 `284` (resolved): an integer or Boolean field carried by an edge inside a coupling
 group stopped the solve early with `converged=True` (never released).
-`286` (resolved): 0.1.0 to 0.3.1: WebRTC streaming never negotiated, so a
+`286` (resolved): 0.1.0 to 0.3.1: {term}`WebRTC` streaming never negotiated, so a
 viewer was sent no answer and no ICE and never received video; the session now
 answers the viewer's offer and is tested end to end on CPU.
 `287` (resolved): 0.1.0 to 0.3.1: the cloud container streamed nothing (its
@@ -2300,7 +2300,7 @@ precision, and the multi-GPU stencil check's LBM gradients were off by 1.6e-3
 relative with no warning; each product now pins `Precision.HIGHEST`.
 `291` (resolved): 0.1.0 to 0.3.1: on an NVIDIA GPU at JAX's default matmul
 precision, a graph's programs formed their float32 matrix products at reduced
-precision (an interface mapping on a multi-component field, IQN-ILS, the FNO
+precision (an interface mapping on a multi-component field, {term}`IQN-ILS`, the {term}`FNO`
 surrogate), off by up to about 4e-4 relative with no warning; every program the
 library builds now traces at `gm.matmul_precision`, `"highest"` unless set.
 `295` (resolved): compile_cache reported one cache directory while JAX wrote to
@@ -2454,7 +2454,7 @@ saturated step (`exp(89)`, `sigmoid(17)`) stays finite and invertible.
   own last sample repeated (a loss of 0.32 at the true parameters in a
   two-spring case, with its minimum on the edge of the scan).
 * `fim` — Fisher information `JᵀJ` from `jacfwd` sensitivities, with
-  relative scaling, eigen-decomposition and Cramér–Rao bounds.  `mask=`
+  relative scaling, eigen-decomposition and {term}`Cramér–Rao bounds <Cramér–Rao bound>`.  `mask=`
   restricts it to the leaves a mask selects, and `noise_std=` (scalar or
   per-leaf σ) weights the residual so `crb` comes out in the parameters'
   own units.  The identifiability check correctly isolates the (k, c, m)
@@ -3890,7 +3890,7 @@ The node's `NodeMeta` now claims no more than this study shows.
 `discretization` no longer says "2nd-order in space and time"; it claims no
 order.  The `tau` regime is `0.8` to `0.8`, the one value the study runs,
 where it used to declare `0.501` to `2.0`, a range nothing ran.  The
-Reynolds-number and grid regimes are the study's Stokes-regime runs on 12 to
+{term}`Reynolds-number <Reynolds number>` and grid regimes are the study's Stokes-regime runs on 12 to
 32 cells per side.  A new limitation says that no benchmark covers the
 multiphase mode, the tracer, partial fill, gravity or a localised actuator
 disc.  `LBMNode` claimed more than its benchmarks run in the same way, and
@@ -4210,7 +4210,7 @@ vendored (BSD-2) FMI 3.0 headers, and `write_fmu` packages
 
 Verified end to end: FMPy's `simulate_fmu` drives the compiled FMU through
 the bridge and reproduces `gm.run_scan` with a set parameter and a driven
-input.  ZMQ is not required — a ZMQ transport can carry the same payloads
+input.  {term}`ZMQ` is not required — a ZMQ transport can carry the same payloads
 later.
 
 The choice of TCP/JSON over a shared-library-embedded interpreter is what
@@ -6519,7 +6519,7 @@ plain iteration, and two groups in one graph keep their own schedules.
 frozen-active-set adjoint pattern for adaptive solvers.  A subclass supplies
 `compute_active_set` (any fixed-shape `jnp` selection rule) and
 `solve_frozen` (the masked solve, through `ift_linear_solve`); the base
-class wires them into a JAX-traceable `update` over a padded `(c, mask)`
+class wires them into a {term}`JAX-traceable` `update` over a padded `(c, mask)`
 state.  Adaptivity changes which mask entries are true, never an array
 shape, so the step runs under `jit` / `lax.scan` unchanged.  The selection
 is committed under `stop_gradient` and coefficients off the mask are zeroed.
@@ -6663,7 +6663,7 @@ prescribes.
 
 ### Stability level and structural params
 
-`AdaptiveNode` and `AdaptiveNodeBlindnessError` are **`EVOLVING`, not
+`AdaptiveNode` and `AdaptiveNodeBlindnessError` are **{codeterm}`EVOLVING`, not
 `STABLE`**, and `maddening.core.solver_utils.ift_linear_solve` is back at
 the `EXPERIMENTAL` it had before the merge.  Nothing has shipped, so
 lowering the promise is free and raising it later would not be.  The 0.4.0
@@ -8636,7 +8636,7 @@ version written for a user of 0.3.1.
 
 ### Added
 - **Anomaly registries of other projects validate: exactly one project version field, and `--version-field NAME`**: `python -m maddening.compliance check-anomalies` (and `validate_anomaly_registry()`) accepts a registry whose top level carries exactly one key named `<project>_version` (the whole key matching `[a-z][a-z0-9_]*_version`, never `schema_version`; `maddening_version`, `mime_version`, `my_lib_version`) with a non-empty string value, and refuses none (which 0.3.1 accepted), two or more, or a non-string value, with a message saying what to change; `--version-field NAME` (`version_field=NAME`) requires that exact name, and `scripts/check_anomalies.py` requires `maddening_version`.
-- **`coupling_diagnostics()`: a reason code beside every usable flag that is `False`** (experimental): each entry has `reason_codes`, a list of codes for `spectral_usable`, for `gradient_bound_usable` and for `precision_limited` (the constants of `maddening.core.coupling.reason_codes`), a `not_usable_reason` in words wherever a usable flag is `False` (a plain float32 pair at the default tolerance had none), and the float floor as `residual_precision_floor`.
+- **`coupling_diagnostics()`: a {term}`reason code <Reason code>` beside every usable flag that is `False`** (experimental): each entry has `reason_codes`, a list of codes for `spectral_usable`, for `gradient_bound_usable` and for `precision_limited` (the constants of `maddening.core.coupling.reason_codes`), a `not_usable_reason` in words wherever a usable flag is `False` (a plain float32 pair at the default tolerance had none), and the float floor as `residual_precision_floor`.
   Action: branch on the codes, not the sentence: `interface_too_wide` is expected (one pass depends on the previous one through more than seven independent scalars: what the loop closes through under Gauss-Seidel), `spectral_self_check_failed` is a worry, `at_float_floor` says to use float64 or a looser tolerance. Code that took the presence of `not_usable_reason` to mean "numbers withheld" should read the codes instead. No flag and no number moved.
 - **The report of a group under `convergence_norm="interface"` with a `multilinear_grid` edge (experimental) reads its float floor at every step**: `coupling_diagnostics()` gives it `precision_limited` by the rule of every group and a new key, `residual_precision_floor` (the floor of the state that step returned, in tolerances). That is the run-time reading of what `compile()`'s positions advisory asks once: float32 markers that drift far from the origin, a state write or a loaded checkpoint are read where they are. Read the floor's size against the tolerance; a floor of one or more says rounding alone is the tolerance asked. The floor and the advisory count a position where the mapping rounds it, at the larger of its distance from the coordinates' zero and of its distance from the grid's first point (its lattice coordinate): far into a long grid, float32 positions are flagged wherever the coordinates' origin is, and float64 positions are the remedy. The floor is pooled over every entry the norm reads (the advisory quotes one part's number) and is the same with `diagnostics=True` as without.
   The advisory now asks only what the floor counts (not a delivered value inside the dead band, a coordinate on an axis of one lattice point, or a point clamped to the hull) and says what its count assumes for a delivered value: a field that varies across a cell by about the size of the value delivered. A gather that samples a field near its zero is not warned of and can be several tolerances off at float32 positions (MADD-ANO-247: hold the positions in float64).
@@ -8662,7 +8662,7 @@ version written for a user of 0.3.1.
 - **Read-only graph inspection** (experimental): `gm.print_graph()` / `format_graph()`, `to_mermaid()` / `to_dot()`, and tables
   `state_summary()`, `params_table()`, `coupling_report()` (caveats flagged), `memory_estimate()` with `print_*` forms; none writes or
   compiles anything.  `maddening.show_versions()` / `python -m maddening info` for bug reports; `print()` of `FitResult` / `FIMReport`
-- **CycloneDX SBOMs** in `docs/validation/sbom/` for the base install and the `server`, `surrogates` and `usd` extras, from a
+- **CycloneDX {term}`SBOMs <SBOM>`** in `docs/validation/sbom/` for the base install and the `server`, `surrogates` and `usd` extras, from a
   clean install of the wheel (`scripts/generate_sbom.py`), checked offline against `pyproject.toml` and the SOUP package
   (`scripts/check_sbom.py`, in CI).  Regenerated from the release commit before each tag; see `soup_package.md` §6
 - **`coupling_diagnostics()` gains `gradient_relative_error_bound`** (and `gradient_bound_usable`): the
@@ -8817,7 +8817,7 @@ version written for a user of 0.3.1.
 - **`sharded_cg` / `sharded_gmres` on the loop backend (`backend="loop"`, and every preconditioned solve): `converged` can read `False` where it read `True`** (MADD-ANO-263): it is now `||b - A x|| <= max(atol, rtol * ||b||)` on the returned value, with no allowance for rounding. A float32 solve asked for a tolerance it does not reach (at the default `rtol=1e-6`: a condition number over about 17) answers `converged=False` and the true `residual_norm`, and one that stopped within the float32 floor of its tolerance can read `False` by a hair (measured: 1.06 times `rtol`). Code that branches on `converged` takes the other branch there: ask for an `rtol` a few times above `eps * kappa` (in float32, about `1e-7` times the condition number), or solve in float64, or read `residual_norm`. `run_pod.py --goal gradient` now reads the iteration count against its cap instead of this flag.
 - **A graph in which an edge delivers to a field that is also a declared external input no longer compiles** (released behaviour, corrected: MADD-ANO-265; 0.1.0 to 0.3.1). The input replaced whatever the edge delivered on every step, with zeros when it was not fed, so the edge never reached the node and nothing said so (on 0.3.x the edge got through only when `external_inputs` was a dict that left the input out). `compile()` and every entry point that compiles now raise a `ValueError` naming each such pair, and `validate()` lists it. Keep one of the two: leave the `add_external_input` out where the graph is built (there is no `remove_external_input`), or call `remove_edge(...)` as the message spells it.
 - **`run_pod.py --goal forward`: the cross-shard sum is checked exactly, on a field of ones** (session tooling, never released as a result): one more public step from a field of ones, which the node leaves ones bit for bit, must return `total` equal to the number of cells and a field still all ones, limit zero, sharded and unsharded; not run at 2**24 cells or more (`CHECK NOT RUN`, exit 0). The float `total` of the goal's cancelling field (`sum|x| / |sum x|` of 22 to 69,000) stays in the record and is held to no limit: orders of addition differ by up to 3.5e-4 of it, as much as a ghost row counted. Record schema 9. Action: re-run any dry run recorded at schema 8 (it reads `INVALID`).
-- **Float32 matrix products on NVIDIA GPUs: documented, and fixed for the hardware session** (docs and session tooling; no code change): JAX computes float32 matrix products at reduced precision by default on these cards, and the lattice Boltzmann nodes (`LBMNode`, `LBMPipeNode`) and MLP surrogates use them. `docs/user_guide/installation.md` says so and gives the setting (`JAX_DEFAULT_MATMUL_PRECISION=highest`, or `jax.config.update("jax_default_matmul_precision", "highest")`); the multi-GPU runbook exports it before the goals, records it in `session.txt`, and measures the default once in its non-gating tail. On CPU the setting changes nothing (checked: the products are bit-identical). Action: on an NVIDIA GPU, set it for any float32 run that uses those nodes.
+- **Float32 matrix products on NVIDIA GPUs: documented, and fixed for the hardware session** (docs and session tooling; no code change): JAX computes float32 matrix products at reduced precision by default on these cards, and the lattice Boltzmann nodes (`LBMNode`, `LBMPipeNode`) and {term}`MLP` surrogates use them. `docs/user_guide/installation.md` says so and gives the setting (`JAX_DEFAULT_MATMUL_PRECISION=highest`, or `jax.config.update("jax_default_matmul_precision", "highest")`); the multi-GPU runbook exports it before the goals, records it in `session.txt`, and measures the default once in its non-gating tail. On CPU the setting changes nothing (checked: the products are bit-identical). Action: on an NVIDIA GPU, set it for any float32 run that uses those nodes.
 - **`run_pod.py --goal gradient`: the `sharded_cg` part solves a system float32 CG converges on, and fails unless it did** (session tooling, never released as a result): the 1-D Laplacian shifted on its diagonal (`CG_SHIFT = 0.03`, condition number 134) to `rtol` 1e-4 for a white-noise right-hand side, 55 to 58 iterations a solve at every size; each side's solve, adjoint solve and tangent solve must have stopped on the tolerance with a true residual within 2e-4 (computed on the host in float64), and the parity limit is 4e-4 (was 1e-3, read at 5.3e-4 to 9.2e-4 on solves of the unshifted operator that had not converged; now 2e-7 to 8e-7 on CPU). Record schema 8. Action: re-run any dry run recorded at schema 7 (it reads `INVALID`).
 - **`coupling_diagnostics()` withdraws `spectral_usable` and `gradient_bound_usable` at the float floor behind a long row of a static mapping** (MADD-ANO-257, open; never released): the float floor does not count a mapped edge's row sum (a stalled float32 pair read its bound at 0.68 of the true distance behind a scatter-layout row of 100 entries, 0.002 behind 3e4, and 0.18 behind a dense matrix of three rows of 3000). Where an internal edge carries a static mapping of any kind (a dense matrix, counted at its width; a sparse mapping in either layout) with a row over 10 entries and the residual is not above the floor times the row's length, the flags are `False` with a `not_usable_reason`; every number is reported as computed. A geometry-dependent scatter (`multilinear_grid` from points to a grid, experimental) is counted at its number of points, whichever side its positions are anchored at: how many markers share a grid entry is state. In practice a float32 group whose mapping sums a few hundred entries a row loses the two flags at `rtol` 1e-4 or tighter; hold it in float64 at the same tolerance to keep them.
 - **`compile()` emits a new `UserWarning` for every coupling group that sets `atol > 0`**, whatever its member count and schedule (the advisory of MADD-ANO-254; `validate()` returns the same line): a run that turns warnings into errors (`-W error`, `filterwarnings = ["error"]`) now fails on such a graph. Set `atol=0.0` (the default) there, or filter the message; no group is excepted.

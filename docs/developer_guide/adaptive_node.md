@@ -5,9 +5,9 @@ keep a padded basis of `n_max` candidates and solve only on an **active set**
 chosen from the data — wavelet thresholding, top-K by coefficient, residual
 bulk-chasing, hierarchical refinement. It gives a subclass three things:
 
-- a JAX-traceable `update` (fixed-size buffer plus boolean mask, so the
+- a {term}`JAX-traceable` `update` (fixed-size buffer plus boolean mask, so the
   active set can change every step without a retrace);
-- the **frozen-active-set adjoint**: `jax.grad` through the node is the exact
+- the **frozen-active-set adjoint**: `jax.grad` through the {term}`node <Node>` is the exact
   derivative of the objective with the active set held fixed, routed through
   `maddening.core.solver_utils.ift_linear_solve`;
 - the **cold-start diagnostics**: how much of the full-basis gradient your
@@ -18,9 +18,9 @@ bulk-chasing, hierarchical refinement. It gives a subclass three things:
   direction an optimiser needs.
 
 > **Stability.** `AdaptiveNode`, `AdaptiveNodeBlindnessError` and
-> `ift_linear_solve` are **not** `STABLE`. The node surfaces are
+> `ift_linear_solve` are **not** {codeterm}`STABLE`. The node surfaces are
 > `@stability(EVOLVING)` and `ift_linear_solve` is back at its pre-0.4
-> `EXPERIMENTAL`. Nothing has shipped, so lowering the promise costs nothing
+> {codeterm}`EXPERIMENTAL`. Nothing has shipped, so lowering the promise costs nothing
 > and raising it later would not be free; the 0.4.0 API freeze picks the final
 > level, informed by the open questions at the end of this guide.
 
@@ -46,12 +46,12 @@ All of the following should hold:
 1. The solve has a basis form $A(\theta)\, c = b(\theta)$ (or is reducible to
    a sequence of such solves).
 2. You want $dJ/d\theta$ for an objective $J$ of the coefficients, and
-   $\theta$ is something the graph parameter pytree should carry (a source
+   $\theta$ is something the graph parameter {term}`pytree <Pytree>` should carry (a source
    position, a material constant — the things `fit` / `fim` identify).
 3. The active set changes with $\theta$ or with the previous solution.
 
 A static active set or a uniform grid does not need this: write a plain
-`SimulationNode` and call `ift_linear_solve` directly.
+{codeterm}`SimulationNode` and call `ift_linear_solve` directly.
 
 ## The contract
 
@@ -264,7 +264,7 @@ A = self.mask_safe(mask, A, fill=0.0)            # columns
 | Method | Cost | Use |
 |---|---|---|
 | `gradient_capture_ratio(state, params=None) -> float` | 2 gradients, one full-basis | How much of the full-basis gradient the frozen set reproduces. ~1 trustworthy, ~0 either a trap **or** too small a budget, `1.0` sentinel when the full gradient itself vanishes. The active set is re-selected at `params` (never read from a stale `state["mask"]`). Also warns when the full-basis gradient for a **trainable** leaf is *bitwise* zero — see *Precomputed basis arrays* |
-| `frozen_gradient_vanishes_at(state, params=None, *, eps=1e-3) -> bool` | 2 frozen gradients + 1 full | Is the frozen gradient negligible against its own rate of change? A Palais trap implies this, so **`False` rules a trap out**; `True` does not establish one — an ordinary stationary point, including the optimum a successful fit ends at, gives the same answer. Reliable for exact traps, not for partial blindness. `is_trapped_at` is a deprecated alias |
+| `frozen_gradient_vanishes_at(state, params=None, *, eps=1e-3) -> bool` | 2 frozen gradients + 1 full | Is the frozen gradient negligible against its own rate of change? A Palais trap implies this, so **`False` rules a trap out**; `True` does not establish one — an ordinary stationary point, including the optimum a successful fit ends at, gives the same answer. Reliable for exact traps, not for partial blindness. `is_trapped_at` is a {term}`deprecated <DEPRECATED>` alias |
 | `symmetry_break(state, params=None, *, delta=None) -> params` | 1 full gradient | Step `delta` (default `blindness_break_delta`) along the unit full-basis gradient; trainable leaves only |
 | `check_gradient_capture(params=None, ...) -> float or None` | as above, memoised | The policy wrapper the cold start uses; call it yourself at `gm.params["nodes"][name]` |
 
@@ -304,7 +304,7 @@ the cold start alone — reading a `False` as "not a trap", not a `True` as
 **Cost.** The diagnostic costs two gradient evaluations, one of them
 full-basis — measured 8–10x the cost of an unguarded `initial_state()` — and
 `initial_state()` is called from `GraphManager.add_node` / `reset_state`, the
-profiler, the REST API, the sharded-node paths, the FMI model description and
+profiler, the REST API, the {term}`sharded <Sharded>`-node paths, the {term}`FMI` model description and
 the hypothesis strategies. It is memoised per instance and parameter point, so
 those paths pay once; it is skipped entirely when the gate is off, when
 `on_blind="ignore"`, or when the node has no trainable parameter leaf. To turn
@@ -424,11 +424,11 @@ freeze is about to settle anyway, and neither is a correctness bug.
 2. **Should the hooks take `boundary_inputs` and `dt`?** `update` does
    `del boundary_inputs, dt`, and `compute_active_set` / `solve_frozen` /
    `objective` take only `(state, mask, params)`. An `AdaptiveNode` can
-   therefore only ever be an edge *source*: to consume an edge's input, or to
+   therefore only ever be an {term}`edge <Edge>` *source*: to consume an edge's input, or to
    be time-dependent, a subclass must override `update` and re-implement the
    `stop_gradient` wrap, the two shape validations and `_solve_and_pack`. The
    same limitation makes an `AdaptiveNode` inert to its partner's interface
-   values inside a coupling group. Adding the arguments keyword-only with
+   values inside a {term}`coupling group <Coupling group>`. Adding the arguments keyword-only with
    defaults would keep existing overrides binding, but it changes three hook
    signatures, so it belongs to the freeze.
 

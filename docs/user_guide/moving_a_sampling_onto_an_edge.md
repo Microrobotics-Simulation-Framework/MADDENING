@@ -1,14 +1,14 @@
 # Moving a node's own sampling onto an edge
 
 *A worked example.  It uses `add_edge(..., geometry=...)` and the
-`multilinear_grid` kind, which are experimental in 0.4.0: see
+`multilinear_grid` kind, which are {term}`experimental <EXPERIMENTAL>` in 0.4.0: see
 [Geometry-dependent mappings](geometry_dependent_mappings.md).*
 
-A node that holds a field on a grid is often asked for the field at
+A {term}`node <Node>` that holds a field on a grid is often asked for the field at
 points another node owns: a flow solver for the velocity at the markers
 of a body.  One way to answer is inside the grid node: it takes the
-points as a boundary input and interpolates in its own `update`.  On
-0.4.0 the interpolation belongs on the edge.  This page makes that port
+points as a {term}`boundary input <Boundary inputs>` and interpolates in its own `update`.  On
+0.4.0 the interpolation belongs on the {term}`edge <Edge>`.  This page makes that port
 once, on a small example, and checks each step by running it: the two
 graphs deliver the same values, and each of the three arguments of
 `add_edge` that the port tends to get wrong is checked.
@@ -128,7 +128,7 @@ print("\n".join(text[text.index("Edges (2)"):text.index("Coupling groups (0)")])
 assert "back edge" in text[text.index("  body.points -> fluid.sample_points") + 1]
 ```
 
-The two edges close a cycle, and outside a coupling group a cycle is cut
+The two edges close a cycle, and outside a {term}`coupling group <Coupling group>` a cycle is cut
 at a *back edge*, which reads the previous step's value.  `format_graph()`
 says which one: `body.points -> fluid.sample_points`, because the fluid
 was added first.  So in this graph the fluid runs first and samples its
@@ -308,7 +308,7 @@ step).  The new graph has one edge and no cycle, and the order the nodes
 are added in changes nothing.  If your old graph was built the other way
 round, the port changes its numbers by one step of the field: the body
 now receives the field of the step in hand.  The other call sites (a
-flux hook, a coupling group, a multi-rate graph) are in
+flux hook, a coupling group, a {term}`multi-rate <Multi-rate>` graph) are in
 [the time level a geometry is read at](geometry_dependent_mappings.md#the-time-level-a-geometry-is-read-at-in-short).
 
 **Points held by a third node.**  If the points belong to neither end of
@@ -587,7 +587,7 @@ is in [Geometry-dependent mappings](geometry_dependent_mappings.md)
 
 **Measured**, on a loop of this kind at three grid sizes (a unit square
 of 16, 64 and 256 cells a side, four points, a loop that contracts by
-0.63 a pass, float64, `rtol=1e-4`, the default Gauss-Seidel sweep).  The
+0.63 a pass, float64, `rtol=1e-4`, the default {term}`Gauss-Seidel` sweep).  The
 number is how far the velocity the body received at a `converged=True`
 step is from a solve seven decades tighter, in tolerances (RMS over
 `rtol` times the largest value); the passes taken are in brackets.
@@ -618,7 +618,7 @@ motion.**  A plain edge that carries the points reads the *iterate*, so
 the old fluid sampled at the positions of the pass in hand: the body's
 end-of-step positions, once converged.  The target-anchored edge reads
 the positions the body held before the step, at every pass.  The two
-loops therefore converge to different fixed points, first order in the
+loops therefore converge to different {term}`fixed points <Fixed point>`, first order in the
 step.  On the 16 x 16 loop of the table the velocities the body receives
 at the two fixed points differ by `2.2e-4` of their size (the body moves
 a thousandth of a cell in the step), and by ten times that at ten times

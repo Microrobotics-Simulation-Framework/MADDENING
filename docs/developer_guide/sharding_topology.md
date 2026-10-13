@@ -1,7 +1,7 @@
 # Sharding topology: structured vs unstructured
 
 :::{versionadded} 0.3.0
-The unstructured-sharding contract (``ShardedUnstructuredNode`` +
+The unstructured-{term}`sharding <Sharding>` contract (``ShardedUnstructuredNode`` +
 ``StaticArray(replication="partition")`` + the
 ``halo_unstructured.exchange_unstructured`` collective) landed in
 v0.3.0 as a sibling of the v0.2.1 structured path
@@ -11,12 +11,12 @@ v0.3.0 as a sibling of the v0.2.1 structured path
 ## Choice criteria
 
 MADDENING ships **two** first-class sharding wrappers — pick the one
-whose topology matches your node's stencil:
+whose topology matches your {term}`node <Node>`'s {term}`stencil <Stencil>`:
 
 | Wrapper | When to use it | Performance |
 |---|---|---|
-| `ShardedPointwiseNode` | Pointwise nodes (no spatial topology, no halo). | Trivial — every shard runs its slice independently. |
-| `ShardedStencilNode` | **Cartesian** grids — `(nx, ny, nz)`-shaped state, axis-aligned halos via `halo_width()`. | XLA SIMD-vectorised, contiguous memory, ~10–100× faster than the equivalent unstructured topology at the same cell count. |
+| `ShardedPointwiseNode` | Pointwise nodes (no spatial topology, no {term}`halo <Halo>`). | Trivial — every {term}`shard <Shard>` runs its slice independently. |
+| `ShardedStencilNode` | **Cartesian** grids — `(nx, ny, nz)`-shaped state, axis-aligned halos via `halo_width()`. | {term}`XLA` SIMD-vectorised, contiguous memory, ~10–100× faster than the equivalent unstructured topology at the same cell count. |
 | `ShardedUnstructuredNode` | **Arbitrary connectivity** — FVM on unstructured meshes, GNNs over real graphs, finite-element on irregular grids. | Sparse halo exchange via `lax.all_to_all`; pays a per-cell scatter/gather cost compared to the Cartesian path. |
 
 When both topologies are technically viable (some structured-on-irregular
@@ -32,7 +32,7 @@ problems can be expressed either way), the rule is:
 
 ### The grid extent must divide by the device count (Cartesian paths only)
 
-Both Cartesian wrappers split each sharded axis **evenly**, so a sharded
+Both Cartesian wrappers split each {term}`sharded <Sharded>` axis **evenly**, so a sharded
 extent has to be a multiple of the devices on its mesh axis: 16 cells over
 3 devices has no layout.  Since v0.4.0 `ShardedStencilNode` and
 `ShardedPointwiseNode` refuse that at construction, with a `ValueError`
@@ -191,9 +191,9 @@ which wrapper a node is written for:
   either.
 * `StaticArray` carries the per-array sharding policy via
   `replication=` (`"replicate"` / `"shard"` / `"partition"`).
-* Boundary inputs are classified by shape.  A **grid-shaped** input (on
+* {term}`Boundary inputs` are classified by shape.  A **grid-shaped** input (on
   the stencil path: same extent as the state fields on every sharded
-  spatial axis, e.g. an LBM per-cell `body_force` map or a
+  spatial axis, e.g. an {term}`LBM` per-cell `body_force` map or a
   `wall_mask_update`; on the unstructured path: leading axis of length
   `n_devices * n_local_max` in partition layout, i.e. what
   `partition_value` produces) is sharded and halo/ghost-padded exactly
@@ -411,7 +411,7 @@ What 0.4.0 added:
   declares, or a step's output handed back to the wrapper) is placed as
   the step returns it — replicated once reduced, stacked along the mesh
   axis otherwise — rather than partitioned, so such a node runs in a
-  `GraphManager` (the stencil wrapper had the same defect for a vector or
+  {codeterm}`GraphManager` (the stencil wrapper had the same defect for a vector or
   per-shard integral, fixed the same way).  In a graph the node gives the
   integral an initial value in `initial_state()`: a step that adds a field
   to the state is refused (`GraphManager.step`, as `run_scan`);

@@ -5,14 +5,14 @@ bibliography: ../../bibliography.bib
 # RigidBody2DNode
 
 **Module**: `maddening.nodes.rigid_body_2d`
-**Stability**: deprecated
+**Stability**: {term}`deprecated <DEPRECATED>`
 **Algorithm ID**: `MADD-NODE-004`
 **Version**: 1.0.0
 
 ```{deprecated} 0.3.0
 Use `maddening.nodes.rigid_body.RigidBodyNode` with
 `constraints={"z": 0, "rx": 0, "ry": 0}`, which gives equivalent planar
-behaviour inside the full 6-DOF node.  The constructor warns on every
+behaviour inside the full 6-DOF {term}`node <Node>`.  The constructor warns on every
 instantiation.  This guide documents the node as it stands so that the
 existing evidence for it is traceable.
 ```
@@ -126,7 +126,7 @@ Unconditionally stable for a state-independent force and torque: the acceleratio
 
 ## Verification Evidence
 
-- Benchmark: `MADD-VER-011` — observed temporal order of accuracy by the Method of Manufactured Solutions. A manufactured planar trajectory and orientation history are injected as `force` and `torque`, the node's own additive boundary inputs, with gravity zeroed so the manufactured forcing is the only drive. Over a 100/200/400/800 step ladder at fixed final time, in float64, the observed order over the finest pair is **1.000** against the declared 1.0, measured over position, angle, velocity and angular velocity jointly.
+- Benchmark: `MADD-VER-011` — observed temporal order of accuracy by the Method of Manufactured Solutions. A manufactured planar trajectory and orientation history are injected as `force` and `torque`, the node's own additive {term}`boundary inputs <Boundary inputs>`, with gravity zeroed so the manufactured forcing is the only drive. Over a 100/200/400/800 step ladder at fixed final time, in float64, the observed order over the finest pair is **1.000** against the declared 1.0, measured over position, angle, velocity and angular velocity jointly.
 - Test file: `tests/verification/test_mms_order_ode_nodes.py`
 
 ## Changelog

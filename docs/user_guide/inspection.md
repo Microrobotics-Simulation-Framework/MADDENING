@@ -1,6 +1,6 @@
 # Inspecting a graph
 
-A `GraphManager` can describe itself: its structure as text or as a
+A {codeterm}`GraphManager` can describe itself: its structure as text or as a
 diagram, its state, parameters, {term}`coupling <Coupling>` convergence and memory as
 tables, and the software it is running on as a version report.  All of
 it is new in 0.4.0 and marked **{term}`experimental <EXPERIMENTAL>`**: the methods may still
@@ -238,7 +238,7 @@ diagnostics and warm starts).
 
 ### Parameters
 
-`params_table()` lists every leaf of `gm.params` with its `ParamSpec`
+`params_table()` lists every leaf of `gm.params` with its {codeterm}`ParamSpec`
 (the node's own, with `set_param_spec` overrides applied) and checks it
 against its bounds by `ParamSpec.check()`'s rule:
 

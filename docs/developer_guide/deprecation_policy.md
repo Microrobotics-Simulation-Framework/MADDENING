@@ -8,7 +8,7 @@ level is decided in
 
 MADDENING follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Read "major bump" below as "2.0 at the earliest", because 1.0 is where the
-`STABLE` set is first frozen.
+{codeterm}`STABLE` set is first frozen.
 
 ## The levels
 
@@ -24,13 +24,13 @@ level; see [Untagged surfaces](#untagged-surfaces).
 | `experimental` | Opt-in. May change or disappear in any minor release. | Any minor release. | None, but a CHANGELOG entry is mandatory. |
 | `deprecated` | Scheduled for removal; the replacement is named in the docstring. | — | Already given. |
 
-`StabilityLevel` has two more members, both `DEPRECATED` since 0.4.0. Each
+`StabilityLevel` has two more members, both {codeterm}`DEPRECATED` since 0.4.0. Each
 shipped in earlier releases (`PROVISIONAL` since 0.1.0, `INTERNAL` since
 0.3.0), so both stay and keep working, but no surface in `src/` carries either,
 and nothing new should:
 
 - `PROVISIONAL` is a synonym for `evolving` and is treated as `evolving`
-  everywhere, the {term}`FMU` export's `include_evolving` included. Use `EVOLVING`.
+  everywhere, the {term}`FMU` export's `include_evolving` included. Use {codeterm}`EVOLVING`.
 - `INTERNAL` meant "not public, no promise". Leave such a surface untagged
   and give it a private, underscored name.
 
@@ -44,7 +44,7 @@ Two rules that are easy to miss:
 - **A `stable` class promises the whole object**, not just its constructor:
   every public method and property an instance answers to, including the ones
   it inherits. The exception is a member with a lower tag of its own: it
-  promises that level. `GraphManager` is `stable` and
+  promises that level. {codeterm}`GraphManager` is `stable` and
   `GraphManager.set_param_spec` is `evolving`. An override with no tag takes
   the level of the method it overrides.
   `docs/developer_guide/stable_api.json` records every member except those.

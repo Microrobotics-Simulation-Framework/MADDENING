@@ -120,7 +120,7 @@ block's code rather than marking it `no-run`. A `no-run` block is not
 unchecked either: its `maddening` imports must resolve, every keyword
 argument it passes to a callable it imports from `maddening` must be one
 that callable takes, and every `gm.<method>(...)` it calls must exist on
-`GraphManager` with those keywords (every guide spells a graph `gm`). Only
+{codeterm}`GraphManager` with those keywords (every guide spells a graph `gm`). Only
 the import statements are executed, never the block.
 
 **Cloud launch paths never run.** A block that names `/cloud/launch`,

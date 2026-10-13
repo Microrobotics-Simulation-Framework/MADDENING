@@ -411,7 +411,7 @@ What 0.4.0 added:
   declares, or a step's output handed back to the wrapper) is placed as
   the step returns it — replicated once reduced, stacked along the mesh
   axis otherwise — rather than partitioned, so such a node runs in a
-  `GraphManager` (the stencil wrapper had the same defect for a vector or
+  {codeterm}`GraphManager` (the stencil wrapper had the same defect for a vector or
   per-shard integral, fixed the same way).  In a graph the node gives the
   integral an initial value in `initial_state()`: a step that adds a field
   to the state is refused (`GraphManager.step`, as `run_scan`);

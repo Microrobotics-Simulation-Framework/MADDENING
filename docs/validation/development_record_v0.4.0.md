@@ -280,7 +280,7 @@ one of these defects.
   `NaN`/`Infinity` is refused where you set the name, an unencodable FMI reply is an error
   reply rather than a dead worker thread, and `dumps_encoded()` writes `to_dict()` output
 - **`gm.compile()` drops every node's materialised statics**, including one
-  inside a wrapped node: `invalidate_static_cache` is now a `SimulationNode`
+  inside a wrapped node: `invalidate_static_cache` is now a {codeterm}`SimulationNode`
   method that forwards inwards, so a static rewritten in place is not baked in (MADD-ANO-081, never released)
 - A `.` in a node name no longer misroutes that node's FMU inputs and outputs (MADD-ANO-080, never released)
 
@@ -295,7 +295,7 @@ claim was checked in. Four inventories were built in this cycle:
 | Inventory | Row prefixes | Domains | What it covers |
 |---|---|---|---|
 | `docs/validation/coupling_claims.yaml` | `CPL` | `numeric` | Coupling groups: convergence, the error estimate, the bounds and their flags, acceleration, the {term}`IFT` gradient. |
-| `docs/validation/sysid_fmu_claims.yaml` | `SYS`, `FMU` | `numeric` | `maddening.sysid`, `ParamSpec`, `fim`, and the FMU export and bridge. |
+| `docs/validation/sysid_fmu_claims.yaml` | `SYS`, `FMU` | `numeric` | `maddening.sysid`, {codeterm}`ParamSpec`, `fim`, and the FMU export and bridge. |
 | `docs/validation/rest_runpod_claims.yaml` | `REST`, `RPD` | `server` | The HTTP API's routes and refusals, and the multi-GPU session runner. |
 | `docs/validation/mapping_claims.yaml` | `MAP` | `numeric` | Interface mappings: the kinds, sparse and geometry-dependent mappings, serialisation. |
 
@@ -494,7 +494,7 @@ frames on it.  Each checks, after *every* operation, against an in-process
 model: a valid call must succeed and agree, a refused call must be a 4xx or
 error reply that changes nothing and keeps the connection, and the REST
 server must never answer 5xx.  The REST machine ends every example by
-rebuilding a `GraphManager` from the server's own `GET /graph` and replaying
+rebuilding a {codeterm}`GraphManager` from the server's own `GET /graph` and replaying
 its trajectory.  Three of the *Fixed* entries in this release came directly
 out of these machines.
 
@@ -763,7 +763,7 @@ defect introduced and fixed within one development cycle (which
 `MADD-ANO-018` and `-019` now carry), is in the registry's header comment,
 and the SOUP generator runs the same function.
 
-**`LBMNode`'s algorithm ID is now `MADD-NODE-011` (was `MADD-NODE-007`).** From 0.1.0 to 0.3.1 `LBMNode` and `RigidBodyNode` both carried `MADD-NODE-007`; `RigidBodyNode` keeps it, because a test shipped in every release pins it there, while `LBMNode`'s was first published in this release's algorithm guide. Code or records keyed on `LBMNode.meta.algorithm_id` must move to the new ID; `check_impl_mapping.py` now refuses a duplicate ID and a guide whose ID differs from its node's `NodeMeta`.
+**`LBMNode`'s algorithm ID is now `MADD-NODE-011` (was `MADD-NODE-007`).** From 0.1.0 to 0.3.1 `LBMNode` and `RigidBodyNode` both carried `MADD-NODE-007`; `RigidBodyNode` keeps it, because a test shipped in every release pins it there, while `LBMNode`'s was first published in this release's algorithm guide. Code or records keyed on `LBMNode.meta.algorithm_id` must move to the new ID; `check_impl_mapping.py` now refuses a duplicate ID and a guide whose ID differs from its node's {codeterm}`NodeMeta`.
 
 ## The multi-GPU session runner
 
@@ -6659,7 +6659,7 @@ prescribes.
 
 ### Stability level and structural params
 
-`AdaptiveNode` and `AdaptiveNodeBlindnessError` are **`EVOLVING`, not
+`AdaptiveNode` and `AdaptiveNodeBlindnessError` are **{codeterm}`EVOLVING`, not
 `STABLE`**, and `maddening.core.solver_utils.ift_linear_solve` is back at
 the `EXPERIMENTAL` it had before the merge.  Nothing has shipped, so
 lowering the promise is free and raising it later would not be.  The 0.4.0

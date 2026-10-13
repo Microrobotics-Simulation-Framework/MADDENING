@@ -226,7 +226,7 @@ include another value of one the node consumed at construction (a
 checkpoint of a pipe built with another radius); before, the load
 succeeded and every later `/sim/step` failed.  More generally the load asks
 of every parameter it changes what `PUT /graph/params` asks, by the same
-code: a non-finite value, one outside its `ParamSpec` bounds, one the
+code: a non-finite value, one outside its {codeterm}`ParamSpec` bounds, one the
 node's constructor refuses with the graph's other values (a rod past its
 Fourier limit at this graph's timestep), one that moves a mapped edge's
 points -- each is a 400 and nothing is loaded.  Finiteness and the bounds

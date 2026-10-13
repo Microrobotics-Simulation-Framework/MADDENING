@@ -7,7 +7,7 @@ contract. This page is about *using* it and about what porting it onto the
 0.4.0 API taught us; the method is in the
 [algorithm guide](../algorithm_guide/nodes/wavelet_adaptive_node.md).
 
-> **Stability.** `EXPERIMENTAL`, one level below the `EVOLVING` base class.
+> **Stability.** {codeterm}`EXPERIMENTAL`, one level below the {codeterm}`EVOLVING` base class.
 > The wavelet engine under `maddening.nodes.adaptive.wavelets` is importable
 > and tagged `EXPERIMENTAL` function by function; the {term}`node <Node>` is the surface
 > the freeze round covers.
@@ -109,7 +109,7 @@ ratio read 0.97 because it measured through the same truncated solve. Now:
 Every constant of the node is built on the host from static settings
 (`assemble_operator` runs under `jax.ensure_compile_time_eval`; `levels` and
 `diagonal` are NumPy arrays), so a function that builds a fresh node -- or a
-fresh `GraphManager` holding one -- per call traces under `jax.jit`. This is
+fresh {codeterm}`GraphManager` holding one -- per call traces under `jax.jit`. This is
 what a `residual_fn` for `sysid.fim` that constructs its graph inside the
 call needs; it used to fail in the assembly with a
 `TracerArrayConversionError` whose traceback pointed at `sysid.py`. Build
@@ -213,7 +213,7 @@ full-basis gradient is bitwise zero.
 - **Compile time was the whole cost.** The 30-step CDD unroll the node was
   first written with cost 7–10 s of XLA compile in *every* outer `jit`
   (nested `jit` is inlined, so `update`, `grad` and the {term}`graph step <Graph step>` each paid
-  it again); a bare `vmap` for the synthesis matrix paid ~60 eager primitive
+  it again); a bare {codeterm}`vmap` for the synthesis matrix paid ~60 eager primitive
   compiles per size; and the base class calls the hooks eagerly, where one
   gathered solve cost 4.9 s and one frozen gradient 6.3 s on first use. Now:
   CDD is a `lax.while_loop`, assembly is NumPy, and the hook bodies are

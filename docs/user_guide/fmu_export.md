@@ -226,7 +226,7 @@ its own check of the Terminated state, for clients other than the wrapper.
 **Variables.**  Outputs are `<node>.<field>`.  External inputs are
 `<node>.<field>` of the target boundary field (start value 0, description
 and unit from the target node's `boundary_input_spec`).  Parameters are
-`<node>.params.<key>`, with the `ParamSpec` bounds as `min` / `max`.  A
+`<node>.params.<key>`, with the {codeterm}`ParamSpec` bounds as `min` / `max`.  A
 `log` or `logit` bound is open, so it is advertised as the outermost value
 inside it that `ParamSpec.check` accepts in the parameter's type: the next
 float in, unless the transform's own arithmetic rounds that onto the bound.
@@ -251,11 +251,11 @@ ran `float32(0.1)` (MADD-ANO-218); a graph whose supplied values the cast
 changes says so once per input, with a `UserWarning` naming the keyword.
 
 The stability filter is by node: a node's outputs, parameters and external
-inputs enter the FMU only if the node is `STABLE`, or `EVOLVING` with
+inputs enter the FMU only if the node is {codeterm}`STABLE`, or {codeterm}`EVOLVING` with
 `include_evolving=True`.  An input of any other node is
 held at zero and listed in `md.held_inputs`, like an input
 `selected_inputs` leaves out, and the builder warns.  Naming it in
-`selected_inputs` is a `ValueError`.  Until 0.4.0's fix an `EXPERIMENTAL`
+`selected_inputs` is a `ValueError`.  Until 0.4.0's fix an {codeterm}`EXPERIMENTAL`
 node's input was exported while its outputs and parameters were not.
 
 Every `start`, `min` and `max` is written in its type's lexical form, which

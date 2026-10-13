@@ -1,6 +1,6 @@
 # Node Authoring Guide
 
-This guide covers everything required to add a new `SimulationNode` to MADDENING. Every requirement here is derived from the [Documentation Architecture](https://github.com/Microrobotics-Simulation-Framework/MADDENING/blob/main/DOCUMENTATION_ARCHITECTURE.md) and enforced by CI.
+This guide covers everything required to add a new {codeterm}`SimulationNode` to MADDENING. Every requirement here is derived from the [Documentation Architecture](https://github.com/Microrobotics-Simulation-Framework/MADDENING/blob/main/DOCUMENTATION_ARCHITECTURE.md) and enforced by CI.
 
 ## The Contract
 
@@ -51,7 +51,7 @@ time, planned for 0.5.0), do one of the following:
   stiff spring active below the surface, a `softplus` in place of a hard
   threshold, a regularised friction law) so that the dynamics are
   differentiable and the event time is implicit in them. The smoothing
-  length is a modelling choice. Say what it is in the node's `NodeMeta`.
+  length is a modelling choice. Say what it is in the node's {codeterm}`NodeMeta`.
 - **Do not differentiate through the event.** Fit over intervals that
   contain no switch, or treat the event time as a separate parameter you
   estimate some other way.
@@ -269,7 +269,7 @@ Every node **must** have a `meta` ClassVar. Required fields:
 |-------|----------|-------------|
 | `algorithm_id` | Yes | `MADD-NODE-XXX` format (get next available from existing nodes) |
 | `algorithm_version` | Yes | Semantic version of this algorithm implementation |
-| `stability` | Yes | `StabilityLevel.EXPERIMENTAL` for new nodes |
+| `stability` | Yes | {codeterm}`StabilityLevel.EXPERIMENTAL <EXPERIMENTAL>` for new nodes |
 | `description` | Yes | One-line description |
 | `assumptions` | Yes | Tuple of strings — every physical/mathematical assumption |
 | `limitations` | Yes | Tuple of strings — every known failure mode |
@@ -378,7 +378,7 @@ def test_your_node_always_finite(state, dt):
 ```
 
 **Integration test** — mandatory:
-- Test the node within a `GraphManager` (add node, connect edges, run steps)
+- Test the node within a {codeterm}`GraphManager` (add node, connect edges, run steps)
 
 ### 6. Apply the `@stability` Decorator
 
@@ -391,7 +391,7 @@ class YourNode(SimulationNode):
     ...
 ```
 
-New nodes start as `EXPERIMENTAL`. Promote to `STABLE` when:
+New nodes start as `EXPERIMENTAL`. Promote to {codeterm}`STABLE` when:
 - At least one verification benchmark passes
 - Algorithm guide is complete
 - API has been stable for at least one minor release
@@ -941,7 +941,7 @@ USD by `tests/usd/test_usd_a_node_that_draws_random_numbers.py`).
 | `jax.grad` | The derivative at a fixed key (below), plain and through a coupling group under `solver="ift"`. |
 | `maddening.sysid` | A record holds the key data of every sample, so `windowed_loss` replays the recorded draws and is exactly zero at the parameters that made the record. The seed is not a leaf of `gm.params`. |
 | `verify_node` | The battery accepts the key leaf as it draws it (below). |
-| {term}`FMU` export | The key data is a `UInt32` output and the FMU state resumes the stream. Only a `STABLE` node enters an FMU (or an `EVOLVING` one with `include_evolving=True`); the seed is not an FMU parameter. |
+| {term}`FMU` export | The key data is a `UInt32` output and the FMU state resumes the stream. Only a `STABLE` node enters an FMU (or an {codeterm}`EVOLVING` one with `include_evolving=True`); the seed is not an FMU parameter. |
 | REST | `GET /graph/state/{node}` returns the key data as a list of integers; a `PUT` of it and the checkpoint routes resume the stream; a write that is not key data is a 400 naming the field. |
 
 ### Three behaviours that surprise

@@ -189,7 +189,7 @@ for a later pass (see *What phase 2 did not do*).
 it into the wheel.  Without it a conforming type checker **must ignore
 every annotation in the package**, so all of the work above would be
 invisible to a consumer of `pip install maddening`.  Measured on a
-throwaway project importing `GraphManager` and `HeatNode` and making four
+throwaway project importing {codeterm}`GraphManager` and `HeatNode` and making four
 deliberate mistakes:
 
 | checker | without `py.typed` | with |

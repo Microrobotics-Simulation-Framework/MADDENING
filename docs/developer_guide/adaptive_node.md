@@ -18,9 +18,9 @@ bulk-chasing, hierarchical refinement. It gives a subclass three things:
   direction an optimiser needs.
 
 > **Stability.** `AdaptiveNode`, `AdaptiveNodeBlindnessError` and
-> `ift_linear_solve` are **not** `STABLE`. The node surfaces are
+> `ift_linear_solve` are **not** {codeterm}`STABLE`. The node surfaces are
 > `@stability(EVOLVING)` and `ift_linear_solve` is back at its pre-0.4
-> `EXPERIMENTAL`. Nothing has shipped, so lowering the promise costs nothing
+> {codeterm}`EXPERIMENTAL`. Nothing has shipped, so lowering the promise costs nothing
 > and raising it later would not be free; the 0.4.0 API freeze picks the final
 > level, informed by the open questions at the end of this guide.
 
@@ -51,7 +51,7 @@ All of the following should hold:
 3. The active set changes with $\theta$ or with the previous solution.
 
 A static active set or a uniform grid does not need this: write a plain
-`SimulationNode` and call `ift_linear_solve` directly.
+{codeterm}`SimulationNode` and call `ift_linear_solve` directly.
 
 ## The contract
 

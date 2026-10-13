@@ -30,7 +30,7 @@ Layer 4: [Commercial Product] (regulated, CE-marked, built by commercial entity)
 - Core simulation infrastructure: graph management, {term}`JIT compilation`, {term}`multi-rate <Multi-rate>` scheduling, adaptive timestepping
 - Physics {term}`node <Node>` library: heat diffusion, rigid body dynamics, spring-damper, {term}`LBM` fluid
 - Neural {term}`surrogate <Surrogate>` framework: training, validation, architecture library
-- Compliance infrastructure: `NodeMeta`, {term}`anomaly registry <Anomaly registry>`, {term}`verification benchmark <Verification benchmark>` registry, `@stability` decorator, `HealthCheckNode`
+- Compliance infrastructure: {codeterm}`NodeMeta`, {term}`anomaly registry <Anomaly registry>`, {term}`verification benchmark <Verification benchmark>` registry, `@stability` decorator, `HealthCheckNode`
 - {term}`SOUP` documentation package (`docs/validation/soup_package.md`)
 
 **Does NOT provide**:

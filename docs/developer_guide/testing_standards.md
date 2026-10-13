@@ -30,7 +30,7 @@ def test_your_node_jit():
 
 ## 2. Integration Tests (mandatory for nodes)
 
-Test the node within a `GraphManager`:
+Test the node within a {codeterm}`GraphManager`:
 
 ```python
 def test_your_node_in_graph():
@@ -927,7 +927,7 @@ audit area that a user could rely on:
 | file | prefixes | covers |
 |------|----------|--------|
 | `coupling_claims.yaml` | `CPL` | coupling groups, their solvers, schedules and accelerations; sub-cycling, multi-rate groups and the adaptive steppers on coupled graphs; `coupling_diagnostics()`, `coupling_report()` and `strict_convergence`; the {term}`precision floor <Precision floor>` and every bound and `*_usable` flag; IFT gradients; the profiler's coupling statistics; `windowed_loss`'s convergence mask |
-| `sysid_fmu_claims.yaml` | `SYS`, `FMU` | `maddening.sysid` (`windowed_loss`, `fim`, `fim_core`, the three fitters and their results, truth recovery and units); `ParamSpec` bounds and transforms; `node.params` and `gm.params` as fitting and export see them; the {term}`FMI` 3.0 export: model description, TCP bridge, {term}`sidecar <Sidecar>`, FMU state, C wrapper, conformance, refusals, timeouts, tokens and the terminated state |
+| `sysid_fmu_claims.yaml` | `SYS`, `FMU` | `maddening.sysid` (`windowed_loss`, `fim`, `fim_core`, the three fitters and their results, truth recovery and units); {codeterm}`ParamSpec` bounds and transforms; `node.params` and `gm.params` as fitting and export see them; the {term}`FMI` 3.0 export: model description, TCP bridge, {term}`sidecar <Sidecar>`, FMU state, C wrapper, conformance, refusals, timeouts, tokens and the terminated state |
 | `rest_runpod_claims.yaml` | `REST`, `RPD` | the HTTP API: authentication, the `Host` and `Origin` rules, request bounds and budgets, the graph lock and its 409/503, `/graph/*`, `/sim/*`, `/checkpoint/*`, shutdown and the runner behind `/sim/start` (not the {term}`experimental <EXPERIMENTAL>` {term}`surrogate <Surrogate>` and streaming endpoints); `benchmarks/multigpu/run_pod.py`, its runbook, records, verdicts and exit codes |
 | `mapping_claims.yaml` | `MAP` | {term}`interface mappings <Interface mapping>`: the registry of mapping kinds (`register_mapping`: names, declarations, the trust boundary of a file that names a kind, what a factory may raise and must return); what a mapping may put into `gm.params["mappings"]` and how those weights are fitted, checkpointed and exported; the sparse mappings (`StaticSparseMapping`, its two layouts, the three sparse kinds, their limits) and the structure digest a checkpoint carries for sparse weights |
 
@@ -1732,7 +1732,7 @@ whether it was caught by a `CHECK` or by the binary crashing.
 `tests/property/test_metamorphic_fmu_stability_filter.py`.  The
 description built under any assignment of {term}`stability levels <Stability level>` (every level,
 and untagged), `include_evolving` and `multi_clock` must equal the full
-export (every class `STABLE`) filtered by the documented rule, surface by
+export (every class {codeterm}`STABLE`) filtered by the documented rule, surface by
 surface: inputs, outputs, parameters with `fixed_parameters`' reasons, and
 clocks.  Changing one class's level then changes exactly its own
 surfaces.  Tolerance: none.  It found B1-M1 (the inputs were not filtered;

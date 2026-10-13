@@ -285,7 +285,7 @@ halo, reads another array through a window at a `shard_info` offset, and
 the static is copied along a mesh axis of two or more devices. A mesh
 axis the `axis_map` leaves unused copies it, and so does the other axis
 of a pencil. The result is silently wrong on the first kind of axis and
-fails to compile on the second. `jit` alone is right. `GraphManager`
+fails to compile on the second. `jit` alone is right. {codeterm}`GraphManager`
 therefore refuses any path that loops over such a step:
 
 * `run_scan`, `run_scan_with_history`, `run_sweep`, `run_adaptive_scan`

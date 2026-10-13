@@ -212,7 +212,7 @@ the same {term}`nodes <Node>`.  When `RESUME_FROM_URL` is set and the server's g
 has no nodes, the entry point logs
 "resume is impossible until a graph is loaded" and starts fresh
 instead of failing later with a node-mismatch error.  Embedders that
-build the `SimulationServer` with a populated `GraphManager` and call
+build the `SimulationServer` with a populated {codeterm}`GraphManager` and call
 {func}`~maddening.cloud.entrypoint.resume_from_env` get the full
 resume.
 ```

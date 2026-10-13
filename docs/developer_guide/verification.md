@@ -333,7 +333,7 @@ term is not even well defined for a lattice Boltzmann collision operator (the
 forcing scheme changes the order of accuracy, so the study would measure the
 scheme rather than the operator), and a node a *user* writes will usually have
 no forcing input either.  Adding an optional manufactured-source hook to
-`SimulationNode` was proposed and rejected, for four reasons:
+{codeterm}`SimulationNode` was proposed and rejected, for four reasons:
 
 1. **It is ill-defined for the node that prompted it.**  A source cannot be
    added to lattice Boltzmann distribution functions without a forcing scheme

@@ -943,7 +943,7 @@ DeprecationWarning: CouplingGroup solver='fori' is deprecated and will be remove
 
 `calibrate` fitted a function of a parameter dictionary.  `sysid.fit`
 fits the graph's own parameters (`gm.params`), within each parameter's
-`ParamSpec` bounds; here it recovers gravity from a recorded fall:
+{codeterm}`ParamSpec` bounds; here it recovers gravity from a recorded fall:
 
 <!-- snippet: continues -->
 ```python
@@ -975,7 +975,7 @@ assert abs(float(result.params["nodes"]["ball"]["gravity"]) + 9.81) < 0.01
 ```
 
 The [parameters guide](parameters.md#system-identification-maddeningsysid)
-covers `sysid` in full.
+covers {codeterm}`sysid` in full.
 
 **A registry of your own.**  `validate_anomaly_registry()` requires
 `resolution_status` on every entry and checks its value, rejects unknown

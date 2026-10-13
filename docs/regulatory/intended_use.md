@@ -14,7 +14,7 @@ When used in a regulated product, MADDENING is classified as **{term}`SOUP` (Sof
 |---|---|---|---|
 | Algorithm correctness | Verification evidence (benchmarks, tests) | Validate for specific {term}`COU` | N/A |
 | Numerical stability | Document stability conditions, hazard hints | Enforce stability conditions in integration layer | Follow IFU |
-| Parameter validation | Document validated regimes (`NodeMeta`) | Implement runtime validation for clinical parameters | Use within validated ranges |
+| Parameter validation | Document validated regimes ({codeterm}`NodeMeta`) | Implement runtime validation for clinical parameters | Use within validated ranges |
 | Clinical risk assessment | Not provided (technical hints only) | Full {term}`ISO 14971` risk management | Follow clinical guidance |
 | Regulatory submission | SOUP documentation package | Technical file, CE marking | N/A |
 | Post-market surveillance | {term}`Anomaly registry`, security updates | PMS plan, PSUR, vigilance reporting | Report incidents |

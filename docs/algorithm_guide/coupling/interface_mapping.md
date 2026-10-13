@@ -413,7 +413,7 @@ points.
 
 The config carries the recipe; a checkpoint (`save_state`) carries the
 actual `params["mappings"]` weights, which may have been trained by
-`sysid` or edited.  Loading a config rebuilds the geometric weights; a
+{codeterm}`sysid` or edited.  Loading a config rebuilds the geometric weights; a
 checkpoint loaded afterwards overwrites them — **the checkpoint wins**
 (`tests/core/test_mapping_spec_serialisation.py`).  Because the config
 cannot carry them, `gm.to_dict()` emits a `UserWarning` naming the edge

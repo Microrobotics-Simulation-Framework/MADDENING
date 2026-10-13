@@ -334,6 +334,9 @@ PER_PUSH = [
     Run("advanced.multiple_shooting_fit", expect=("All checks passed",)),
     Run("advanced.checkpoint_resume_demo", ("--warmup", "20", "--steps", "20"),
         expect=("All checks passed",)),
+    # Two child processes into its own temporary directories, with the
+    # cache variable pointed at a second one the entries must not reach.
+    Run("advanced.compile_cache_demo", expect=("All checks passed",)),
     # Pins its own device count (4) before importing JAX, whatever
     # XLA_FLAGS it inherits.
     Run("advanced.sharding_demo", ("--n-cells", "64", "--steps", "20"),

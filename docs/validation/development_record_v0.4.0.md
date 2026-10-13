@@ -2299,6 +2299,11 @@ precision, a graph's programs formed their float32 matrix products at reduced
 precision (an interface mapping on a multi-component field, IQN-ILS, the FNO
 surrogate), off by up to about 4e-4 relative with no warning; every program the
 library builds now traces at `gm.matmul_precision`, `"highest"` unless set.
+`295` (resolved): compile_cache reported one cache directory while JAX wrote to
+another: enable(b) after a compile kept JAX writing to the first directory, and
+with MADDENING_COMPILATION_CACHE_DIR set every GraphManager.compile() re-
+pointed an explicit enable() or warm_cache(cache_dir=) at the variable (never
+released).
 
 ## The account of each area
 

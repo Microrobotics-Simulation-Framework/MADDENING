@@ -3503,7 +3503,8 @@ class GraphManager:
                 )
 
         # Persistent XLA cache, if the user asked for one via the env var
-        # (see maddening.core.simulation.compile_cache).
+        # and no directory is enabled yet: an explicit compile_cache.enable()
+        # wins (see maddening.core.simulation.compile_cache).
         from maddening.core.simulation.compile_cache import enable_from_env
         enable_from_env()
 

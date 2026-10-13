@@ -371,10 +371,11 @@ that fail, and a CI that runs in shards against a time budget.
   normal and hostile bridges, `validate_fmu`, and a `-std=c11 -pedantic`
   build.  CI installs valgrind and clang; each part self-skips if its tool is
   missing
-- Full MADDENING test suite on 2026-10-02: **8634 tests collected** locally, 8169
-  in CI's default lane (`-m "not slow"`, `--ignore=tests/viz`; 432 slow deselected).
-  These counts are regenerated at the tag, with CI's pass/skip figures from the tag's
-  run — see `docs/release_notes/v0.4.0.md`.  v0.2.1's own
+- Full MADDENING test suite, collected on 2026-10-13 for the release: **25,784
+  tests**, 21,592 of them in CI's default lane (`-m "not slow"`,
+  `--ignore=tests/viz`; 4,159 slow deselected).  How they were counted is under
+  "[Verification evidence](#verification-evidence)"; CI's pass/skip figures are
+  those of the tag's run.  v0.2.1's own
   Verification block, which an edit during this cycle had moved here, is back
   under [0.2.1] as released
 - Differentiable sharded solves and the C1 multi-physics IQN-IMVJ case match
@@ -419,16 +420,20 @@ that fail, and a CI that runs in shards against a time budget.
 
 ## Verification evidence
 
-* **Suite size, 2026-10-02: 8634 tests collected**, of which 8169 are in
-  CI's default lane (`-m "not slow"` with `--ignore=tests/viz`, as every CI
-  lane runs it; 432 slow tests deselected).  This is a *collection* count
-  from `pytest tests/ --collect-only`, taken on the release branch with the
-  round-3 record fixes applied, in a local checkout (pytest 9.0.3, jaxlib
-  0.11.0, CPU) with more optional extras installed than CI, which therefore
-  collects fewer.  **These figures are regenerated at the tag**, with CI's
-  passed, skipped and xfailed counts for each jax lane read from the tag's
-  run; every merge before then moves them.  The figures this line carried
-  until the round-3 audit were a week older: 6386 collected at `1ad3fa2`
+* **Suite size, 2026-10-13: 25,784 tests collected**, of which 21,592 are
+  in CI's default lane (`-m "not slow"` with `--ignore=tests/viz`, as every
+  CI lane runs it; 4,159 slow tests deselected).  This is a *collection*
+  count, with nothing run: `pytest tests/ --collect-only -q -m "slow or not
+  slow"` for the whole suite, and `pytest tests/ --ignore=tests/viz
+  --collect-only -q` (which keeps `addopts`' `-m 'not slow'`) for the lane,
+  with all six shards together.  It was taken on the release-prep branch, in
+  a local checkout (Python 3.12.3, pytest 9.0.3, jax and jaxlib 0.11.0,
+  Hypothesis 6.165.3, CPU, SkyPilot absent as on CI) with more optional
+  extras installed than CI, which may therefore collect fewer.  CI's passed,
+  skipped and xfailed counts for each jax lane are those of the tag's run.
+  Before this release-time count, the line read 8634 collected on
+  2026-10-02 (8169 in the lane, 432 slow deselected), and the figures it
+  carried until the round-3 audit were older still: 6386 collected at `1ad3fa2`
   (2026-09-24), where CI (run 36072885507) passed 5986 on jax 0.10.2 and
   5985 on jax 0.11.2.  The number before that — "1680 passed, 3 skipped" — was written for v0.2.1
   (`6a597f2`, 2026-05-30) and copied verbatim into these notes by

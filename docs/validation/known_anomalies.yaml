@@ -20940,7 +20940,11 @@ anomalies:
       one that needs a build.  Resolved in 0.4.1: `all` no longer holds
       PyGObject (it is every feature extra but `usd` and `streaming`, plus
       the RunPod and Lambda cloud providers), `streaming` keeps it, and the
-      installation guide states streaming's system prerequisites.
+      installation guide states streaming's system prerequisites.  The
+      defective artefact is the package metadata (the `all` and `dev`
+      extras of `pyproject.toml`); the component named below is the module
+      whose optional dependency `all` carried, since the registry names
+      importable symbols only.
     severity: "minor"
     safety_relevance: "not_safety_relevant"
     safety_relevance_rationale: >
@@ -20949,8 +20953,7 @@ anomalies:
       the system package manager, so PyGObject from pip never made it work
       on its own.
     affected_components:
-      - "pyproject.toml [project.optional-dependencies] all"
-      - "pyproject.toml [project.optional-dependencies] dev"
+      - "maddening.cloud.selkies_session"
     affected_versions: ">=0.1.0, <0.4.1"
     workaround: >
       On 0.4.0 and earlier, name the extras of `all` but `streaming`:

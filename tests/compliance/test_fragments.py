@@ -954,3 +954,36 @@ class TestTwoLines:
         assert check_fragments.findings(root, "HEAD^1") == []
         status, _, err = _gate(gate, root, capsys)
         assert status == 0, err
+
+
+# ---------------------------------------------------------------------------
+# CI runs the gate with the ratchet
+# ---------------------------------------------------------------------------
+
+def test_the_compliance_job_runs_the_ratchet_against_the_right_base(tmp_path):
+    """The step's script, run under bash as GitHub runs it, with a stand-in
+    python that records what it was asked to do."""
+    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text())
+    steps = workflow["jobs"]["compliance"]["steps"]
+    assert steps[0]["uses"].startswith("actions/checkout@")
+    assert steps[0]["with"]["fetch-depth"] == 0, "the ratchet reads the base's history"
+    ratchet = [s for s in steps if "check_fragments.py" in s.get("run", "")]
+    assert len(ratchet) == 1, "the compliance job runs scripts/check_fragments.py once"
+    step = ratchet[0]
+    assert "continue-on-error" not in step and "if" not in step
+    assert step["env"] == {"EVENT": "${{ github.event_name }}",
+                           "BASE_REF": "${{ github.base_ref }}"}
+    fake = tmp_path / "bin" / "python"
+    fake.parent.mkdir()
+    fake.write_text('#!/bin/sh\necho "$@" >> "$OUT"\n')
+    fake.chmod(0o755)
+    for event, base, want in (
+            ("pull_request", "release/0.4.2", "scripts/check_fragments.py --base origin/release/0.4.2"),
+            ("push", "", "scripts/check_fragments.py --base HEAD^1")):
+        out = tmp_path / f"{event}.txt"
+        env = {"PATH": f"{fake.parent}:{os.environ['PATH']}", "OUT": str(out),
+               "EVENT": event, "BASE_REF": base}
+        subprocess.run(["bash", "-e", "-c", step["run"]], env=env, check=True, cwd=tmp_path)
+        assert out.read_text().strip() == want
+    names = [s.get("name", "") for s in steps]
+    assert names.index(step["name"]) < names.index("Run compliance tests")

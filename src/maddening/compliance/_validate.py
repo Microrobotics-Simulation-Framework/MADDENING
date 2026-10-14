@@ -36,11 +36,6 @@ from typing import Iterator, NamedTuple, Optional
 
 import yaml
 
-#: libyaml's loader where PyYAML was built with it, else the pure-Python one.
-#: The two build the same objects from a valid document; the C one is about
-#: ten times faster on a registry of several hundred entries.
-_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
-
 
 _VALID_SEVERITIES = {"critical", "major", "minor", "enhancement"}
 _VALID_SAFETY_RELEVANCES = {
@@ -650,22 +645,53 @@ def validate_anomaly_registry(
         If ``version_field`` is given and is not itself a project version
         field name.
     """
+    _check_version_field_argument(version_field)
+    with open(path) as f:
+        data = yaml.safe_load(f)
+    return _validate_registry_document(
+        path, data, prefix=prefix, repo_root=repo_root,
+        resolve_references=resolve_references, notes=notes,
+        version_field=version_field)
+
+
+def _check_version_field_argument(version_field: Optional[str]) -> None:
     if version_field is not None and not _is_version_field_name(version_field):
         raise ValueError(
             f"version_field {version_field!r} is not a project version field "
             f"name: it must be a key named '<project>_version' with <project> "
             f"matching [a-z][a-z0-9_]*, and not 'schema_version'"
         )
+
+
+def _validate_registry_document(
+    path: str,
+    data: object,
+    *,
+    prefix: str = "",
+    repo_root: Optional[str] = None,
+    resolve_references: bool = True,
+    notes: Optional[list[str]] = None,
+    version_field: Optional[str] = None,
+) -> list[str]:
+    """:func:`validate_anomaly_registry` on ``data``, ``path`` already loaded.
+
+    ``data`` must be what ``yaml.safe_load`` gives for the file at ``path``:
+    :func:`validate_anomaly_registry` loads it so, and a caller with rules of
+    its own over the same file (``scripts/check_anomalies.py``) loads it
+    once, the same way, and hands it here.  The document is only read.
+    """
+    _check_version_field_argument(version_field)
     # One run: every test file the entries cite is parsed once, however
     # often it is cited (or once for the caller's whole run, when the
     # caller holds an outer ``parse_cache``).
     with parse_cache():
-        return _registry_errors(path, prefix, repo_root, resolve_references,
-                                notes, version_field)
+        return _registry_errors(path, data, prefix, repo_root,
+                                resolve_references, notes, version_field)
 
 
 def _registry_errors(
     path: str,
+    data: object,
     prefix: str,
     repo_root: Optional[str],
     resolve_references: bool,
@@ -673,9 +699,6 @@ def _registry_errors(
     version_field: Optional[str],
 ) -> list[str]:
     """:func:`validate_anomaly_registry`'s findings, inside its run's cache."""
-    with open(path) as f:
-        data = yaml.load(f, Loader=_YAML_LOADER)
-
     errors: list[str] = []
 
     # Top-level structure

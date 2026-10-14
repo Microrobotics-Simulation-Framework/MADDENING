@@ -397,3 +397,116 @@ class TestTheCacheLivesForOneRun:
             with parse_cache():
                 assert _validate._parse(path) is None
                 assert _validate._parse(path) is None
+
+
+# ---------------------------------------------------------------------------
+# The registry is loaded as it always was
+# ---------------------------------------------------------------------------
+
+_ONE_ENTRY = '''\
+schema_version: "1.0"
+maddening_version: "0.4.0.dev0"
+generated_date: "2026-03-12"
+anomalies:
+  - anomaly_id: "MADD-ANO-001"
+    title: "One entry"
+    description: >
+      Seeded.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: "Seeded."
+    affected_components:
+      - "maddening.nodes.heat.HeatNode"
+    affected_versions: ">=0.1.0"
+    resolution_status: "open"
+    verification:
+      - "tests/test_probe.py::test_runs"
+'''
+
+# Documents on which libyaml's loader and PyYAML's pure-Python loader
+# disagree (the pre-merge audit's four, and one more a fuzz found): the
+# first three only the C loader reads, the last two only the Python one.
+_LOADERS_DISAGREE = {
+    "a tab after a colon": ('severity: "minor"', 'severity:\t"minor"'),
+    "a trailing tab": ('title: "One entry"', 'title: "One entry"\t'),
+    "a block scalar header with a comment and no space": (
+        "description: >\n", "description: >#seeded\n"),
+    "a byte-order mark inside the document": (
+        "generated_date:", "\ufeffgenerated_date:"),
+    "a lone surrogate escape": ('title: "One entry"', 'title: "One \\ud800"'),
+}
+
+
+def _safe_load_refuses(text):
+    import yaml
+
+    try:
+        yaml.safe_load(text)
+    except yaml.YAMLError:
+        return True
+    return False
+
+
+class TestTheRegistryIsLoadedAsItAlwaysWas:
+    """``validate_anomaly_registry`` is public: downstreams call it on their
+    own registries, and its verdict must not depend on whether PyYAML was
+    built with libyaml.  It loads with ``yaml.safe_load``, as it always did,
+    and so does the gate, once, for every rule: a registry or fragment the
+    gate passes then loads wherever else it is read (the SOUP generator,
+    the assembler), and one ``yaml.safe_load`` refuses the gate refuses."""
+
+    @pytest.mark.parametrize("case", sorted(_LOADERS_DISAGREE))
+    def test_the_public_validator_reads_what_safe_load_reads(self, tmp_path, case):
+        import yaml
+
+        old, new = _LOADERS_DISAGREE[case]
+        text = _ONE_ENTRY.replace(old, new, 1)
+        assert text != _ONE_ENTRY
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(text, encoding="utf-8")
+        if _safe_load_refuses(text):
+            with pytest.raises(yaml.YAMLError):
+                validate_anomaly_registry(str(path), resolve_references=False)
+        else:
+            assert isinstance(
+                validate_anomaly_registry(str(path), resolve_references=False), list)
+
+    @pytest.mark.parametrize("case", sorted(_LOADERS_DISAGREE))
+    def test_the_gate_refuses_what_safe_load_refuses(self, gate, tmp_path, capsys,
+                                                     case):
+        old, new = _LOADERS_DISAGREE[case]
+        text = _ONE_ENTRY.replace(old, new, 1)
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(text, encoding="utf-8")
+        status, _, err = _gate_run(gate, capsys, path, "--no-resolve")
+        refused = _safe_load_refuses(text)
+        assert ("does not parse as YAML" in err) is refused, err
+        if refused:
+            assert status == 1
+
+    def test_the_cases_are_ones_the_loaders_disagree_on(self):
+        """Else the two tests above prove nothing on this PyYAML build."""
+        import yaml
+
+        if not getattr(yaml, "__with_libyaml__", False):
+            pytest.skip("PyYAML without libyaml: there is no second loader")
+
+        def verdict(text, loader):
+            try:
+                return repr(yaml.load(text, Loader=loader))
+            except yaml.YAMLError:
+                return "refused"
+
+        for case, (old, new) in _LOADERS_DISAGREE.items():
+            text = _ONE_ENTRY.replace(old, new, 1)
+            assert verdict(text, yaml.SafeLoader) != verdict(text, yaml.CSafeLoader), case
+
+    def test_one_load_serves_the_validator_and_the_gates_rules(self, gate, seeded,
+                                                               capsys, monkeypatch):
+        root, path = seeded
+        loads = []
+        real = gate._load_registry
+        monkeypatch.setattr(gate, "_load_registry",
+                            lambda p: loads.append(p) or real(p))
+        _gate_run(gate, capsys, path, "--repo-root", root)
+        assert loads == [str(path)]

@@ -37,9 +37,12 @@ on:
     - cron: '0 16 * * 1,3,5'
   workflow_dispatch:       # also runnable on demand from the Actions tab
 
+# Runner image: `ubuntu-24.04`, not `ubuntu-latest`, which becomes Ubuntu 26.04
+# on 2026-10-19.  See the note at the top of ci.yml; moving to 26.04 is a
+# deliberate pull request of its own.
 jobs:
   slow:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The job's own limit, which starts before the first step: GitHub sets
     # up the job (and, on a degraded runner, took 11 minutes over it on
     # 2026-10-13) before any step of ours runs.  pytest's own limit is
@@ -94,6 +97,12 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Runner health (machine)
+        # The CPU model, vCPU count and memory of the runner this job drew
+        # (the slow lane never logged its CPU), and the start of the clock
+        # the canary reads the install time from.  As in ci.yml.
+        run: python scripts/ci_runner_health.py machine
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -101,8 +110,27 @@ jobs:
           pip install "jax==${{ matrix.jax-version }}" "jaxlib==${{ matrix.jax-version }}"
           pip install -e ".[ci]"
 
+      - name: Runner canary (degraded runner check)
+        # As in ci.yml: a fixed CPU micro-benchmark and the install time,
+        # and the job stops at once, exit 75, when either is far outside
+        # what a healthy runner does.  On 2026-10-13 a runner that took 9
+        # minutes to install (about 1 normally) ran every test about ten
+        # times slower and the shard ended in the timeout.  Limits and their
+        # data: scripts/ci_runner_health.py.
+        id: canary
+        run: python scripts/ci_runner_health.py canary --label "slow lane JAX ${{ matrix.jax-version }} shard ${{ matrix.shard }}/10"
+
+      - name: Mark a degraded runner
+        if: ${{ always() && steps.canary.outputs.degraded == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: degraded-runner-${{ job.check_run_id }}
+          path: ${{ runner.temp }}/degraded-runner.json
+          retention-days: 7
+          if-no-files-found: error
+
       - name: Install C toolchain for the FMU wrapper tests
-        # As in ci.yml: valgrind is not on ubuntu-latest, and the valgrind
+        # As in ci.yml: valgrind is not on the ubuntu-24.04 image, and the valgrind
         # and libFuzzer runs of tests/fmi/test_c_unit.py are slow-marked,
         # so this lane is the only one that runs them.  Each self-skips
         # when its tool is missing; without this step the valgrind run
@@ -112,6 +140,10 @@ jobs:
         # fails and is rerun, instead of spending the lane's 180.
         timeout-minutes: 10
         run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind clang
+
+      - name: Runner health (before the tests)
+        id: health-before
+        run: python scripts/ci_runner_health.py before-tests
 
       - name: Run full suite (slow lane)
         id: pytest
@@ -188,6 +220,13 @@ jobs:
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
           echo "elapsed_sec=$(( SECONDS - start ))" >> "$GITHUB_OUTPUT"
 
+      - name: Runner health (after the tests)
+        # Memory at the end of the test step and the CPU steal time over it
+        # (/proc/stat), and the sidecar that tells the weights tooling which
+        # CPU this shard's times were measured on.
+        if: ${{ !cancelled() && steps.health-before.outcome == 'success' }}
+        run: python scripts/ci_runner_health.py after-tests --label "slow lane JAX ${{ matrix.jax-version }} shard ${{ matrix.shard }}/10" --sidecar runner-shard${{ matrix.shard }}.json
+
       - name: Test durations
         # Report only (--fail-over 0): this lane is where slow tests are
         # meant to be.  The table still shows which of them cost the most,
@@ -214,11 +253,14 @@ jobs:
             --shard "${{ matrix.shard }}/10:weighted"
 
       - name: Upload test durations
-        if: ${{ !cancelled() }}
+        # Not after a degraded runner: see "Mark a degraded runner" above.
+        if: ${{ !cancelled() && steps.canary.outcome != 'failure' }}
         uses: actions/upload-artifact@v4
         with:
           name: slow-durations-py${{ matrix.python-version }}-jax${{ matrix.jax-version }}-shard${{ matrix.shard }}of10
-          path: test-results-shard${{ matrix.shard }}.xml
+          path: |
+            test-results-shard${{ matrix.shard }}.xml
+            runner-shard${{ matrix.shard }}.json
           retention-days: 90
           if-no-files-found: warn
 
@@ -287,7 +329,7 @@ jobs:
                 `The slow-tests workflow was killed by the OS while running pytest`,
                 `(exit ${code}, SIGKILL — the Linux OOM-killer signature; killed after ${Math.round(elapsed / 60)} min,`,
                 `well under the ${limitMin}-minute timeout, so this is a *memory* failure, not a`,
-                `slow test).  A test's working set exceeded the 16 GB of the \`ubuntu-latest\``,
+                `slow test).  A test's working set exceeded the 16 GB of the \`ubuntu-24.04\``,
                 `runner — most likely an XLA backward-compile graph.`,
                 ``,
                 `Action — either:`,

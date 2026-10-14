@@ -6,6 +6,17 @@ on:
   pull_request:
     branches: [main, "release/**"]
 
+# Runner image: every job says `runs-on: ubuntu-24.04`, never `ubuntu-latest`.
+# `ubuntu-latest` becomes Ubuntu 26.04 on 2026-10-19, which would change the
+# image (apt package names, the system Python, glibc) in the middle of a
+# release cycle and under every pinned dependency.  Moving to 26.04 is a
+# deliberate pull request of its own: change every `runs-on` in
+# .github/workflows together, regenerate the SOUP tables
+# (scripts/generate_soup_tables.py), and re-measure the test lanes
+# (a new image is a new baseline for the weights tables and for the
+# degraded-runner limits in scripts/ci_runner_health.py).
+# tests/compliance/test_ci_workflows.py holds every `runs-on` to the pin.
+
 # One run per branch or PR at a time.  The organisation's plan runs sixty
 # jobs at once across its repositories and every run of this workflow
 # costs about nineteen, so a run nobody will read holds up everyone's CI.
@@ -44,7 +55,7 @@ jobs:
   # (package content, but nothing the test lanes read).  Renames are not
   # detected, so a rename out of a code path lists the source path too.
   changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       code: ${{ steps.classify.outputs.code }}
       cold: ${{ steps.classify.outputs.cold }}
@@ -107,7 +118,7 @@ jobs:
   test:
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       # Two lanes: every supported interpreter crossed with every JAX
       # minor the declared range can reach.
@@ -185,6 +196,12 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Runner health (machine)
+        # The CPU model, the vCPU count and the memory of the runner this job
+        # drew, and the start of the clock the canary reads the install time
+        # from.  scripts/ci_runner_health.py says why.
+        run: python scripts/ci_runner_health.py machine
+
       - name: Install dependencies
         env:
           # The versions CI installs against (ci/constraints.txt, written by
@@ -198,8 +215,28 @@ jobs:
           pip install "jax==${{ matrix.jax-version }}" "jaxlib==${{ matrix.jax-version }}"
           pip install -e ".[ci]"
 
+      - name: Runner canary (degraded runner check)
+        # Times a fixed CPU micro-benchmark and reads how long the install
+        # took, and stops the job at once -- exit 75, an error annotation
+        # "Degraded runner" and the artifact degraded-runner-<job id> -- when
+        # either is far outside anything a healthy runner does (limits and
+        # their data: scripts/ci_runner_health.py).  A degraded runner would
+        # otherwise burn hours and report a slow test run.
+        # .github/workflows/rerun-degraded.yml re-runs such a job once.
+        id: canary
+        run: python scripts/ci_runner_health.py canary --label "per-push JAX ${{ matrix.jax-version }} shard ${{ matrix.shard }}/6"
+
+      - name: Mark a degraded runner
+        if: ${{ always() && steps.canary.outputs.degraded == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: degraded-runner-${{ job.check_run_id }}
+          path: ${{ runner.temp }}/degraded-runner.json
+          retention-days: 7
+          if-no-files-found: error
+
       - name: Install C toolchain for the FMU wrapper tests
-        # gcc + clang ship on ubuntu-latest; valgrind does not.  Per push,
+        # gcc + clang ship on the ubuntu-24.04 image; valgrind does not.  Per push,
         # tests/fmi/test_c_unit.py builds the wrapper with the default `cc`
         # (gcc), plain and with ASan/UBSan, and runs the fuzz binary under
         # valgrind (test_fuzz_under_valgrind), which self-skips without it:
@@ -272,6 +309,10 @@ jobs:
           key: ${{ steps.cc.outputs.key }}-${{ github.sha }}
           restore-keys: ${{ steps.cc.outputs.key }}-
 
+      - name: Runner health (before the tests)
+        id: health-before
+        run: python scripts/ci_runner_health.py before-tests
+
       - name: Run tests
         id: tests
         env:
@@ -323,6 +364,13 @@ jobs:
             --durations=0 --durations-min=1.0 \
             --junitxml=test-results-shard${{ matrix.shard }}.xml -o junit_family=xunit1
 
+      - name: Runner health (after the tests)
+        # Memory at the end of the test step and the CPU steal time over it
+        # (/proc/stat), and the sidecar that tells the weights tooling which
+        # CPU this shard's times were measured on.
+        if: ${{ !cancelled() && steps.health-before.outcome == 'success' }}
+        run: python scripts/ci_runner_health.py after-tests --label "per-push JAX ${{ matrix.jax-version }} shard ${{ matrix.shard }}/6" --sidecar runner-shard${{ matrix.shard }}.json
+
       - name: Test time budget
         # Runs after a red test step too.  The gate half only: warns on any
         # test over 5 s that is not on tests/duration_allowlist.txt and
@@ -336,7 +384,7 @@ jobs:
         # everywhere else and failed a pull request (2026-10-13).  A test
         # over the line twice still fails.  The re-run is a pytest of this
         # checkout, so it needs the environment the test step runs in.
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.canary.outcome != 'failure' }}
         env:
           JAX_PLATFORMS: cpu
           XLA_FLAGS: "--xla_gpu_autotune_level=0"
@@ -376,13 +424,16 @@ jobs:
       - name: Upload test durations
         # Kept 90 days so a regression can be traced to the run that
         # introduced it without re-running anything.
-        if: ${{ !cancelled() }}
+        # Not after a degraded runner: nothing ran, and a re-run of the job
+        # (rerun-degraded.yml) could not upload this name again.
+        if: ${{ !cancelled() && steps.canary.outcome != 'failure' }}
         uses: actions/upload-artifact@v4
         with:
           name: test-durations-py${{ matrix.python-version }}-jax${{ matrix.jax-version }}-shard${{ matrix.shard }}of6
           path: |
             test-results-shard${{ matrix.shard }}.xml
             cache-mode-shard${{ matrix.shard }}.txt
+            runner-shard${{ matrix.shard }}.json
           retention-days: 90
           if-no-files-found: warn
 
@@ -398,7 +449,7 @@ jobs:
     name: Test durations
     needs: [changes, test]
     if: ${{ !cancelled() && needs.changes.outputs.code == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -436,7 +487,7 @@ jobs:
   test-usd:
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -506,7 +557,7 @@ jobs:
     # about 30 s.
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -535,7 +586,7 @@ jobs:
     # file that names lineax is missing from the list below.
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -610,7 +661,7 @@ jobs:
     # verdicts are independent and both are visible in the summary.
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -688,7 +739,7 @@ jobs:
           exit "$rc"
 
   compliance:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -796,7 +847,7 @@ jobs:
   verify-hypothesis:
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 

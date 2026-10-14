@@ -315,14 +315,14 @@ def test_the_weights_generator_writes_a_table_the_split_reads(tmp_path):
         [sys.executable, str(REPO_ROOT / "scripts" / "slow_lane_weights.py"),
          "--run", f"11={tmp_path / 'r1'}", "--run", f"22={tmp_path / 'r2'}",
          "--commit", "11=abc1234", "--commit", "22=def5678", "--shards", "2",
-         "--write", "--output", str(out)],
+         "--aggregate", "last", "--write", "--output", str(out)],
         capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     table = json.loads(out.read_text(encoding="utf-8"))
     # a: its slower lane (61 s, two tests summed).  b: under the floor.  c: the
     # later run's 20 s on one lane, the first run's 90 s on the other.
     assert table["seconds"] == {real_a: 61, real_c: 90}
-    # No --lane: the slow lane's table, last run wins.
+    # No --lane: the slow lane's table; --aggregate last: the last run wins.
     assert "slow lane" in table["what"] and "the later" in table["measured"], table
     assert [(r["run"], r["commit"]) for r in table["runs"]] == [("11", "abc1234"), ("22", "def5678")]
     assert table["runs"][1]["artifacts"] == ["slow-durations-py3.12-jax0.10.2-shard2of2"]
@@ -337,7 +337,7 @@ def test_the_weights_generator_writes_a_table_the_split_reads(tmp_path):
 
 
 def test_the_per_push_lane_table_is_the_median_of_the_runs_it_names(tmp_path):
-    """``--lane per-push --aggregate median``: one slow runner in three does not set a file's weight.
+    """``--lane per-push`` (median by default): one slow runner in three does not set a file's weight.
 
     Three cold runs measured a on one JAX lane at 60, 600 and 70 s -- the
     middle one is 70 -- and b at 100 s on every run; c was added after the
@@ -361,8 +361,11 @@ def test_the_per_push_lane_table_is_the_median_of_the_runs_it_names(tmp_path):
     assert "per-push lane" in table["what"], table
     # The lane's own shard count is the default prediction.
     assert f"weighted, {_sharding.PER_PUSH_SHARDS} shards" in proc.stdout
-    # The default stays the last run's, which is what the slow lane's table is.
+    # The median is the default now, for both lanes; the last run's is --aggregate last.
     proc = subprocess.run(command, capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert json.loads(out.read_text(encoding="utf-8"))["seconds"] == {real_a: 70, real_b: 100, real_c: 40}
+    proc = subprocess.run([*command, "--aggregate", "last"], capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert json.loads(out.read_text(encoding="utf-8"))["seconds"] == {real_a: 70, real_b: 100, real_c: 50}
 

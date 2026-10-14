@@ -15,8 +15,12 @@ name: Slow tests (scheduled)
 #     -- including timeouts (a timed-out job is a failed job).  Silent
 #     on success.
 #   * On a *timeout*, an *out-of-memory* kill or an *abort* (SIGABRT)
-#     specifically, we ALSO open a tracking issue via the built-in
-#     GITHUB_TOKEN.  GitHub then emails repo watchers with a body that
+#     specifically, on `main` and on `release/**` only, we ALSO open a
+#     tracking issue via the built-in GITHUB_TOKEN.  A run dispatched on
+#     any other branch (an integration branch, a throwaway branch of a
+#     validation) opens none: a slow runner there would file a public
+#     issue about a branch nobody will read.  Its failure is still red and
+#     emailed.  GitHub then emails repo watchers with a body that
 #     names the failure mode and suggests the right fix (investigate/bump
 #     the timeout, shrink the offending test's memory footprint, or look
 #     for a native memory bug).  This is the only way to
@@ -36,7 +40,14 @@ on:
 jobs:
   slow:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    # The job's own limit, which starts before the first step: GitHub sets
+    # up the job (and, on a degraded runner, took 11 minutes over it on
+    # 2026-10-13) before any step of ours runs.  pytest's own limit is
+    # worked out from this in the pytest step (see there), so that it
+    # always fires first and the classifier and issue steps after it still
+    # run.  The same number is JOB_TIMEOUT_MIN in that step's env, and
+    # tests/compliance/test_ci_workflows.py holds the two together.
+    timeout-minutes: 200
     permissions:
       contents: read
       issues: write        # required for the timeout-issue creation step
@@ -68,6 +79,14 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
     steps:
+      - name: Start the job clock
+        # The first step: pytest's time limit is the job's, less what the
+        # job has already used (see "Run full suite (slow lane)").  What
+        # happened before this step -- setting up the job -- is not seen
+        # here, and the pytest step allows for it separately.
+        id: clock
+        run: echo "job_start=$(date +%s)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
 
       - name: Set up Python ${{ matrix.python-version }}
@@ -117,24 +136,51 @@ jobs:
           # puts several files holding compiled graphs on one shard runs the
           # runner out of memory (an abort inside an XLA compile).
           MADDENING_TEST_RELEASE_BETWEEN_FILES: "1"
+          # pytest's time limit.  The job's own limit counts from before
+          # the first step, so a limit that only counted from here could
+          # outlast it: on 2026-10-13 a degraded runner took 11 minutes to
+          # set up, the job's 180 minutes ran out under `timeout 175m`, and
+          # the classifier and issue steps never ran ("The operation was
+          # canceled").  So the limit is what the job has left: the job's
+          # minutes, less what the clock step saw used, less an allowance
+          # for the setup it could not see, less a margin for the steps
+          # after pytest -- and never more than PYTEST_MAX_MIN.  The
+          # three allowances and the maximum must sum to less than the job's
+          # own limit (tests/compliance/test_ci_workflows.py).
+          JOB_START: ${{ steps.clock.outputs.job_start }}
+          JOB_TIMEOUT_MIN: "200"
+          PYTEST_MAX_MIN: "175"
+          UNSEEN_SETUP_MIN: "15"
+          CLASSIFY_MARGIN_MIN: "5"
         run: |
           # Wrap pytest with GNU ``timeout`` so we exit with code 124
           # on time-out (instead of GitHub killing the job with a
-          # generic SIGTERM).  175m gives 5 minutes of headroom under
-          # the job-level ``timeout-minutes: 180``, leaving room for
-          # the follow-up issue-creation step to finish.
+          # generic SIGTERM).  The limit is worked out below from what
+          # the job has left, so it fires before the job-level
+          # ``timeout-minutes`` and leaves room for the follow-up
+          # issue-creation step to finish.
           #
           # ``--kill-after=60s`` escalates to SIGKILL if a test ignores
           # the expiry SIGTERM (e.g. a long native XLA call), so a hang
           # can't fall through to the job-level cap and produce an
           # opaque "operation was canceled" teardown.  We also record
-          # elapsed wall-time: an exit 137 (SIGKILL) at/after the 175m
-          # mark is a timeout-kill, whereas an earlier 137 is the Linux
+          # elapsed wall-time: an exit 137 (SIGKILL) at/after the limit
+          # (`limit_sec`, written below) is a timeout-kill, whereas an
+          # earlier 137 is the Linux
           # OOM-killer (memory) -- the classifier below uses this to
           # tell the two apart.
           set +e
+          now=$(date +%s)
+          used=$(( now - ${JOB_START:-$now} ))
+          limit=$(( (JOB_TIMEOUT_MIN - UNSEEN_SETUP_MIN - CLASSIFY_MARGIN_MIN) * 60 - used ))
+          max=$(( PYTEST_MAX_MIN * 60 ))
+          if [ "$limit" -gt "$max" ]; then limit=$max; fi
+          # A floor: `timeout 0` means no limit at all.
+          if [ "$limit" -lt 60 ]; then limit=60; fi
+          echo "limit_sec=$limit" >> "$GITHUB_OUTPUT"
+          echo "the job used $(( used / 60 )) min before pytest; pytest may run $(( limit / 60 )) min"
           start=$SECONDS
-          timeout --kill-after=60s 175m python -m pytest tests/ \
+          timeout --kill-after=60s "${limit}s" python -m pytest tests/ \
               -m 'slow or not slow' -v -rs --tb=short --ignore=tests/viz \
               --durations=0 --durations-min=1.0 \
               --junitxml=test-results-shard${{ matrix.shard }}.xml -o junit_family=xunit1
@@ -145,7 +191,8 @@ jobs:
       - name: Test durations
         # Report only (--fail-over 0): this lane is where slow tests are
         # meant to be.  The table still shows which of them cost the most,
-        # and how close the lane is to its 175-minute wrapper timeout.
+        # and how close the lane is to its wrapper timeout (at most
+        # 175 minutes, less what a slow job setup used).
         # pytest writes no XML when the timeout kills it, hence the guard.
         if: ${{ !cancelled() && hashFiles('test-results-shard*.xml') != '' }}
         run: |
@@ -153,6 +200,18 @@ jobs:
             --fail-over 0 --cache-mode off \
             --no-removable \
             --title "Slow lane durations (Python ${{ matrix.python-version }}, JAX ${{ matrix.jax-version }}, shard ${{ matrix.shard }} of 10)"
+
+      - name: Weights against this run
+        # Warn when this shard ran far past what tests/slow_lane_weights.json
+        # predicted for it, naming the files the table has not measured: the
+        # table goes stale without a sound (a file added since is placed by
+        # hash; on 2026-10-11 shard 10 ran 95 to 153 minutes against 63
+        # predicted), and a warning here prompts the refresh instead of the
+        # next timeout.  It reports only.
+        if: ${{ !cancelled() && hashFiles('test-results-shard*.xml') != '' }}
+        run: |
+          python scripts/slow_lane_drift.py test-results-shard${{ matrix.shard }}.xml \
+            --shard "${{ matrix.shard }}/10:weighted"
 
       - name: Upload test durations
         if: ${{ !cancelled() }}
@@ -164,12 +223,18 @@ jobs:
           if-no-files-found: warn
 
       - name: Classify failure and open tracking issue
-        if: steps.pytest.outputs.exit_code != '0'
+        # Only for a run on `main` or on `release/**` (see the header): a
+        # dispatch on any other branch must not open a public issue.
+        if: steps.pytest.outputs.exit_code != '0' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
         uses: actions/github-script@v7
         with:
           script: |
             const code = '${{ steps.pytest.outputs.exit_code }}';
             const elapsed = Number('${{ steps.pytest.outputs.elapsed_sec }}');
+            // The limit the pytest step gave pytest: 175 minutes, or what the
+            // job had left when a slow setup used some of them.
+            const limitSec = Number('${{ steps.pytest.outputs.limit_sec }}') || 175 * 60;
+            const limitMin = Math.round(limitSec / 60);
             const py = '${{ matrix.python-version }}';
             const jaxv = '${{ matrix.jax-version }}';
             const shard = '${{ matrix.shard }}';
@@ -181,8 +246,8 @@ jobs:
             //   137 (SIGKILL) -> ambiguous: the Linux OOM-killer (memory)
             //                    OR `timeout`'s --kill-after escalation on
             //                    a SIGTERM-ignoring hang.  Split by elapsed
-            //                    wall-time: a kill at/after the 175m mark is
-            //                    a timeout; an earlier kill is OOM.
+            //                    wall-time: a kill at/after the limit is a
+            //                    timeout; an earlier kill is OOM.
             //   134 (SIGABRT) -> ambiguous too: C++ std::bad_alloc (memory),
             //                    OR a native assertion or glibc's abort on
             //                    heap corruption -- this lane loads native
@@ -192,19 +257,18 @@ jobs:
             //                    as an abort, naming both.
             // Anything else is an ordinary pytest failure -> no issue, just
             // the default "Run failed" email + the re-raise step below.
-            const TIMEOUT_SEC = 175 * 60;
-            const isTimeout = code === '124' || (code === '137' && elapsed >= TIMEOUT_SEC);
-            const isOom = code === '137' && elapsed < TIMEOUT_SEC;
+            const isTimeout = code === '124' || (code === '137' && elapsed >= limitSec);
+            const isOom = code === '137' && elapsed < limitSec;
             const isAbort = code === '134';
 
             let title, body;
             if (isTimeout) {
               title = `slow-tests: timeout on Python ${py} / JAX ${jaxv} / shard ${shard}/10 @ ${sha}`;
               body = [
-                `The slow-tests workflow hit the 175-minute wrapper timeout`,
-                `(the job-level \`timeout-minutes\` is 180; the inner \`timeout 175m\`,`,
-                `wrapping pytest, fires first so we can distinguish timeout from other`,
-                `failures).`,
+                `The slow-tests workflow hit the ${limitMin}-minute wrapper timeout`,
+                `(pytest's limit: at most 175 minutes, less what the job had used before`,
+                `pytest started; the job-level \`timeout-minutes\` is 200.  The wrapper`,
+                `fires first so we can distinguish timeout from other failures).`,
                 ``,
                 `Action — either:`,
                 ``,
@@ -213,15 +277,16 @@ jobs:
                 `   shard is simply holding more than its share, rebalance: see`,
                 `   \`scripts/slow_lane_weights.py\`.`,
                 `2. **Bump the timeout.** Edit \`.github/workflows/slow-tests.yml\` and`,
-                `   raise both \`timeout-minutes\` (currently 180) and the inner`,
-                `   \`timeout 175m\` (keep ~5 min headroom between them).`,
+                `   raise \`PYTEST_MAX_MIN\` (currently 175) together with the job's`,
+                `   \`timeout-minutes\` and \`JOB_TIMEOUT_MIN\` (currently 200: keep`,
+                `   \`PYTEST_MAX_MIN\` + \`UNSEEN_SETUP_MIN\` + \`CLASSIFY_MARGIN_MIN\` under it).`,
               ];
             } else if (isOom) {
               title = `slow-tests: out-of-memory on Python ${py} / JAX ${jaxv} / shard ${shard}/10 @ ${sha}`;
               body = [
                 `The slow-tests workflow was killed by the OS while running pytest`,
                 `(exit ${code}, SIGKILL — the Linux OOM-killer signature; killed after ${Math.round(elapsed / 60)} min,`,
-                `well under the 175-minute timeout, so this is a *memory* failure, not a`,
+                `well under the ${limitMin}-minute timeout, so this is a *memory* failure, not a`,
                 `slow test).  A test's working set exceeded the 16 GB of the \`ubuntu-latest\``,
                 `runner — most likely an XLA backward-compile graph.`,
                 ``,
@@ -263,6 +328,11 @@ jobs:
               title,
               body: [...body, ``, `Workflow run: ${runUrl}`].join('\n'),
             });
+
+      - name: Say that no tracking issue is opened
+        if: steps.pytest.outputs.exit_code != '0' && github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/release/')
+        run: |
+          echo "::notice title=No tracking issue::pytest exited ${{ steps.pytest.outputs.exit_code }} on ${{ github.ref }}; tracking issues are opened only for runs on main and release/**"
 
       - name: Re-raise pytest failure
         if: steps.pytest.outputs.exit_code != '0'

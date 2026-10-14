@@ -2351,7 +2351,7 @@ class TestAnomalyGateVerifiesSomething:
         path.write_text(_minimal_anomaly(status="open"))
 
         def every_reference_unavailable(
-            _path, *, prefix="", repo_root=None,
+            _path, _document, *, prefix="", repo_root=None,
             resolve_references=True, notes=None, version_field=None,
         ):
             if notes is not None:
@@ -2362,8 +2362,11 @@ class TestAnomalyGateVerifiesSomething:
                 )
             return []
 
+        # The gate loads the registry once and hands the document to the
+        # validator's document entry point (``validate_anomaly_registry``
+        # minus the load).
         monkeypatch.setattr(
-            gate, "validate_anomaly_registry", every_reference_unavailable
+            gate, "_validate_registry_document", every_reference_unavailable
         )
         assert gate.main([str(path), "--repo-root", str(REPO_ROOT)]) == 1
 
@@ -2380,14 +2383,14 @@ class TestAnomalyGateVerifiesSomething:
         ))
 
         def one_unavailable(
-            _path, *, prefix="", repo_root=None,
+            _path, _document, *, prefix="", repo_root=None,
             resolve_references=True, notes=None, version_field=None,
         ):
             if notes is not None:
                 notes.append("MADD-ANO-001: one entry was NOT checked")
             return []
 
-        monkeypatch.setattr(gate, "validate_anomaly_registry", one_unavailable)
+        monkeypatch.setattr(gate, "_validate_registry_document", one_unavailable)
         assert gate.main([str(path), "--repo-root", str(REPO_ROOT)]) == 0
 
     def test_the_summary_separates_verified_from_not_checked(self):

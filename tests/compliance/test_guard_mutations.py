@@ -77,6 +77,8 @@ _SLOW_RULE = "tests/compliance/test_slow_only_rule.py"
 #: mutants need it.
 DUR = (_DURATIONS, "--deselect", _COLLECTS)
 SHARD = (_SHARDING,)
+_HYGIENE = "tests/compliance/test_slow_lane_hygiene.py"
+HYGIENE = (_HYGIENE,)
 WF = (_WORKFLOWS,)
 PRUNE = (_PRUNE,)
 CC = (_COMPILE_CACHE,)
@@ -129,6 +131,9 @@ GUARD_FILES = (_DURATIONS, _SHARDING, _WORKFLOWS, _PRUNE, _COMPILE_CACHE, _SLOW_
                _HUNTS)
 
 
+GUARD_FILES = GUARD_FILES + (_HYGIENE,)
+
+
 @dataclass(frozen=True)
 class Mutant:
     """One seeded fault: replace ``anchor`` (exactly once) in ``file``."""
@@ -152,6 +157,7 @@ PR = "scripts/prune_jax_cache.py"
 CI = ".github/workflows/ci.yml"
 SL = ".github/workflows/slow-tests.yml"
 SWT = "tests/slow_lane_weights.json"
+SLD = "scripts/slow_lane_drift.py"
 SLW = "scripts/slow_lane_weights.py"
 PP = "pyproject.toml"
 AL = "tests/duration_allowlist.txt"
@@ -483,7 +489,7 @@ MUTANTS: tuple[Mutant, ...] = (
        "the valgrind tests skip in the only lane that runs them"),
     _M("Z10", SL, "        timeout-minutes: 10\n        run: sudo apt-get update",
        "        run: sudo apt-get update", CI_ALL,
-       "a silent package mirror holds a slow-lane runner for the job's 180 minutes"),
+       "a silent package mirror holds a slow-lane runner for the job's 200 minutes"),
     _M("Z3", SL, "      - name: Run full suite (slow lane)\n        id: pytest\n        continue-on-error: true\n"
                  "        env:\n",
        "      - name: Run full suite (slow lane)\n        id: pytest\n        continue-on-error: true\n"
@@ -492,8 +498,8 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("Z4", SL, "        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]\n",
        "        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]\n        exclude:\n          - shard: 10\n", CI_ALL,
        "the slow lane's matrix excludes shard 10"),
-    _M("Z5", SL, "          timeout --kill-after=60s 175m python -m pytest tests/ \\\n",
-       "          MADDENING_TEST_SHARD=1/10 timeout --kill-after=60s 175m python -m pytest tests/ \\\n", CI_ALL,
+    _M("Z5", SL, "          timeout --kill-after=60s \"${limit}s\" python -m pytest tests/ \\\n",
+       "          MADDENING_TEST_SHARD=1/10 timeout --kill-after=60s \"${limit}s\" python -m pytest tests/ \\\n", CI_ALL,
        "all ten slow-lane shards run shard 1's files"),
     _M("Z6", SL, '          MADDENING_TEST_SHARD: "${{ matrix.shard }}/10:weighted"',
        '          MADDENING_TEST_SHARD: "${{ matrix.shard }}/10"', SHARD,
@@ -505,6 +511,30 @@ MUTANTS: tuple[Mutant, ...] = (
        "the slow lane's artifacts are named for four shards: a download by name misses six"),
     _M("Z9", SL, "shard ${{ matrix.shard }} of 10)", "shard ${{ matrix.shard }} of 4)", SHARD,
        "a shard's summary is titled 'shard 5 of 4'"),
+    # --- Z, continued: the time limit, the issue gate and the drift warning ----
+    _M("Z11", SL, "          used=$(( now - ${JOB_START:-$now} ))\n", "          used=0\n", HYGIENE,
+       "pytest's limit ignores what the job used before it: a slow setup and the job's own limit fires first"),
+    _M("Z12", SL, '          if [ "$limit" -lt 60 ]; then limit=60; fi\n', "", HYGIENE,
+       "a job nearly out of time runs pytest under `timeout 0`, which is no limit at all"),
+    _M("Z13", SL, '          PYTEST_MAX_MIN: "175"\n', '          PYTEST_MAX_MIN: "199"\n', HYGIENE,
+       "pytest may run to within a minute of the job's limit: the classifier steps cannot finish"),
+    _M("Z14", SL, '          if [ "$limit" -gt "$max" ]; then limit=$max; fi\n', "", HYGIENE,
+       "pytest's limit is the job's whatever is left, up to 200 minutes: nothing is kept for the steps after it"),
+    _M("Z15", SL, "        if: steps.pytest.outputs.exit_code != '0' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))\n",
+       "        if: steps.pytest.outputs.exit_code != '0'\n", HYGIENE,
+       "a slow lane dispatched on a throwaway branch opens a public tracking issue"),
+    _M("Z16", SL, "|| startsWith(github.ref, 'refs/heads/release/'))\n", "|| startsWith(github.ref, 'refs/heads/relea/'))\n",
+       HYGIENE, "a run on a release branch opens no tracking issue"),
+    _M("Z17", SL, '            --shard "${{ matrix.shard }}/10:weighted"\n', '            --shard "${{ matrix.shard }}/10"\n',
+       HYGIENE, "the drift check is told the hash split and refuses every shard: the warning never runs"),
+    _M("Z18", SLD, "    return (result[\"measured\"] > result[\"predicted\"] * (1 + margin)\n",
+       "    return (result[\"measured\"] > result[\"predicted\"] * (1 + margin) * 2\n", HYGIENE,
+       "the warning waits for the shard to take twice the margin past its prediction"),
+    _M("Z19", SLD, "                        key=lambda kv: (-kv[1], kv[0]))\n    grown", "                        key=lambda kv: (kv[1], kv[0]))\n    grown", HYGIENE,
+       "the files the table has not measured are named lightest first, the heavy one cut off the list"),
+    _M("Z20", SLD, "    unmeasured = sorted(((p, s) for p, s in measured.items() if p not in weights and s >= min_seconds),",
+       "    unmeasured = sorted(((p, s) for p, s in measured.items() if s >= min_seconds),", HYGIENE,
+       "the warning names the files the table has measured as the ones it has not"),
     # --- PY: the pytest configuration, pyproject.toml -------------------------
     _M("PY1", PP, "addopts = \"-m 'not slow'\"", "addopts = \"-m 'not slow' --ignore=tests/fmi\"", CI_ALL,
        "every lane silently stops collecting tests/fmi (selection moved into addopts)"),

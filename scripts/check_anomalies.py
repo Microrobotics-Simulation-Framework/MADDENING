@@ -102,7 +102,8 @@ _REPO_ROOT = os.path.dirname(_HERE)
 # Add src to path so this works without installation
 sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
 
-from maddening.compliance._validate import parse_cache, validate_anomaly_registry
+from maddening.compliance._validate import (
+    _validate_registry_document, parse_cache, validate_anomaly_registry)
 from maddening.core.compliance.anomaly import SafetyRelevance
 
 # The fragments' shared definitions: the release lines, the label spelling and
@@ -1536,19 +1537,32 @@ def _reference_errors(anomalies, repo_root, resolve=True, memo=None):
     return errors, conditional
 
 
-def _census(path):
+def _load_registry(path):
+    """The registry at ``path``, loaded exactly as the validator loads it.
+
+    ``yaml.safe_load``, the pure-Python loader, and never libyaml's: the two
+    disagree on some input (a tab after a colon, a block scalar's header
+    followed by a comment without a space), and a registry or fragment this
+    gate accepted must load wherever else it is read.  The gate loads the
+    file once and hands the document to the validator and to every rule.
+    """
+    import yaml
+
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+def _census(path, data=None):
     """``(anomalies, declared references)`` in the registry, without resolving.
 
     Counting is separate from resolving so that the zero-scope guards below
     can run unconditionally -- including under ``--no-resolve``, where
     nothing is resolved but an empty registry is still an empty registry.
     The parsed document is returned too, for the rules that read the header.
+    ``data`` is the document :func:`_load_registry` gave for ``path``
+    (``None``: load it here).
     """
-    import yaml
-
-    loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
-    with open(path) as f:
-        data = yaml.load(f, Loader=loader) or {}
+    data = (_load_registry(path) if data is None else data) or {}
     if not isinstance(data, dict):
         data = {}
     anomalies = [a for a in (data.get("anomalies") or []) if isinstance(a, dict)]
@@ -1702,9 +1716,19 @@ def _main(argv):
                 os.path.join(repo_root, _fragments.REGISTRY))):
         fragments_root = repo_root
 
+    import yaml
+
+    try:
+        document = _load_registry(args.path)
+    except yaml.YAMLError as exc:
+        print(f"ERROR: {args.path} does not parse as YAML: {exc}",
+              file=sys.stderr)
+        return 1
+
     notes: list[str] = []
-    errors = validate_anomaly_registry(
+    errors = _validate_registry_document(
         args.path,
+        document,
         prefix=args.prefix,
         repo_root=repo_root,
         resolve_references=not args.no_resolve,
@@ -1713,7 +1737,7 @@ def _main(argv):
         # header must carry that field and no other project's.
         version_field="maddening_version",
     )
-    n_anomalies, declared, anomalies, data = _census(args.path)
+    n_anomalies, declared, anomalies, data = _census(args.path, document)
     frag_entries, frag_errors = _fragment_view(
         fragments_root, data, args, repo_root, notes)
     errors = list(errors) + frag_errors + _labels_in_registry(args.path, anomalies)

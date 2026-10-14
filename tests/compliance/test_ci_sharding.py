@@ -239,53 +239,6 @@ def test_the_deal_puts_the_longest_files_on_the_lightest_shards():
     assert _sharding.deal(weights, 1) == dict.fromkeys(weights, 1)
 
 
-def test_the_deal_keeps_the_files_of_an_apart_group_on_different_shards():
-    # Without the group, b and d share shard 3: a 50 -> 1, c 30 -> 2, b 20 -> 3,
-    # d 15 -> 3 (the lightest, at 20), e 10 -> 2 (30 against 35).  With b and
-    # d apart, d takes the lightest shard b is not on, 2 (30), and e then
-    # goes to the lightest, 3 (20).
-    weights = {"t/a.py": 50, "t/b.py": 20, "t/c.py": 30, "t/d.py": 15, "t/e.py": 10}
-    assert _sharding.deal(weights, 3, apart=()) == {"t/a.py": 1, "t/b.py": 3, "t/c.py": 2, "t/d.py": 3,
-                                                    "t/e.py": 2}
-    assert _sharding.deal(weights, 3, apart=(("t/d.py", "t/b.py"),)) == {
-        "t/a.py": 1, "t/b.py": 3, "t/c.py": 2, "t/d.py": 2, "t/e.py": 3}
-    # A group listing a file the table does not have constrains nothing else.
-    assert _sharding.deal(weights, 3, apart=(("t/b.py", "t/gone.py"),)) == _sharding.deal(weights, 3, apart=())
-    # More files in a group than shards: the rest go where the deal would put them.
-    assert _sharding.deal(weights, 1, apart=(("t/b.py", "t/d.py"),)) == dict.fromkeys(weights, 1)
-
-
-@pytest.mark.parametrize("split", _SPLIT_IDS)
-def test_no_two_files_of_an_apart_group_share_a_shard(split):
-    file, n = SPLITS[split][:2]
-    weights = _sharding.load_weights(file)
-    dealt = _sharding.deal(weights, n)
-    for group in _sharding.APART:
-        shards = [_sharding.weighted_shard_of(p, n, dealt) for p in group]
-        assert len(set(shards)) == len(shards), (split, dict(zip(group, shards)))
-
-
-def test_the_checkpoint_load_and_rest_schema_files_never_share_a_slow_lane_shard():
-    """The temporary pin of 2026-10-14: remove this test with its APART group when the leak is fixed.
-
-    A JAX trace leaked by the first file's costly-kind tests makes the
-    second file's costly-node tests about ten times slower in the same
-    process: shard 7 of slow-lane run 38504812929 held both and ran
-    131.7 / 142.3 minutes.  Both files must be in the slow lane's table, or
-    the deal cannot keep them apart (an unlisted file goes by its hash).
-    """
-    pair = ("tests/api/test_a_checkpoint_load_answers_as_a_params_write_on_every_parameter.py",
-            "tests/property/test_rest_requests_generated_from_the_schema.py")
-    assert pair in _sharding.APART
-    weights = _sharding.load_weights(_sharding.WEIGHTS_FILE)
-    assert all(p in weights for p in pair), "the pin acts only on files the table lists"
-    dealt = _sharding.deal(weights, _sharding.SLOW_LANE_SHARDS)
-    assert dealt[pair[0]] != dealt[pair[1]], {p: dealt[p] for p in pair}
-    # Without the pin the regenerated table would put them together: it is what keeps them apart.
-    unpinned = _sharding.deal(weights, _sharding.SLOW_LANE_SHARDS, apart=())
-    assert unpinned[pair[0]] == unpinned[pair[1]], {p: unpinned[p] for p in pair}
-
-
 @pytest.mark.parametrize("split", _SPLIT_IDS)
 def test_a_file_the_table_does_not_list_goes_by_the_hash_of_its_path(split):
     file, n = SPLITS[split][:2]

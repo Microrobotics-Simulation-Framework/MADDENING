@@ -47,6 +47,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -802,11 +803,12 @@ def test_the_lanes_install_the_tools_the_c_tests_skip_without(workflow, job, run
 CLASSIFY_FAILURE = "Classify failure and open tracking issue"
 
 
-def _classify_failure(exit_code: str, elapsed_sec: int) -> list[dict]:
+def _classify_failure(exit_code: str, elapsed_sec: int, limit_sec: int = 175 * 60) -> list[dict]:
     step = _step(_workflow("slow-tests.yml")["jobs"]["slow"], CLASSIFY_FAILURE)
     script = _render(step["with"]["script"], {
         "steps.pytest.outputs.exit_code": exit_code,
         "steps.pytest.outputs.elapsed_sec": str(elapsed_sec),
+        "steps.pytest.outputs.limit_sec": str(limit_sec),
         "matrix.python-version": "3.12", "matrix.jax-version": "0.10.2", "matrix.shard": "1",
     })
     harness = (
@@ -927,7 +929,8 @@ def test_the_slow_lane_goes_red_when_pytest_fails(tmp_path, pytest_exit):
     bin_dir.mkdir()
     (bin_dir / "timeout").write_text('#!/bin/sh\nexit "$FAKE_PYTEST_EXIT"\n')
     (bin_dir / "timeout").chmod(0o755)
-    proc, outputs = _run_step(run_pytest, {"matrix.shard": "2"}, tmp_path,
+    proc, outputs = _run_step(run_pytest, {"matrix.shard": "2",
+                                           "steps.clock.outputs.job_start": str(int(time.time()))}, tmp_path,
                               extra_env={"FAKE_PYTEST_EXIT": pytest_exit},
                               path=f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     assert proc.returncode == 0, proc.stdout + proc.stderr

@@ -286,6 +286,28 @@ class TestCachedAndUncachedRunsAgree:
             os.path.join(str(root), "tests", name)
             for name in ("test_clean.py", "test_probe.py", "test_skipped.py")]
 
+    def test_a_classs_autouse_fixture_stays_in_its_class(self, gate, tmp_path):
+        """The memo hands out fresh fixture containers: a class's ``autouse``
+        skip, merged into the module's fixtures for one citation, must not
+        reach a later citation of a module-level test in the same file (the
+        pre-merge audit's mutant A7 made it do so)."""
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_m.py").write_text(
+            "import pytest\n\n\nclass TestA:\n"
+            "    @pytest.fixture(autouse=True)\n    def _off(self):\n"
+            "        pytest.skip('never here')\n\n    def test_a(self):\n        pass\n\n\n"
+            "def test_b():\n    pass\n")
+        entries = [
+            {"anomaly_id": "MADD-ANO-001", "resolution_status": "resolved",
+             "verification": ["tests/test_m.py::TestA::test_a"]},
+            {"anomaly_id": "MADD-ANO-002", "resolution_status": "resolved",
+             "verification": ["tests/test_m.py::test_b"]},
+        ]
+        with parse_cache():
+            errors, _ = gate._reference_errors(entries, str(tmp_path),
+                                               memo=gate._ModuleMemo())
+        assert [e.split(":")[0] for e in errors] == ["MADD-ANO-001"], errors
+
 
 def _rename(path, old, new):
     text = path.read_text()

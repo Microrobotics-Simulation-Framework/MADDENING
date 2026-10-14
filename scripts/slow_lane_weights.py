@@ -374,6 +374,10 @@ def main(argv: list[str] | None = None) -> int:
             units = [u for u in units if u.cache != "warm"]
         run_units.append(units)
     all_units = [u for units in run_units for u in units]
+    if not all_units:
+        raise SystemExit("no shard report left to read: every one ran with a warm compilation cache "
+                         "(the per-push table is made from cold runs: pushes to main or release/**, "
+                         "or a pull request with [cold-ci])")
     clause = ""
     if not args.no_normalise:
         factors, reference, notes = speed_factors(all_units, args.reference)

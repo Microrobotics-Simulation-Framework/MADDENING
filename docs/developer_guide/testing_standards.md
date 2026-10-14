@@ -739,11 +739,12 @@ and canary seconds by CPU model, which is the data the limits below came from.
 Each test job of both lanes logs, from `scripts/ci_runner_health.py`:
 
 ```text
-runner: cpu 'AMD EPYC 7763 64-Core Processor', 4 vCPU, memory 15.6 GiB total, 14.9 GiB available
-runner: canary numpy matmul 1.12 s + jit compile 1.71 s = 2.83 s (limit 8.5 s), import 0.31 s; install 68 s (limit 204 s)
+runner: cpu 'AMD EPYC 7763 64-Core Processor', 4 vCPU, memory 15.6 GiB total, 13.9 GiB available
+runner: canary numpy matmul 0.95 s + jit compile 1.96 s = 2.91 s (limit 8.5 s), import 0.72 s; install 65 s (limit 204 s)
 runner: before the tests, memory 14.4 GiB available of 15.6 GiB
-runner: after the tests, memory 9.1 GiB available of 15.6 GiB; cpu steal 12.3 s of 5700 cpu-s over the 23.8 min test step (0.22%)
+runner: after the tests, memory 14.6 GiB available of 15.6 GiB; cpu steal 0.0 s of 5526 cpu-s over the 23.1 min test step (0.00%)
 ```
+(shard 3 of the per-push lane, run 38505341499)
 
 and `runner-shardK.json` in the durations artifact (the CPU model, vCPUs, memory,
 the canary and the steal over the test step), which `slow_lane_weights.py` reads.

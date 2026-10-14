@@ -252,3 +252,15 @@ def test_latest_for_the_per_push_lane_reads_pushes_only(tmp_path):
     found = slw.fetch_latest("per-push", 3, tmp_path / "dl", run=run)
     assert [r for r, _s, _d in found] == ["2"] and found[0][1] == "b" * 12
     assert calls[0][4] == "ci.yml" and calls[1][-1] == "test-durations-*"
+
+
+def test_a_run_whose_shards_were_all_warm_is_refused_not_written_as_an_empty_table(tmp_path):
+    a, b = _tree_files(2)
+    lane = "test-durations-py3.12-jax0.10.2"
+    _shard(tmp_path, "r0", 1, [(a, 10.0), (b, 5.0)], FAST, cache="warm", lane=lane)
+    out = tmp_path / "weights.json"
+    proc = subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "slow_lane_weights.py"), "--lane", "per-push",
+                           "--run", f"0={tmp_path / 'r0'}", "--write", "--output", str(out)],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode != 0 and "warm compilation cache" in proc.stderr
+    assert not out.exists()

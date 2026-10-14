@@ -49,6 +49,7 @@ import subprocess
 import sys
 import textwrap
 import tomllib
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -590,7 +591,11 @@ def _labels_named(text: str) -> set[str]:
 
 
 def _wrap(text: str, **kw) -> str:
-    return textwrap.fill(" ".join(str(text).split()), 79, **kw)
+    """``text`` filled to 79 columns, breaking at spaces only: never inside a
+    label or an id (``MADD-ANO-NEW-<stem>-<n>``, ``MADD-ANO-012``), which
+    a break at a hyphen would split and the label rewrite would then miss."""
+    return textwrap.fill(" ".join(str(text).split()), 79, break_on_hyphens=False,
+                         break_long_words=False, **kw)
 
 
 def _index_line(n: int, entry: dict) -> tuple[str, bool]:
@@ -649,6 +654,72 @@ def unrender_bullet(block: str) -> str:
     lines = block.split("\n")
     first = lines[0][2:] if lines[0].startswith("- ") else lines[0]
     return "\n".join([first] + [ln[2:] if ln.startswith("  ") else ln for ln in lines[1:]])
+
+
+#: A version's changelog heading, ``## [X.Y.Z]`` with or without a date.
+VERSION_HEADING_RE = re.compile(r"^## \[(\d[^\]\s]*)\]", re.M)
+
+
+def changelog_items(text: str) -> Counter:
+    """Every list item of every ``## [X.Y.Z]`` section of a changelog, as
+    ``(version, sub-section, item)`` with its count.
+
+    An item runs from a ``- `` at the margin to the line before the next line
+    at the margin (the next item, a heading, a paragraph), with its trailing
+    blank lines dropped: what :func:`render_bullet` writes is one whole item,
+    so a bullet that is only the start of another, or the same text in
+    another section, is a different item.  The Unreleased section is not read.
+    """
+    found: Counter = Counter()
+    version = sub = None
+    item: list[str] | None = None
+
+    def close():
+        nonlocal item
+        if item is not None and version is not None:
+            while item and not item[-1].strip():
+                item.pop()
+            found[(version, sub, "\n".join(item))] += 1
+        item = None
+
+    for line in text.split("\n"):
+        if line.startswith("## "):
+            close()
+            m = VERSION_HEADING_RE.match(line)
+            version, sub = (m.group(1) if m else None), None
+        elif line.startswith("### "):
+            close()
+            sub = line[4:].strip()
+        elif line.startswith("- "):
+            close()
+            item = [line]
+        elif item is not None and (not line.strip() or line.startswith(" ")):
+            item.append("" if not line.strip() else line)
+        else:
+            close()
+    close()
+    return found
+
+
+def notes_block_count(text: str, heading: str, block: str) -> int:
+    """How many times ``block`` is a whole block of a ``## heading`` section
+    of the notes file ``text``.
+
+    A whole block starts where the section's body starts or after a blank
+    line, and ends where the body ends or before a blank line, as
+    :func:`append_to_section` writes it; text that is only part of a block
+    does not count.
+    """
+    block = block.strip("\n")
+    if not block:
+        return 0
+    n = 0
+    for m in re.finditer(rf"^## {re.escape(heading)}[ \t]*\n", text, re.M):
+        nxt = re.search(r"^## ", text[m.end():], re.M)
+        body = text[m.end():m.end() + nxt.start()] if nxt else text[m.end():]
+        padded = "\n\n" + body.strip("\n") + "\n\n"
+        n += len(re.findall(rf"(?<=\n\n){re.escape(block)}(?=\n\n)", padded))
+    return n
 
 
 def _section_parts(section: str):
@@ -1087,42 +1158,45 @@ def _verify_release_text(root, take, mapping, release, snap) -> list[str]:
     """Invariant 5.1 for the release text: each changelog bullet and notes
     block of the assembled fragments is added exactly as written, as many
     times as the fragments give it, to the one ``## [release]`` section and
-    to ``v<release>.md``; a ``.0`` notes file names every reachable entry."""
+    to ``v<release>.md``; a ``.0`` notes file names every reachable entry.
+
+    Bullets are counted as whole list items of their sub-section
+    (:func:`changelog_items`) and notes text as whole blocks of its heading
+    (:func:`notes_block_count`), never as substrings: a bullet that is the
+    start of another is still its own item."""
     problems = []
     changelog = (root / CHANGELOG).read_text(encoding="utf-8")
     spans = version_section_span(changelog, release)
     if len(spans) != 1:
         problems.append(f"{CHANGELOG} has {len(spans)} '## [{release}]' sections, not one")
-    section = changelog[spans[0][0]:spans[0][1]] if spans else ""
-    before = _before(root, snap, CHANGELOG)
-    old = version_section_span(before, release)
-    old_section = before[old[0][0]:old[0][1]] if old else ""
-    wanted: dict[str, int] = {}
-    blocks: dict[str, int] = {}
+    now = changelog_items(changelog)
+    was = changelog_items(_before(root, snap, CHANGELOG))
+    wanted: Counter = Counter()
+    blocks: Counter = Counter()
     for f in take:
         if f.kind != "changes":
             continue
-        for items in (f.data.get("changelog") or {}).values():
+        for sec, items in (f.data.get("changelog") or {}).items():
             for item in items or []:
                 text = rewrite_labels(str(item), mapping)[0]
                 bullet = render_bullet(text)
                 if unrender_bullet(bullet) != canonical_bullet(text):
                     problems.append(f"a changelog bullet from {f.rel} does not survive its "
                                     f"rendering: {' '.join(text.split())[:60]}")
-                wanted[bullet] = wanted.get(bullet, 0) + 1
-        for block in (f.data.get("release_notes") or {}).values():
-            text = rewrite_labels(str(block), mapping)[0].strip()
-            blocks[text] = blocks.get(text, 0) + 1
-    for bullet, times in wanted.items():
-        added = section.count(bullet) - old_section.count(bullet)
+                wanted[(sec, bullet)] += 1
+        for heading, block in (f.data.get("release_notes") or {}).items():
+            blocks[(heading, rewrite_labels(str(block), mapping)[0].strip("\n"))] += 1
+    for (sec, bullet), times in wanted.items():
+        added = now[(release, sec, bullet)] - was[(release, sec, bullet)]
         if added != times:
             problems.append(f"a changelog bullet was added {added} time(s) to the "
-                            f"'## [{release}]' section, not {times}: {bullet[:60]}")
+                            f"'## [{release}]' section's {sec}, not {times}: {bullet[:60]}")
     notes_rel = f"{NOTES_DIR}/v{release}.md"
     notes = (root / notes_rel).read_text(encoding="utf-8")
     old_notes = _before(root, snap, notes_rel)
-    for text, times in blocks.items():
-        if notes.count(text) - old_notes.count(text) < times:
+    for (heading, text), times in blocks.items():
+        if (notes_block_count(notes, heading, text)
+                - notes_block_count(old_notes, heading, text)) < times:
             problems.append(f"a release-notes block is missing from {notes_rel}: "
                             f"{' '.join(text.split())[:60]}")
     if version_parts(release)[2] == 0:

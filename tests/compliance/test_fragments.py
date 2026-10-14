@@ -963,32 +963,46 @@ class TestTwoLines:
 # ---------------------------------------------------------------------------
 
 def test_the_compliance_job_runs_the_ratchet_against_the_right_base(tmp_path):
-    """The step's script, run under bash as GitHub runs it, with a stand-in
-    python that records what it was asked to do."""
+    """On a pull request the line is HEAD^1, the first parent of GitHub's
+    merge commit (audit 2, m1); on a push it is HEAD, given as --base so the
+    own-branch hint stays out of CI's output."""
     workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text())
     steps = workflow["jobs"]["compliance"]["steps"]
     assert steps[0]["uses"].startswith("actions/checkout@")
+    assert "ref" not in steps[0]["with"], "a pull request checks out GitHub's merge commit"
     assert steps[0]["with"]["fetch-depth"] == 0, "the ratchet reads the base's history"
     ratchet = [s for s in steps if "check_fragments.py" in s.get("run", "")]
     assert len(ratchet) == 1, "the compliance job runs scripts/check_fragments.py once"
     step = ratchet[0]
     assert "continue-on-error" not in step and "if" not in step
-    assert step["env"] == {"EVENT": "${{ github.event_name }}",
-                           "BASE_REF": "${{ github.base_ref }}"}
-    fake = tmp_path / "bin" / "python"
-    fake.parent.mkdir()
-    fake.write_text('#!/bin/sh\necho "$@" >> "$OUT"\n')
-    fake.chmod(0o755)
-    for event, base, want in (
-            ("pull_request", "release/0.4.2", "scripts/check_fragments.py --base origin/release/0.4.2"),
-            ("push", "", "scripts/check_fragments.py")):
-        out = tmp_path / f"{event}.txt"
-        env = {"PATH": f"{fake.parent}:{os.environ['PATH']}", "OUT": str(out),
-               "EVENT": event, "BASE_REF": base}
-        subprocess.run(["bash", "-e", "-c", step["run"]], env=env, check=True, cwd=tmp_path)
-        assert out.read_text().strip() == want
+    assert step["env"] == {"EVENT": "${{ github.event_name }}"}
+    for event, want in (("pull_request", "scripts/check_fragments.py --base HEAD^1"),
+                        ("push", "scripts/check_fragments.py --base HEAD")):
+        assert " ".join(_ci_ratchet_argv(step, event, tmp_path)) == want
     names = [s.get("name", "") for s in steps]
     assert names.index(step["name"]) < names.index("Run compliance tests")
+
+
+def _ci_ratchet_step():
+    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text())
+    return [s for s in workflow["jobs"]["compliance"]["steps"]
+            if "check_fragments.py" in s.get("run", "")][0]
+
+
+def _ci_ratchet_argv(step, event, tmp_path):
+    """The command the compliance job's ratchet step runs on ``event``: the
+    step's script under bash, as GitHub runs it, with a stand-in python that
+    records its arguments."""
+    fake = tmp_path / "bin" / "python"
+    if not fake.exists():
+        fake.parent.mkdir(parents=True)
+        fake.write_text('#!/bin/sh\necho "$@" > "$OUT"\n')
+        fake.chmod(0o755)
+    out = tmp_path / f"{event}.txt"
+    env = {"PATH": f"{fake.parent}:{os.environ['PATH']}", "OUT": str(out), "EVENT": event,
+           "BASE_REF": "main"}
+    subprocess.run(["bash", "-e", "-c", step["run"]], env=env, check=True, cwd=tmp_path)
+    return out.read_text().split()
 
 
 # ---------------------------------------------------------------------------
@@ -1284,12 +1298,22 @@ class TestChangesFragmentsJoinTheRatchet:
         _release(root)
         _commit(root, "release assembly")
         assert check_fragments.findings(root) == []
-        # ... and the bullet is what the check compares: take it out of the
-        # changelog and the deleted fragment is reported.
+
+    def test_the_bullet_is_what_the_deleting_commit_must_add(self, tmp_path):
+        """The release assembly's commit is what is judged (audit 2, M1): an
+        assembly committed without the bullet is refused, naming the commit."""
+        root = _repo(tmp_path)
+        _merge_branch(root, "fix/c", {_changes_file("fix-c"): (
+            'line: "0.4"\nchangelog:\n  Fixed:\n    - |\n      Two lines\n      of text.\n')})
+        _version(root, "0.4.2")
+        _release(root)
         changelog = root / "CHANGELOG.md"
         changelog.write_text(changelog.read_text().replace("- Two lines\n  of text.\n", ""))
-        found = _findings(root)
-        assert any("its Fixed bullet is not in CHANGELOG.md" in f for f in found), found
+        _commit(root, "release assembly, its bullet lost")
+        sha = _git(root, "rev-parse", "HEAD").strip()
+        found = check_fragments.findings(root)
+        assert any(f"was deleted in {sha[:10]}, which did not add its Fixed bullet to "
+                   "CHANGELOG.md as a list item" in f for f in found), found
 
 
 class TestARecordedLabelHasAHistory:
@@ -1385,6 +1409,8 @@ class TestBulletsAreCarriedVerbatim:
                          "- Para one.\n\n  ```python\n  x  =  1\n  ```\n"),
         "a leading dash": ('    - "- starts with a dash"\n', "- - starts with a dash\n"),
         "two spaces in code": ('    - "`a  b` keeps two spaces"\n', "- `a  b` keeps two spaces\n"),
+        # a Markdown hard break: the two spaces at a line's end are kept
+        "a hard break": ('    - "Line one,  \\nline two."\n', "- Line one,  \n  line two.\n"),
     }
 
     @pytest.mark.parametrize("case", sorted(CASES))
@@ -1639,3 +1665,378 @@ def test_the_cross_line_allowance_ignores_pre_release_headings(gate):
     released = frozenset(Version(v) for v in ("0.4.0", "0.4.1", "0.4.2rc1"))
     assert gate.cross_line_versions(Version("0.5.0.dev0"), released, Version) == {
         Version("0.4.2")}
+
+
+# ---------------------------------------------------------------------------
+# The second fix round, after the second pre-merge audit (its ids in the names)
+# ---------------------------------------------------------------------------
+
+def _changes(bullet=None, notes=None, line="0.4"):
+    """A changes fragment's text with one Fixed bullet and/or one Fixed block."""
+    text = f'line: "{line}"\n'
+    if bullet is not None:
+        text += f'changelog:\n  Fixed:\n    - "{bullet}"\n'
+    if notes is not None:
+        text += f'release_notes:\n  Fixed: "{notes}"\n'
+    return text
+
+
+def _released(root):
+    """0.4.2 released from one changes fragment, tagged, and the tree bumped."""
+    _merge_branch(root, "fix/c", {_changes_file("fix-c"): _changes(
+        "The solver keeps its tolerence after a reset.",
+        "- The solver keeps its tolerence after a reset; MDCG 2019-16 applies.")})
+    _version(root, "0.4.2")
+    _release(root)
+    _commit(root, "release assembly 0.4.2")
+    _git(root, "tag", "v0.4.2")
+    _version(root, "0.4.3.dev0")
+
+
+def _head(root):
+    return _git(root, "rev-parse", "HEAD").strip()
+
+
+class TestAGoneChangesFragmentIsJudgedWhereItLeft:
+    """M1: a changes fragment that left the line is settled by the commit that
+    deleted it, when that commit added each of its bullets and notes blocks.
+    Later edits to released text never reopen it."""
+
+    def test_a_typo_fixed_in_a_released_bullet_stays_green(self, tmp_path):
+        """The audit's r19 (a): on the push, and on a later pull request."""
+        root = _repo(tmp_path)
+        _released(root)
+        assert check_fragments.findings(root) == []
+        changelog = root / "CHANGELOG.md"
+        changelog.write_text(changelog.read_text().replace("tolerence", "tolerance"))
+        _commit(root, "docs: a typo in the 0.4.2 changelog")
+        assert check_fragments.findings(root) == []
+        _git(root, "checkout", "-q", "-b", "later/pr")
+        _write(root, "README.md", "x\n")
+        _commit(root, "an unrelated pull request")
+        assert check_fragments.findings(root, "main") == []
+
+    def test_a_notes_sweep_after_the_release_stays_green(self, tmp_path):
+        """The audit's r19 (b): a glossary tooltip in the released notes
+        block, as the 0.4.0 docs pass added them."""
+        root = _repo(tmp_path)
+        _released(root)
+        notes = root / "docs/release_notes/v0.4.2.md"
+        notes.write_text(notes.read_text().replace("MDCG 2019-16", "{term}`MDCG 2019-16`"))
+        _commit(root, "docs: tooltips on the 0.4.2 notes")
+        assert check_fragments.findings(root) == []
+        assert check_fragments.findings(root, "HEAD^1") == []
+
+    def test_a_deletion_without_an_assembly_names_the_deleting_commit(self, tmp_path):
+        root = _repo(tmp_path)
+        _merge_branch(root, "fix/c", {_changes_file("fix-c"): _changes("A fix.", "- A fix.")})
+        (root / _changes_file("fix-c")).unlink()
+        _commit(root, "drop it")
+        gone = _head(root)
+        _write(root, "README.md", "x\n")
+        _commit(root, "a later commit")
+        found = check_fragments.findings(root)
+        assert any(f"was deleted in {gone[:10]}, which did not add its Fixed bullet to "
+                   "CHANGELOG.md as a list item" in f for f in found), found
+        assert any(f"was deleted in {gone[:10]}, which did not add its 'Fixed' "
+                   "release-notes text to a notes file as a whole block" in f
+                   for f in found), found
+
+    def test_a_fragment_a_pull_request_deletes_is_judged_against_its_tree(self, tmp_path):
+        root = _repo(tmp_path)
+        _merge_branch(root, "fix/c", {_changes_file("fix-c"): _changes("A fix.")})
+        _git(root, "checkout", "-q", "-b", "drop/it")
+        (root / _changes_file("fix-c")).unlink()
+        _commit(root, "drop it")
+        found = check_fragments.findings(root, "main")
+        assert any("is deleted in this tree, which against main does not add its Fixed "
+                   "bullet" in f for f in found), found
+        # The release assembly's pull request passes.
+        _git(root, "checkout", "-q", "-b", "release/pr", "main")
+        _version(root, "0.4.2")
+        _release(root)
+        _commit(root, "release assembly")
+        assert check_fragments.findings(root, "main") == []
+
+    def test_a_forward_merge_settles_the_other_lines_assembled_fragment(self, tmp_path):
+        """A 0.4 changes fragment that reached the 0.5 line leaves it in the
+        forward merge that brings 0.4's release assembly.  That merge adds the
+        bullet (to the 0.4.2 section) against the 0.5 line, so it is settled."""
+        root = _repo(tmp_path)
+        _merge_branch(root, "fix/c", {_changes_file("fix-c"): _changes("A 0.4 fix.")})
+        _git(root, "checkout", "-q", "-b", "line-05")
+        _version(root, "0.5.0.dev0")
+        _git(root, "checkout", "-q", "main")
+        _version(root, "0.4.2")
+        _release(root)
+        _commit(root, "release assembly 0.4.2")
+        _git(root, "checkout", "-q", "line-05")
+        subprocess.run(["git", "-C", str(root), "merge", "-q", "--no-ff", "-m",
+                        "forward merge 0.4.2", "main"], capture_output=True, text=True)
+        assert _conflicted(root) == ["pyproject.toml"]
+        _write(root, "pyproject.toml", '[project]\nname = "t"\nversion = "0.5.0.dev0"\n')
+        _commit(root, "forward merge 0.4.2")
+        assert not (root / _changes_file("fix-c")).exists()
+        assert check_fragments.findings(root) == []
+        assert check_fragments.findings(root, "HEAD^1") == []
+
+
+class TestBulletsAndBlocksAreWholeItems:
+    """m4: bullets are compared as whole list items and notes text as whole
+    blocks, never as substrings (the audit's r23 shapes)."""
+
+    def test_a_bullet_that_starts_another_is_its_own_item(self, tmp_path):
+        """r23 (a): the assembler counted 'Docs.' twice in the section."""
+        root = _repo(tmp_path)
+        _merge_branch(root, "fix/a", {_changes_file("fix-a"): _changes("Docs.")})
+        _merge_branch(root, "fix/b", {_changes_file("fix-b"): _changes(
+            "Docs. The install page names every extra.")})
+        _version(root, "0.4.2")
+        _release(root)
+        _commit(root, "release assembly")
+        assert ("### Fixed\n\n- Docs.\n- Docs. The install page names every extra.\n"
+                in _release_section(root))
+        assert check_fragments.findings(root) == []
+
+    def test_an_older_sections_item_does_not_settle_a_deletion(self, tmp_path):
+        """r23 (b): '- One fix.' is a whole item of the 0.4.1 section, and a
+        whole block of v0.4.1.md; neither settles a fragment deleted by hand."""
+        root = _repo(tmp_path)
+        _merge_branch(root, "fix/c", {_changes_file("fix-c"): _changes("One fix.", "- One fix.")})
+        (root / _changes_file("fix-c")).unlink()
+        _commit(root, "drop the unassembled changes fragment")
+        found = check_fragments.findings(root)
+        assert any("did not add its Fixed bullet" in f for f in found), found
+        assert any("did not add its 'Fixed' release-notes text" in f for f in found), found
+
+    def test_an_edit_to_a_merged_changes_fragment_is_judged_by_its_last_text(self, tmp_path):
+        """r23 (c): a merged changes fragment can still be edited before its
+        release; the text it held when it left is what is judged, whole."""
+        root = _repo(tmp_path / "a")
+        _merge_branch(root, "fix/c", {_changes_file("fix-c"): _changes(
+            "Docs. The install page names every extra.")})
+        _merge_branch(root, "docs/reword", {_changes_file("fix-c"): _changes("Docs.")})
+        _version(root, "0.4.2")
+        _release(root)
+        _commit(root, "release assembly")
+        section = _release_section(root)
+        assert "### Fixed\n\n- Docs.\n" in section and "every extra" not in section
+        assert check_fragments.findings(root) == []
+        # Edited to the text of an older item, then deleted by hand: refused.
+        root = _repo(tmp_path / "b")
+        _merge_branch(root, "fix/c", {_changes_file("fix-c"): _changes("One fix, and more.")})
+        _merge_branch(root, "docs/reword", {_changes_file("fix-c"): _changes("One fix.")})
+        (root / _changes_file("fix-c")).unlink()
+        _commit(root, "drop it")
+        found = check_fragments.findings(root)
+        assert any("did not add its Fixed bullet" in f and "'One fix.'" in f
+                   for f in found), found
+
+    def test_a_notes_block_inside_another_does_not_count(self, tmp_path, monkeypatch):
+        """The assembler's own check: a block that is only the start of
+        another block written to the notes is missing."""
+        root = _repo(tmp_path)
+        _merge_branch(root, "fix/a", {_changes_file("fix-a"): _changes(notes="- A fix.")})
+        _merge_branch(root, "fix/b", {_changes_file("fix-b"): _changes(
+            notes="- A fix. And more.")})
+        _version(root, "0.4.2")
+        before = _tree(root)
+        append = fragments._notes_append
+        monkeypatch.setattr(
+            fragments, "_notes_append", lambda root_, snap, version, heading, block: append(
+                root_, snap, version, *((None, None) if block == "- A fix." else (heading, block))))
+        with pytest.raises(fragments.AssemblyError, match=r"(?m)release-notes block is "
+                           r"missing from docs/release_notes/v0\.4\.2\.md: - A fix\.$"):
+            _release(root)
+        assert _tree(root) == before
+
+    def test_the_item_reader(self):
+        text = ("## [Unreleased]\n\n- not read\n\n## [0.4.2] - 2026-11-01\n\n### Fixed\n\n"
+                "- Docs.\n- Docs. More.\n- A list:\n\n  - one\n\n  ```\n  x\n  ```\n"
+                "\n### Added\n\n- Docs.\n\n## [0.4.1]\n\n- Loose.\nA paragraph.\n")
+        assert fragments.changelog_items(text) == {
+            ("0.4.2", "Fixed", "- Docs."): 1, ("0.4.2", "Fixed", "- Docs. More."): 1,
+            ("0.4.2", "Fixed", "- A list:\n\n  - one\n\n  ```\n  x\n  ```"): 1,
+            ("0.4.2", "Added", "- Docs."): 1, ("0.4.1", None, "- Loose."): 1}
+        notes = ("# v\n\n## Fixed\n\n- A fix.\n\n- A fix.\n\n- A fix. And more.\n\n"
+                 "## Security\n\n- A fix.\n")
+        assert fragments.notes_block_count(notes, "Fixed", "- A fix.") == 2
+        assert fragments.notes_block_count(notes, "Fixed", "- A fix. And") == 0
+        assert fragments.notes_block_count(notes, "Security", "- A fix.\n") == 1
+
+
+def test_a_pull_request_merged_meanwhile_leaves_the_run_green(tmp_path):
+    """m1 (the audit's r26).  GitHub computes a pull request's merge commit
+    when the branch is pushed; another pull request, with its own changes
+    fragment, merges into the base before the job fetches it.  CI's command
+    reads the merge commit's first parent, so the run is green, and a re-run on
+    the same merge commit stays green.  The base's newer tip would be red."""
+    root = _repo(tmp_path / "r")
+    _git(root, "checkout", "-q", "-b", "fix/b")
+    _write(root, _changes_file("fix-b"), _changes("B."))
+    _commit(root, "B")
+    _git(root, "checkout", "-q", "--detach", "main")
+    _git(root, "merge", "-q", "--no-ff", "-m", "the merge commit GitHub computed for B", "fix/b")
+    merge_ref = _head(root)
+    _git(root, "checkout", "-q", "main")
+    _merge_branch(root, "fix/a", {_changes_file("fix-a"): _changes("A.")})
+    _git(root, "checkout", "-q", "--detach", merge_ref)
+    argv = _ci_ratchet_argv(_ci_ratchet_step(), "pull_request", tmp_path / "ci")
+    assert argv[0] == "scripts/check_fragments.py", argv
+    for _ in range(2):                                      # the run, and a re-run
+        assert check_fragments.main([*argv[1:], "--root", str(root)]) == 0
+    assert any(f"{_changes_file('fix-a')} came into the line" in f
+               for f in check_fragments.findings(root, "main"))
+
+
+def test_the_notes_never_break_inside_a_label_or_an_id(tmp_path):
+    """m6 (the audit's r29): a release note naming another label is wrapped at
+    spaces only, so the rewrite finds the label whole and the gate stays
+    green after the assembly."""
+    root = _repo(tmp_path)
+    b = L("fix-long-stem", 1)
+    note = "x" * 30 + " see " + b + " and more words here for the wrap."
+    _merge_branch(root, "fix/long-stem", {_anomaly_file("fix-long-stem"): anomalies_fragment(
+        "fix-long-stem", entry(b))})
+    _merge_branch(root, "fix/w", {_anomaly_file("fix-w"): anomalies_fragment(
+        "fix-w", entry(L("fix-w", 1), note=note))})
+    assert fragments.assemble(root, soup=False, out=lambda *_: None) == {
+        b: "MADD-ANO-004", L("fix-w", 1): "MADD-ANO-005"}
+    _commit(root, "assembly")
+    notes = (root / "docs/release_notes/v0.4.2.md").read_text()
+    assert "see MADD-ANO-004 and more" in " ".join(notes.split()), notes
+    assert check_fragments.findings(root) == []
+
+
+@pytest.mark.parametrize("pad", range(50, 80))
+def test_wrapping_breaks_at_spaces_only(pad):
+    for token in ("MADD-ANO-012", L("fix-a-long-stem", 12)):
+        wrapped = fragments._wrap("x" * pad + " " + token + " tail", subsequent_indent="  ")
+        assert any(token in line for line in wrapped.splitlines()), wrapped
+
+
+# The mutation gaps the second audit found (G1-G11): one test each.
+
+def test_a_late_anomaly_alone_updates_the_count(tmp_path):
+    """G1 (the audit's r31): a second release run with no new bullet still
+    replaces the count of reachable entries."""
+    root = _repo(tmp_path)
+    _two_fragments(root)
+    _version(root, "0.4.2")
+    _release(root)
+    _commit(root, "release assembly")
+    assert "- 4 registry entries are reachable in 0.4.2: 4 open" in _release_section(root)
+    _merge_branch(root, "fix/late", {_anomaly_file("fix-late"): anomalies_fragment(
+        "fix-late", entry(L("fix-late", 1)))})
+    assert _release(root) == {L("fix-late", 1): "MADD-ANO-007"}
+    _commit(root, "fold the late anomaly in")
+    section = _release_section(root)
+    assert section.count("registry entries are reachable in 0.4.2") == 1
+    assert "- 5 registry entries are reachable in 0.4.2: 5 open" in section
+    assert check_fragments.findings(root) == []
+
+
+def test_late_bullets_follow_the_ones_already_there(tmp_path):
+    """G3."""
+    root = _repo(tmp_path)
+    _merge_branch(root, "fix/early", {_changes_file("fix-early"): _changes("An early fix.")})
+    _version(root, "0.4.2")
+    _release(root)
+    _commit(root, "release assembly")
+    _merge_branch(root, "fix/late", {_changes_file("fix-late"): _changes("A late fix.")})
+    _release(root)
+    _commit(root, "fold the late fragment in")
+    assert "### Fixed\n\n- An early fix.\n- A late fix.\n" in _release_section(root)
+
+
+def test_a_release_section_that_is_not_the_newest_is_refused(tmp_path):
+    """G4."""
+    root = _repo(tmp_path)
+    _merge_branch(root, "fix/t", {_changes_file("fix-t"): _changes("A fix.")})
+    _version(root, "0.4.2")
+    changelog = root / "CHANGELOG.md"
+    changelog.write_text(changelog.read_text() + "\n## [0.4.2] - 2026-11-01\n\n### Fixed\n\n"
+                                                 "- Misplaced.\n")
+    _commit(root, "a 0.4.2 section below the older ones")
+    before = _tree(root)
+    with pytest.raises(fragments.AssemblyError, match=r"'## \[0\.4\.2\]' is not the newest"):
+        _release(root)
+    assert _tree(root) == before
+
+
+def test_a_bullet_written_twice_is_caught(tmp_path, monkeypatch):
+    """G5: the assembler's count of each bullet catches one too many."""
+    root = _repo(tmp_path)
+    _merge_branch(root, "fix/t", {_changes_file("fix-t"): _changes("Once.")})
+    _version(root, "0.4.2")
+    before = _tree(root)
+    section = fragments.release_section
+    monkeypatch.setattr(fragments, "release_section", lambda existing, v, d, bullets, c: section(
+        existing, v, d, {k: items * 2 for k, items in bullets.items()}, c))
+    with pytest.raises(fragments.AssemblyError, match=r"added 2 time\(s\).*not 1"):
+        _release(root)
+    assert _tree(root) == before
+
+
+def _dot0_repo(tmp_path, monkeypatch, partly=None):
+    """The 0.5 line after the numbering hand-over, ready for its 0.5.0
+    release assembly; ``partly`` is an entry made partly resolved."""
+    root = _repo(tmp_path, version="0.5.0.dev0")
+    monkeypatch.setattr(fragments, "RELEASE_LINES", ("0.5",))
+    _write(root, "docs/validation/development_record_v0.5.0.md", _RECORD)
+    if partly:
+        reg = root / fragments.REGISTRY
+        text = reg.read_text()
+        start = text.index(f'  - anomaly_id: "{partly}"')
+        end = text.find('  - anomaly_id: "', start + 1)
+        end = len(text) if end < 0 else end
+        reg.write_text(text[:start] + text[start:end].replace(
+            'resolution_status: "open"', 'resolution_status: "partially_resolved"') + text[end:])
+    _commit(root, "the 0.5 line's record")
+    _merge_branch(root, "feat/x", {_changes_file("feat-x"): (
+        'line: "0.5"\nchangelog:\n  Added:\n    - "A thing."\n')})
+    return root
+
+
+def test_dot0_notes_that_miss_a_reachable_entry_are_caught(tmp_path, monkeypatch):
+    """G6: the assembler's own check that the .0 notes name every reachable
+    entry."""
+    root = _dot0_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(fragments, "_name_every_reachable_entry", lambda *_: None)
+    before = _tree(root)
+    with pytest.raises(fragments.AssemblyError,
+                       match="does not name MADD-ANO-002, which is reachable in 0.5.0"):
+        _release(root, "0.5.0", "2026-12-01")
+    assert _tree(root) == before
+
+
+def test_a_dot0_release_names_a_partly_resolved_entry(tmp_path, monkeypatch):
+    """G7."""
+    root = _dot0_repo(tmp_path, monkeypatch, partly="MADD-ANO-003")
+    _release(root, "0.5.0", "2026-12-01")
+    notes = (root / "docs/release_notes/v0.5.0.md").read_text()
+    known = notes[notes.index("## Known anomalies"):]
+    assert "- `MADD-ANO-002`: two." in known
+    assert "- `MADD-ANO-003` (partly resolved): three." in known
+
+
+def test_dot0_notes_count_an_entry_named_in_known_anomalies_only(tmp_path, monkeypatch):
+    """G8: an id the notes name under another heading is still listed."""
+    root = _dot0_repo(tmp_path, monkeypatch)
+    _write(root, "docs/release_notes/v0.5.0.md",
+           "# v0.5.0\n\n## Fixed\n\n- `MADD-ANO-002` is fixed in part.\n")
+    _commit(root, "notes begun early")
+    _release(root, "0.5.0", "2026-12-01")
+    notes = (root / "docs/release_notes/v0.5.0.md").read_text()
+    assert "- `MADD-ANO-002`: two." in notes[notes.index("## Known anomalies"):]
+
+
+def test_next_label_number_is_one_past_the_highest_recorded():
+    """G11: a stem whose recorded labels skip a number starts after the
+    highest, not after their count."""
+    registry = ('  - anomaly_id: "MADD-ANO-004"\n    # label: NEW-fix-a-1\n'
+                '  - anomaly_id: "MADD-ANO-005"\n    # label: NEW-fix-a-3\n'
+                '  - anomaly_id: "MADD-ANO-006"\n    # label: NEW-fix-b-7\n')
+    assert fragments.next_label_number(registry, "fix-a") == 4
+    assert fragments.next_label_number(registry, "fix-b") == 8
+    assert fragments.next_label_number(registry, "fix-c") == 1

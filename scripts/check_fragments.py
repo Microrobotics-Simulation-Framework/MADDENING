@@ -37,14 +37,20 @@ the fragments to the scheme, on every push:
   has one ``## [X.Y.Z]`` section per version.
 * **The ratchet, over the line's whole history.**  Every label ever added
   under ``docs/fragments/anomalies/`` in the line's first-parent history is
-  still in a fragment here, or recorded by the registry; every changes
-  fragment ever added there is still here, or each of its changelog bullets
-  is in ``CHANGELOG.md`` and each release-notes block in a notes file (as the
-  release assembly writes them).  Deleting a merged fragment turned nothing
+  still in a fragment here, or recorded by the registry.  Every changes
+  fragment ever added there is still here, or the commit that deleted it
+  added each of its changelog bullets to ``CHANGELOG.md`` as a whole list
+  item and each release-notes block to a notes file as a whole block: what a
+  release assembly does.  It is judged at that commit, so a later edit to
+  released text (a typo, a tooltip sweep) never reopens it; one this tree
+  deletes is judged against this tree.  Deleting a merged fragment turned nothing
   red otherwise: the SOUP table never listed it and the high-water mark never
   counted it.  A wrong entry is closed (``duplicate``, ``resolved``), never
   deleted.  The line is ``HEAD`` (a push), or ``--base REF`` (a pull request:
-  its base, so that the branch's own unmerged history is not read).  How many
+  its base, so that the branch's own unmerged history is not read; CI passes
+  ``HEAD^1``, the first parent of GitHub's merge commit, which is the base
+  that merge was computed on, so a pull request merged into the base
+  meanwhile cannot turn the run red).  How many
   commits a push holds does not matter: every commit of the line is read.
 * **A recorded label has a history.**  A registry ``# label:`` comment names
   a label some fragment in this tree's history held (any parent), so a
@@ -62,6 +68,7 @@ import os
 import re
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -95,7 +102,7 @@ def _line_findings(frag: F.Fragment, tree_line: str) -> list[str]:
                 f"quoted string such as \"{tree_line}\")"]
     if not isinstance(line, str) or line not in F.RELEASE_LINES:
         return [f"{frag.rel}: line {line!r} is not a release line in RELEASE_LINES "
-                f"{F.RELEASE_LINES} (quote it: \"0.4\")"]
+                f"{F.RELEASE_LINES}" + ("" if isinstance(line, str) else " (quote it: \"0.4\")")]
     if F.line_key(line) > F.line_key(tree_line):
         return [f"{frag.rel}: line {line!r} is newer than this tree's line "
                 f"{tree_line}"]
@@ -287,7 +294,7 @@ def label_record_findings(registry_text: str, held=None) -> list[str]:
 #: without brackets, in any case.
 UNRELEASED_RE = re.compile(r"^##[ \t]+\[?unreleased\]?[ \t]*$", re.M | re.I)
 #: A version's changelog heading, ``## [X.Y.Z]`` with or without a date.
-VERSION_HEADING_RE = re.compile(r"^## \[(\d[^\]\s]*)\]", re.M)
+VERSION_HEADING_RE = F.VERSION_HEADING_RE
 
 
 def is_tagged(root: Path, version: str) -> bool:
@@ -361,15 +368,18 @@ class History:
     so a branch's own commits before it merged are never read), with the
     commit that brought it.  ``held``: every label any fragment held in any
     commit reachable from ``HEAD``, every parent (``# label:`` comments must
-    name one).  ``changes``: every changes fragment the line ever added, with
-    the commit that added it.  ``error``: why the history could not be read
-    (the ratchet then fails closed).
+    name one).  ``gone``: ``(path, commit that added it, commit that deleted
+    it)`` for each first-parent deletion of a changes fragment.  ``alive``:
+    each changes fragment the line still holds at its tip, with the commit
+    that added it.  ``error``: why the history could not be read (the ratchet
+    then fails closed).
     """
 
     def __init__(self):
         self.labels: dict[str, str] = {}
         self.held: set[str] = set()
-        self.changes: dict[str, str] = {}
+        self.gone: list[tuple[str, str, str]] = []
+        self.alive: dict[str, str] = {}
         self.error: str | None = None
 
 
@@ -401,30 +411,21 @@ def history(root: Path, line: str = "HEAD") -> History:
         h.labels = _added_labels(F.git(root, *first_parent, "-p", line, "--", F.ANOMALIES))
         h.held = set(_added_labels(F.git(root, "log", "-m", "--no-renames", "-p",
                                          "--format=%x00%H", "HEAD", "--", F.ANOMALIES)))
-        log = F.git(root, *first_parent, "--diff-filter=A", "--name-only", line, "--",
-                    F.CHANGES)
+        log = F.git(root, *first_parent, "--name-status", line, "--", F.CHANGES)
         for chunk in log.split("\0")[1:]:
-            sha, _, names = chunk.partition("\n")
-            for rel in names.splitlines():
-                if rel.strip().endswith(".yaml"):
-                    h.changes.setdefault(rel.strip(), sha.strip())
+            sha, _, rows = chunk.partition("\n")
+            for row in rows.splitlines():
+                status, _, rel = row.partition("\t")
+                rel = rel.strip()
+                if not rel.endswith(".yaml"):
+                    continue
+                if status == "A":
+                    h.alive[rel] = sha.strip()
+                elif status == "D":
+                    h.gone.append((rel, h.alive.pop(rel, sha.strip()), sha.strip()))
     except RuntimeError as exc:
         h.error = f"the history of {line} cannot be read: {exc}"
     return h
-
-
-def _last_text(root: Path, line: str, rel: str) -> str | None:
-    """``rel`` as the line last held it: at ``line``, or just before the
-    first-parent commit that deleted it."""
-    here = F.git(root, "show", f"{line}:{rel}", check=False)
-    if here:
-        return here
-    gone = F.git(root, "log", "--first-parent", "--diff-merges=first-parent", "--no-renames",
-                 "--diff-filter=D", "--no-patch", "--format=%H", "-1", line, "--", rel,
-                 check=False).strip()
-    if not gone:
-        return None
-    return F.git(root, "show", f"{gone}^1:{rel}", check=False) or None
 
 
 def _not_merged_hint(root: Path, sha: str) -> str:
@@ -459,39 +460,110 @@ def _ratchet_findings(root, hist, live, recorded, line):
                        f"entry of one, was deleted or renamed.  A wrong entry is closed "
                        f"(resolution_status duplicate or resolved), never deleted"
                        + _not_merged_hint(root, sha))
-    changelog = (root / F.CHANGELOG).read_text(encoding="utf-8")
-    notes = "\n".join(p.read_text(encoding="utf-8")
-                      for p in sorted((root / F.NOTES_DIR).glob("v*.md")))
-    mapping = {lab: ids[0] for lab, ids in recorded.items() if len(ids) == 1}
-    for rel, sha in sorted(hist.changes.items()):
-        if (root / rel).is_file():
-            continue
-        text = _last_text(root, line, rel)
+    # A changes fragment that left the line is judged at the commit that
+    # deleted it: that commit's changelog and notes must have gained its text,
+    # which is what a release assembly does.  Later edits to released text
+    # (a typo, a tooltip sweep) never reopen it.  One the line still holds and
+    # this tree lacks is judged against this tree, gained against the line.
+    deleted: dict[str | None, list[tuple[str, str]]] = {}
+    for rel, added, gone in hist.gone:
+        deleted.setdefault(gone, []).append((rel, added))
+    for rel, added in sorted(hist.alive.items()):
+        if not (root / rel).is_file():
+            deleted.setdefault(None, []).append((rel, added))
+    for gone, frags in deleted.items():
+        out += _settled_findings(root, line, gone, frags)
+    return out
+
+
+class _Tree:
+    """The record files of one commit, or of the working tree (``rev=None``)."""
+
+    def __init__(self, root: Path, rev: str | None):
+        self.root, self.rev = root, rev
+
+    def read(self, rel: str) -> str:
+        if self.rev is None:
+            path = self.root / rel
+            return path.read_text(encoding="utf-8") if path.is_file() else ""
+        return F.git(self.root, "show", f"{self.rev}:{rel}", check=False)
+
+    def notes(self) -> list[str]:
+        if self.rev is None:
+            return [p.read_text(encoding="utf-8")
+                    for p in sorted((self.root / F.NOTES_DIR).glob("v*.md"))]
+        names = F.git(self.root, "ls-tree", "--name-only", f"{self.rev}:{F.NOTES_DIR}",
+                      check=False).split()
+        return [self.read(f"{F.NOTES_DIR}/{n}") for n in sorted(names)
+                if n.startswith("v") and n.endswith(".md")]
+
+
+def _settled_findings(root: Path, line: str, gone: str | None,
+                      frags: list[tuple[str, str]]) -> list[str]:
+    """``frags`` (path, commit that added it) all left the line in ``gone``,
+    or leave it in this tree (``gone=None``).  Each of their changelog bullets
+    must be a list item, and each notes block a whole block, that the
+    deleting commit added (as many times as the fragments give it)."""
+    if gone is None:
+        after, before = _Tree(root, None), _Tree(root, line)
+        left, verb = "is deleted in this tree", f"which against {line} does not add"
+    else:
+        after, before = _Tree(root, gone), _Tree(root, f"{gone}^1")
+        left, verb = f"was deleted in {gone[:10]}", "which did not add"
+    mapping = {lab: ids[0] for lab, ids in F.recorded_labels(after.read(F.REGISTRY)).items()
+               if len(ids) == 1}
+    out, cache = [], {}
+
+    def gained(kind):
+        if kind not in cache:
+            if kind == "items":
+                cache[kind] = (F.changelog_items(after.read(F.CHANGELOG))
+                               - F.changelog_items(before.read(F.CHANGELOG)))
+            else:
+                cache[kind] = (after.notes(), before.notes())
+        return cache[kind]
+
+    used: Counter = Counter()
+    for rel, added in sorted(frags):
+        hint = _not_merged_hint(root, added) if gone is None else ""
+        text = before.read(rel)
         try:
             data = F.load_yaml(text) if text else None
         except Exception:   # yaml.YAMLError: a fragment the gate refused, merged anyway
             data = None
+        head = f"{rel} came into the line in {added[:10]} and {left}"
         if not isinstance(data, dict):
-            out.append(f"{rel} came into the line in {sha[:10]} and is gone, and its last "
-                       f"text cannot be read to show it was assembled")
+            out.append(f"{head}, and its last text cannot be read to show it was "
+                       f"assembled")
             continue
         for sec, items in (data.get("changelog") or {}).items():
             for item in items if isinstance(items, list) else []:
                 bullet = F.render_bullet(F.rewrite_labels(str(item), mapping)[0])
-                if bullet not in changelog:
-                    out.append(f"{rel} came into the line in {sha[:10]} and is gone, but "
-                               f"its {sec} bullet is not in {F.CHANGELOG}: "
-                               f"{' '.join(str(item).split())[:70]!r}.  A merged changes "
-                               f"fragment leaves only by a release assembly"
-                               + _not_merged_hint(root, sha))
+                items_gained = gained("items")
+                hit = next((k for k in sorted(items_gained, key=str)
+                            if k[1] == sec and k[2] == bullet and items_gained[k] > used[k]),
+                           None)
+                if hit is not None:
+                    used[hit] += 1
+                    continue
+                out.append(f"{head}, {verb} its {sec} bullet to {F.CHANGELOG} as a list item of a "
+                           f"release section: {' '.join(str(item).split())[:70]!r}.  A "
+                           f"merged changes fragment leaves only by a release assembly, "
+                           f"which writes its text in the commit that deletes it" + hint)
         for heading, block in (data.get("release_notes") or {}).items():
-            text = F.rewrite_labels(str(block), mapping)[0].strip()
-            if text and text not in notes:
-                out.append(f"{rel} came into the line in {sha[:10]} and is gone, but its "
-                           f"{heading!r} release-notes text is in no notes file: "
-                           f"{' '.join(text.split())[:70]!r}.  A merged changes fragment "
-                           f"leaves only by a release assembly"
-                           + _not_merged_hint(root, sha))
+            text = F.rewrite_labels(str(block), mapping)[0].strip("\n")
+            if not text.strip():
+                continue
+            now, was = gained("notes")
+            n = (sum(F.notes_block_count(t, heading, text) for t in now)
+                 - sum(F.notes_block_count(t, heading, text) for t in was))
+            if n > used[(heading, text)]:
+                used[(heading, text)] += 1
+                continue
+            out.append(f"{head}, {verb} its {heading!r} release-notes text to a notes file as a "
+                       f"whole block: {' '.join(text.split())[:70]!r}.  A merged changes "
+                       f"fragment leaves only by a release assembly, which writes its "
+                       f"text in the commit that deletes it" + hint)
     return out
 
 

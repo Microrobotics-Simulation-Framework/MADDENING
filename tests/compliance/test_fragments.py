@@ -1305,7 +1305,7 @@ class TestARecordedLabelHasAHistory:
         hw.write_text(hw.read_text().replace("= 3", "= 4"))
         _commit(root, "number an entry by hand")
         found = check_fragments.findings(root)
-        assert any("records MADD-ANO-NEW-never-a-fragment-1, which no fragment in this "
+        assert any(f"records {L('never-a-fragment', 1)}, which no fragment in this "
                    "tree's history ever held" in f for f in found), found
 
     def test_a_label_another_line_assembled_has_its_history_through_the_merge(self, tmp_path):

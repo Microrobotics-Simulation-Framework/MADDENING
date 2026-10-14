@@ -366,10 +366,11 @@ jobs:
 
       - name: Runner health (after the tests)
         # Memory at the end of the test step and the CPU steal time over it
-        # (/proc/stat), and the sidecar that tells the weights tooling which
-        # CPU this shard's times were measured on.
+        # (/proc/stat), in the log.  The weights tooling reads this shard's
+        # runner (collection time, CPU) from its JUnit report, written by
+        # tests/_sharding.py, not from this step.
         if: ${{ !cancelled() && steps.health-before.outcome == 'success' }}
-        run: python scripts/ci_runner_health.py after-tests --label "per-push JAX ${{ matrix.jax-version }} shard ${{ matrix.shard }}/6" --sidecar runner-shard${{ matrix.shard }}.json
+        run: python scripts/ci_runner_health.py after-tests --label "per-push JAX ${{ matrix.jax-version }} shard ${{ matrix.shard }}/6"
 
       - name: Test time budget
         # Runs after a red test step too.  The gate half only: warns on any
@@ -433,7 +434,6 @@ jobs:
           path: |
             test-results-shard${{ matrix.shard }}.xml
             cache-mode-shard${{ matrix.shard }}.txt
-            runner-shard${{ matrix.shard }}.json
           retention-days: 90
           if-no-files-found: warn
 
@@ -575,6 +575,90 @@ jobs:
             -e MADDENING_REQUIRE_STREAMING_TESTS=1 \
             -v "$PWD":/src:ro maddening-streaming-test:ci \
             python3 -m pytest tests/cloud/test_webrtc_loopback.py tests/cloud/test_entrypoint_streams.py tests/cloud/test_local_webrtc_viewer_example.py -v -rs --tb=short -p no:cacheprovider
+
+  viz3d:
+    # tests/api/test_frame_renderer_3d.py (the server-side 3D frame renderer,
+    # 14 tests) needs PyVista, which only the viz3d extra installs.  The
+    # sharded lanes install .[ci] without it, so the module skipped itself
+    # there, and until this job existed those tests ran in no CI job.  The
+    # renderer draws off screen through VTK's OpenGL, which wants a display:
+    # xvfb-run supplies a virtual one, drawn by Mesa's software rasteriser.
+    # Measured on a runner: 14 passed in 6.5 s.
+    # MADDENING_REQUIRE_VIZ3D_TESTS=1 makes a missing PyVista fail the module
+    # instead of skipping it: a skip here would mean the tests ran nowhere,
+    # again.
+    #
+    # Held to the same rules as the other jobs: the constraints file, the
+    # exact JAX pin of the oldest lane, and the degraded-runner canary
+    # (rerun-degraded.yml re-runs a job whose canary tripped).  The constraints
+    # file pins what the ci and usd extras pull in; PyVista, VTK and the
+    # packages only they bring are not in it (scripts/generate_ci_constraints.py
+    # resolves ci and usd), so those four or five float to the newest
+    # release.  Pinning them means adding viz3d to that script's EXTRAS and
+    # regenerating the whole file, which re-resolves every lane: a decision of
+    # its own.
+    # tests/viz (the matplotlib and ZMQ viewers) is not run here: it is the
+    # other path scripts/check_anomalies.py records as run by no job.
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Runner health (machine)
+        # See the test job: scripts/ci_runner_health.py says why.
+        run: python scripts/ci_runner_health.py machine
+
+      - name: Install dependencies (with viz3d)
+        env:
+          # The versions CI installs against (ci/constraints.txt, written by
+          # scripts/generate_ci_constraints.py): a run is reproducible, and a
+          # new release of a dependency is taken on purpose.  The weekly
+          # scheduled-checks.yml installs without it.
+          PIP_CONSTRAINT: ci/constraints.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install "jax==0.10.2" "jaxlib==0.10.2"
+          pip install -e ".[ci,viz3d]"
+
+      - name: Runner canary (degraded runner check)
+        # As in the test job: stops the job at once, exit 75 and the artifact
+        # degraded-runner-<job id>, when the runner is far slower than any
+        # healthy one.  It sits before the apt step so the install time it
+        # reads is pip's alone.
+        id: canary
+        run: python scripts/ci_runner_health.py canary --label "viz3d"
+
+      - name: Mark a degraded runner
+        if: ${{ always() && steps.canary.outputs.degraded == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: degraded-runner-${{ job.check_run_id }}
+          path: ${{ runner.temp }}/degraded-runner.json
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Install a virtual display and Mesa's software OpenGL
+        # A package mirror that stops answering leaves apt-get waiting with no
+        # output (see the test job's C toolchain step); ten minutes is the
+        # limit and a rerun of the job is the remedy.
+        timeout-minutes: 10
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb libgl1 libegl1 libosmesa6
+
+      - name: Run the 3D frame renderer tests
+        env:
+          JAX_PLATFORMS: cpu
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          MADDENING_REQUIRE_VIZ3D_TESTS: "1"
+        run: xvfb-run -a python -m pytest -v -rs --tb=short tests/api/test_frame_renderer_3d.py
 
   lineax-floor:
     # `pyproject.toml` allows lineax>=0.0.7 and the lanes above install the

@@ -20,7 +20,10 @@ import pytest
 import yaml
 
 import maddening
-from maddening.compliance._validate import validate_anomaly_registry
+from maddening.compliance._validate import (
+    _validate_registry_document,
+    validate_anomaly_registry,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 #: The ``src`` directory of the package under test, so the CLI subprocess
@@ -299,11 +302,14 @@ class TestMaddeningsOwnRegistry:
         spec.loader.exec_module(gate)
         seen = []
 
-        def recorder(path, **kwargs):
+        def recorder(path, document, **kwargs):
             seen.append(kwargs.get("version_field"))
-            return validate_anomaly_registry(path, **kwargs)
+            return _validate_registry_document(path, document, **kwargs)
 
-        monkeypatch.setattr(gate, "validate_anomaly_registry", recorder)
+        # The gate loads the registry once and hands the document to the
+        # validator's document entry point (``validate_anomaly_registry``
+        # minus the load).
+        monkeypatch.setattr(gate, "_validate_registry_document", recorder)
         path = _registry(tmp_path, my_lib_version="0.1.0")
         assert gate.main([path, "--no-resolve"]) == 1
         assert seen == ["maddening_version"]

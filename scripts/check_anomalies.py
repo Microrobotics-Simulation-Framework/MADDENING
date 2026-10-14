@@ -67,6 +67,7 @@ because pytest (``packaging>=22``) and matplotlib depend on it.
 
 import argparse
 import ast
+import gc
 import os
 import re
 import sys
@@ -77,7 +78,7 @@ _REPO_ROOT = os.path.dirname(_HERE)
 # Add src to path so this works without installation
 sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
 
-from maddening.compliance._validate import validate_anomaly_registry
+from maddening.compliance._validate import _validate_registry_document, parse_cache
 from maddening.core.compliance.anomaly import SafetyRelevance
 
 
@@ -1195,20 +1196,22 @@ def _parameters(func):
     return [a.arg for a in args.posonlyargs + args.args + args.kwonlyargs]
 
 
-def _test_function_kinds(func, classes, tree, aliases):
+def _test_function_kinds(func, classes, tree, aliases, memo=None):
     """Imperative skips / xfails a test function reaches when it runs.
 
     Its own body (:func:`_imperative_kinds`), and the body of every fixture
     it requests by parameter name, the fixtures those request, and the
     ``autouse`` fixtures in scope -- defined in the same module or in a
     class enclosing the test.  A fixture that calls ``pytest.skip()``
-    stops the test before its first line.
+    stops the test before its first line.  ``memo`` is the run's
+    :class:`_ModuleMemo`, or ``None`` for a fresh one.
     """
-    helpers = _module_functions(tree)
+    memo = _ModuleMemo() if memo is None else memo
+    helpers = memo.module_functions(tree)
     kinds = _imperative_kinds(func.body, aliases, helpers)
-    fixtures, autouse = _fixture_defs(tree.body, aliases)
+    fixtures, autouse = memo.fixture_defs(tree.body, aliases)
     for cls in classes:
-        inner, inner_autouse = _fixture_defs(cls.body, aliases)
+        inner, inner_autouse = memo.fixture_defs(cls.body, aliases)
         fixtures.update(inner)
         autouse += inner_autouse
     todo = [fixtures[n] for n in _parameters(func) if n in fixtures] + autouse
@@ -1242,6 +1245,50 @@ def _module_marks(tree, aliases=None):
     return kinds
 
 
+class _ModuleMemo:
+    """What the reference rules derive from each parsed test module, per run.
+
+    A test file cited a hundred times had its aliases, module marks,
+    functions and fixtures recomputed a hundred times.  Within one run the
+    parse cache (:func:`maddening.compliance._validate.parse_cache`) hands
+    every citation of an unchanged file the same tree object, so each value
+    is computed once per tree and held with the objects it came from: a key
+    is the identity of its inputs, and a hit is checked to be those very
+    objects, so a re-parsed (edited) file never meets an old value.  Values
+    are returned as fresh containers, because callers extend them.
+
+    One instance lives for one run (:func:`main` makes it); never
+    module-global.
+    """
+
+    def __init__(self):
+        self._held = {}
+
+    def _get(self, kind, inputs, compute):
+        key = (kind,) + tuple(id(x) for x in inputs)
+        hit = self._held.get(key)
+        if hit is None or any(a is not b for a, b in zip(hit[0], inputs)):
+            hit = (inputs, compute())
+            self._held[key] = hit
+        return hit[1]
+
+    def aliases(self, tree):
+        return self._get("aliases", (tree,), lambda: _pytest_aliases(tree))
+
+    def module_functions(self, tree):
+        return self._get("functions", (tree,),
+                         lambda: _module_functions(tree))
+
+    def module_marks(self, tree, aliases):
+        return list(self._get("marks", (tree, aliases),
+                              lambda: _module_marks(tree, aliases)))
+
+    def fixture_defs(self, body, aliases):
+        found, autouse = self._get("fixtures", (body, aliases),
+                                   lambda: _fixture_defs(body, aliases))
+        return dict(found), list(autouse)
+
+
 def _holds_a_test(body):
     """Does this module or class body hold a test pytest would collect?"""
     import ast
@@ -1257,7 +1304,7 @@ def _holds_a_test(body):
     return False
 
 
-def _reference_findings(aid, status, ref, repo_root):
+def _reference_findings(aid, status, ref, repo_root, memo=None):
     """``(errors, conditional)`` for one ``verification`` entry.
 
     The validator has already said whether the entry *resolves*; this says
@@ -1289,8 +1336,14 @@ def _reference_findings(aid, status, ref, repo_root):
     ``usefixtures`` mark, a collection hook, and a condition that is
     always true on CI without being fixed in the source.  Those are the
     runtime's to decide; the gate reads source.
+
+    ``memo`` is the run's :class:`_ModuleMemo` (``None``: a fresh one).
+    Inside :func:`maddening.compliance._validate.parse_cache` the file is
+    parsed once per run rather than once per reference.
     """
     from maddening.compliance._validate import _defined_in, _member, _parse
+
+    memo = _ModuleMemo() if memo is None else memo
 
     parts = str(ref).split("::")
     rel = parts[0]
@@ -1318,8 +1371,8 @@ def _reference_findings(aid, status, ref, repo_root):
         return [], []
 
     module = _defined_in(tree.body)
-    aliases = _pytest_aliases(tree)
-    kinds = _module_marks(tree, aliases)
+    aliases = memo.aliases(tree)
+    kinds = memo.module_marks(tree, aliases)
     node = None
     classes = []
     for name in parts[1:]:
@@ -1355,7 +1408,7 @@ def _reference_findings(aid, status, ref, repo_root):
         if not _holds_a_test(body):
             return [f"{where}: holds no test pytest collects"], []
     else:
-        kinds += _test_function_kinds(node, classes, tree, aliases)
+        kinds += _test_function_kinds(node, classes, tree, aliases, memo)
 
     errors, conditional = [], []
     if "skip" in kinds:
@@ -1377,7 +1430,7 @@ def _reference_findings(aid, status, ref, repo_root):
     return errors, conditional
 
 
-def _reference_errors(anomalies, repo_root, resolve=True):
+def _reference_errors(anomalies, repo_root, resolve=True, memo=None):
     """``(errors, conditional)`` over every entry's references.
 
     A reference listed twice in one entry is refused whether or not
@@ -1386,8 +1439,9 @@ def _reference_errors(anomalies, repo_root, resolve=True):
     when the audit duplicated one ``verification`` and one
     ``affected_components`` entry, against a CHANGELOG saying the counts
     had stopped inflating).  The rest needs the files, so it runs only
-    when references are resolved.
+    when references are resolved.  ``memo``: see :func:`_reference_findings`.
     """
+    memo = _ModuleMemo() if memo is None else memo
     errors, conditional = [], []
     for a in anomalies:
         aid = str(a.get("anomaly_id", "<missing>"))
@@ -1409,24 +1463,38 @@ def _reference_errors(anomalies, repo_root, resolve=True):
             refs = [refs]
         for ref in dict.fromkeys(str(r) for r in refs):
             errs, cond = _reference_findings(
-                aid, a.get("resolution_status"), ref, repo_root)
+                aid, a.get("resolution_status"), ref, repo_root, memo)
             errors += errs
             conditional += cond
     return errors, conditional
 
 
-def _census(path):
+def _load_registry(path):
+    """The registry at ``path``, loaded exactly as the validator loads it.
+
+    ``yaml.safe_load``, the pure-Python loader, and never libyaml's: the two
+    disagree on some input (a tab after a colon, a block scalar's header
+    followed by a comment without a space), and a registry or fragment this
+    gate accepted must load wherever else it is read.  The gate loads the
+    file once and hands the document to the validator and to every rule.
+    """
+    import yaml
+
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+def _census(path, data=None):
     """``(anomalies, declared references)`` in the registry, without resolving.
 
     Counting is separate from resolving so that the zero-scope guards below
     can run unconditionally -- including under ``--no-resolve``, where
     nothing is resolved but an empty registry is still an empty registry.
     The parsed document is returned too, for the rules that read the header.
+    ``data`` is the document :func:`_load_registry` gave for ``path``
+    (``None``: load it here).
     """
-    import yaml
-
-    with open(path) as f:
-        data = yaml.safe_load(f) or {}
+    data = (_load_registry(path) if data is None else data) or {}
     if not isinstance(data, dict):
         data = {}
     anomalies = [a for a in (data.get("anomalies") or []) if isinstance(a, dict)]
@@ -1441,6 +1509,27 @@ def _census(path):
 
 
 def main(argv=None):
+    """Run the gate; 0 when the registry passes, 1 otherwise.
+
+    One run holds one parse cache (:func:`maddening.compliance._validate.
+    parse_cache`), shared by the validator and the reference rules, so each
+    cited test file is parsed once however often it is cited; the cache
+    compares the file's bytes on every lookup, and is dropped when the run
+    ends.  The garbage collector is paused for the run and restored after:
+    the run allocates millions of AST nodes and frees nothing until it
+    ends, so every collection in between would walk them all for nothing.
+    """
+    collecting = gc.isenabled()
+    gc.disable()
+    try:
+        with parse_cache():
+            return _main(argv)
+    finally:
+        if collecting:
+            gc.enable()
+
+
+def _main(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "path",
@@ -1471,9 +1560,19 @@ def main(argv=None):
     if repo_root is None and os.path.abspath(args.path).startswith(_REPO_ROOT):
         repo_root = _REPO_ROOT
 
+    import yaml
+
+    try:
+        document = _load_registry(args.path)
+    except yaml.YAMLError as exc:
+        print(f"ERROR: {args.path} does not parse as YAML: {exc}",
+              file=sys.stderr)
+        return 1
+
     notes: list[str] = []
-    errors = validate_anomaly_registry(
+    errors = _validate_registry_document(
         args.path,
+        document,
         prefix=args.prefix,
         repo_root=repo_root,
         resolve_references=not args.no_resolve,
@@ -1482,7 +1581,7 @@ def main(argv=None):
         # header must carry that field and no other project's.
         version_field="maddening_version",
     )
-    n_anomalies, declared, anomalies, data = _census(args.path)
+    n_anomalies, declared, anomalies, data = _census(args.path, document)
     # Evidence rules run whether or not the schema passed and whether or
     # not references are resolved: a stripped verification list and a
     # deleted entry are both structural, and ``--no-resolve`` must not
@@ -1502,7 +1601,7 @@ def main(argv=None):
     if n_anomalies:
         errors += version_range_errors(data)
     ref_errors, conditional = _reference_errors(
-        anomalies, repo_root, resolve=not args.no_resolve)
+        anomalies, repo_root, resolve=not args.no_resolve, memo=_ModuleMemo())
     errors += ref_errors
 
     # A symbol in an optional subpackage this environment cannot import is
@@ -1577,4 +1676,9 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    status = main()
+    # The process ends here.  Whatever is still alive (the imported package
+    # and every module the references made it import) need not be walked by
+    # the collector on the way out; freezing it saves about a second.
+    gc.freeze()
+    sys.exit(status)

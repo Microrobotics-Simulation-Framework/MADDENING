@@ -40,6 +40,11 @@ python scripts/generate_soup_tables.py --check
 
 What to expect from the gates whose behaviour is not simply "exit 0 or 1":
 
+- `check_fragments.py` reads the history of HEAD for its ratchet.  On your
+  own branch, an anomaly label you added and then dropped before merging
+  shows as a dropped fragment: run it again with `--base origin/<the branch
+  you merge into>`, which reads that line's history only, as CI does for a
+  pull request.
 - `check_doctests.py` executes every `>>>` example in `src/maddening/` under
   pytest (about two minutes).  It fails if an example fails or is skipped,
   or if fewer examples run than its committed floor (`MIN_EXAMPLES`).  Adding

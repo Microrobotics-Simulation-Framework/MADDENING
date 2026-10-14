@@ -30,7 +30,7 @@ Once the anomaly is confirmed and understood:
 1. Check that it is not registered already: `python scripts/anom.py list --similar "a few words"`
 2. Write the entry in your branch's anomalies fragment, `docs/fragments/anomalies/<branch>.yaml` (`python scripts/fragments.py new --anomaly` starts one), never in `docs/validation/known_anomalies.yaml` directly. Its id is the label `MADD-ANO-NEW-<branch>-<n>`; name it by that label in tests and other files. Do not pick a number: `scripts/fragments.py assemble` numbers it later, as its own pull request, and rewrites the label everywhere
 3. The entry must follow the schema: `anomaly_id`, `title`, `description`, `severity`, `safety_relevance`, `safety_relevance_rationale`, `resolution_status`; a reachable entry also carries a `release_note`, the release notes' Known-anomalies text
-4. Run `python scripts/check_anomalies.py --prefix MADD-ANO-` and `python scripts/check_fragments.py` to validate
+4. Run `python scripts/check_anomalies.py --prefix MADD-ANO-` and `python scripts/check_fragments.py --base origin/<your base branch>` to validate
 5. Cross-reference the GitHub Issue number in the YAML entry
 
 The changelog bullet and the release-notes text go in your changes fragment, `docs/fragments/changes/<branch>.yaml`; a pull request never edits `CHANGELOG.md` or `docs/release_notes/`.  The developer guide's "Recording a change" (`docs/developer_guide/documentation_standards.md`) has the whole procedure.

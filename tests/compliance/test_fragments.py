@@ -1086,3 +1086,555 @@ class TestFromBranch:
         _commit(root, "as a merge of the base would leave it")
         with pytest.raises(fragments.AssemblyError, match="in the registry twice"):
             fragments.from_branch(root, "main")
+
+
+# ---------------------------------------------------------------------------
+# The fix round after the pre-merge audit (its finding ids in the names)
+# ---------------------------------------------------------------------------
+
+def _version(root, version):
+    root.joinpath("pyproject.toml").write_text(f'[project]\nname = "t"\nversion = "{version}"\n')
+    _commit(root, f"version {version}")
+
+
+def _release(root, version="0.4.2", date="2026-11-01"):
+    return fragments.assemble(root, release=version, date=date, soup=False,
+                              out=lambda *_: None)
+
+
+def _release_section(root, version="0.4.2"):
+    text = (root / "CHANGELOG.md").read_text()
+    spans = fragments.version_section_span(text, version)
+    assert len(spans) == 1, spans
+    return text[spans[0][0]:spans[0][1]]
+
+
+class TestTheReleaseAssemblyRunsTwice:
+    """F1: a second ``assemble --release X.Y.Z`` adds to the section the first
+    wrote, or changes nothing; after the tag it refuses."""
+
+    def test_a_second_run_with_nothing_new_is_byte_identical(self, tmp_path):
+        root = _repo(tmp_path)
+        _two_fragments(root)
+        _version(root, "0.4.2")
+        _release(root)
+        _commit(root, "release assembly")
+        before = _tree(root)
+        assert _release(root) == {}
+        assert _tree(root) == before
+        assert (root / "CHANGELOG.md").read_text().count("## [0.4.2]") == 1
+
+    def test_a_late_fragment_joins_the_existing_section(self, tmp_path, gate, capsys):
+        root = _repo(tmp_path)
+        _two_fragments(root)
+        _version(root, "0.4.2")
+        _release(root)
+        _commit(root, "release assembly")
+        _merge_branch(root, "fix/late", {
+            _changes_file("fix-late"): 'line: "0.4"\nchangelog:\n  Fixed:\n    - "A late fix."\n',
+            _anomaly_file("fix-late"): anomalies_fragment("fix-late", entry(L("fix-late", 1))),
+        })
+        found = _findings(root)
+        assert any("arrived after its release assembly: run scripts/fragments.py "
+                   "assemble --release 0.4.2 again" in f for f in found), found
+        assert _release(root) == {L("fix-late", 1): "MADD-ANO-007"}
+        _commit(root, "fold the late fragment in")
+        section = _release_section(root)
+        assert section.index("### Fixed\n\n- A late fix.\n") < section.index("### Known Anomalies")
+        # the count is the registry's after the late entry, written once
+        assert section.count("registry entries are reachable in 0.4.2") == 1
+        assert "- 5 registry entries are reachable in 0.4.2: 5 open" in section
+        assert "- MADD-ANO-006: avoid it." in section
+        assert check_fragments.findings(root) == []
+        assert _gate(gate, root, capsys)[0] == 0
+
+    def test_after_the_tag_a_fragment_belongs_to_the_next_version(self, tmp_path):
+        root = _repo(tmp_path)
+        _two_fragments(root)
+        _version(root, "0.4.2")
+        _release(root)
+        _commit(root, "release assembly")
+        _git(root, "tag", "v0.4.2")
+        _merge_branch(root, "fix/late", {
+            _changes_file("fix-late"): 'line: "0.4"\nchangelog:\n  Fixed:\n    - "Late."\n'})
+        found = _findings(root)
+        assert any("v0.4.2 is tagged, so 0.4.2 is out and this fragment belongs to the "
+                   "next version" in f for f in found), found
+        before = _tree(root)
+        with pytest.raises(fragments.AssemblyError, match="v0.4.2 is tagged.*belongs to the "
+                                                           "next version"):
+            _release(root)
+        assert _tree(root) == before
+
+    def test_two_sections_for_one_version_are_refused_at_any_version(self, tmp_path):
+        root = _repo(tmp_path)
+        changelog = root / "CHANGELOG.md"
+        changelog.write_text(changelog.read_text().replace(
+            "## [0.4.1] - 2026-10-13\n", "## [0.4.1] - 2026-10-14\n\n- again\n\n"
+                                         "## [0.4.1] - 2026-10-13\n", 1))
+        found = _findings(root)
+        assert any("has 2 '## [0.4.1]' sections" in f for f in found), found
+
+    def test_the_assembler_refuses_a_changelog_with_two_sections(self, tmp_path):
+        root = _repo(tmp_path)
+        _two_fragments(root)
+        _version(root, "0.4.2")
+        changelog = root / "CHANGELOG.md"
+        changelog.write_text(changelog.read_text().replace(
+            "## [Unreleased]\n", "## [Unreleased]\n\n## [0.4.2] - 2026-11-01\n\n"
+                                 "## [0.4.2] - 2026-11-01\n", 1))
+        _commit(root, "a doubled section")
+        with pytest.raises(fragments.AssemblyError):
+            _release(root)
+
+
+class TestTheRatchetReadsTheWholeHistory:
+    """F2: a label the line ever merged is live or recorded, however the
+    commits that dropped it were pushed."""
+
+    def test_a_two_commit_push_cannot_drop_a_merged_fragment(self, tmp_path):
+        """The audit's r02: commit A drops the fragment, commit B is unrelated,
+        and both are pushed together."""
+        root = _repo(tmp_path)
+        _merge_branch(root, "fix/b", {_anomaly_file("fix-b"): anomalies_fragment(
+            "fix-b", entry(L("fix-b", 1)))})
+        (root / _anomaly_file("fix-b")).unlink()
+        _commit(root, "A: drop it")
+        _write(root, "README.md", "x\n")
+        _commit(root, "B: unrelated")
+        for line in (None, "HEAD", "HEAD^1"):
+            found = check_fragments.findings(root, line)
+            assert any(f"{L('fix-b', 1)} came into the line" in f for f in found), (line, found)
+
+    def test_a_forward_merge_pushed_with_its_relabel_cannot_drop_a_fragment(self, tmp_path):
+        """The audit's r02c: the merge's resolution loses the 0.5 line's own
+        fragment, and the relabel commit follows it in the same push."""
+        root = _two_lines(tmp_path)
+        fragments.assemble(root, soup=False, out=lambda *_: None)
+        _commit(root, "assemble the 0.4 line")
+        _git(root, "checkout", "-q", "line-05")
+        _write(root, "tests/test_x.py", f"# pins {L('fix-old', 1)}\n")
+        _commit(root, "0.5 pins the 0.4 label")
+        subprocess.run(["git", "-C", str(root), "merge", "-q", "--no-ff", "--no-commit", "main"],
+                       capture_output=True)
+        _git(root, "rm", "-q", _anomaly_file("feat-new"))
+        _git(root, "commit", "-q", "-m", "forward merge")
+        fragments.relabel(root)
+        _commit(root, "relabel")
+        found = check_fragments.findings(root)
+        assert any(f"{L('feat-new', 1)} came into the line" in f for f in found), found
+
+    def test_a_branchs_own_unmerged_history_is_not_read_after_it_merges(self, tmp_path):
+        """A label a branch added and dropped before it merged never reached
+        the line: the merge's diff against the line is what the line saw."""
+        root = _repo(tmp_path)
+        _git(root, "checkout", "-q", "-b", "fix/w")
+        _write(root, _anomaly_file("fix-w"), anomalies_fragment(
+            "fix-w", entry(L("fix-w", 1)), entry(L("fix-w", 2))))
+        _commit(root, "two entries")
+        _write(root, _anomaly_file("fix-w"), anomalies_fragment("fix-w", entry(L("fix-w", 1))))
+        _commit(root, "one was a mistake")
+        _git(root, "checkout", "-q", "main")
+        _git(root, "merge", "-q", "--no-ff", "-m", "Merge fix/w", "fix/w")
+        assert check_fragments.findings(root) == []
+        # On the branch itself, HEAD's history holds the dropped label; the
+        # base's history does not, which is what --base reads.
+        _git(root, "checkout", "-q", "fix/w")
+        assert any(L("fix-w", 2) in f for f in check_fragments.findings(root))
+        assert check_fragments.findings(root, "main") == []
+
+    def test_a_shallow_clone_fails_closed(self, tmp_path):
+        root = _repo(tmp_path)
+        _merge_branch(root, "fix/b", {_anomaly_file("fix-b"): anomalies_fragment(
+            "fix-b", entry(L("fix-b", 1)))})
+        shallow = tmp_path / "shallow"
+        subprocess.run(["git", "clone", "-q", "--depth", "1", f"file://{root}", str(shallow)],
+                       check=True, capture_output=True)
+        found = check_fragments.findings(shallow)
+        assert any("the ratchet cannot check" in f and "shallow clone" in f
+                   for f in found), found
+        with pytest.raises(fragments.AssemblyError, match="shallow clone"):
+            fragments.assemble(shallow, soup=False, out=lambda *_: None)
+
+
+class TestChangesFragmentsJoinTheRatchet:
+    """F3: a merged changes fragment leaves only by a release assembly."""
+
+    @pytest.mark.parametrize("body", [
+        'changelog:\n  Fixed:\n    - "A user-visible fix."\n',
+        'release_notes:\n  Fixed: "Only notes text."\n',
+    ])
+    def test_deleting_one_unassembled_fails(self, tmp_path, body):
+        root = _repo(tmp_path)
+        _merge_branch(root, "fix/c", {_changes_file("fix-c"): 'line: "0.4"\n' + body})
+        (root / _changes_file("fix-c")).unlink()
+        _commit(root, "drop the changes fragment")
+        found = check_fragments.findings(root)
+        assert any(f"{_changes_file('fix-c')} came into the line" in f
+                   and "A merged changes fragment leaves only by a release assembly" in f
+                   for f in found), found
+
+    def test_one_the_release_assembly_wrote_passes(self, tmp_path):
+        root = _repo(tmp_path)
+        _merge_branch(root, "fix/c", {_changes_file("fix-c"): (
+            'line: "0.4"\nchangelog:\n  Fixed:\n    - |\n      Two lines\n      of text.\n'
+            'release_notes:\n  Fixed: "Notes text."\n')})
+        _version(root, "0.4.2")
+        _release(root)
+        _commit(root, "release assembly")
+        assert check_fragments.findings(root) == []
+        # ... and the bullet is what the check compares: take it out of the
+        # changelog and the deleted fragment is reported.
+        changelog = root / "CHANGELOG.md"
+        changelog.write_text(changelog.read_text().replace("- Two lines\n  of text.\n", ""))
+        found = _findings(root)
+        assert any("its Fixed bullet is not in CHANGELOG.md" in f for f in found), found
+
+
+class TestARecordedLabelHasAHistory:
+    """F4: a '# label:' comment names a label some fragment held."""
+
+    @pytest.mark.parametrize("version", ["0.4.2.dev0", "0.5.0.dev0"])
+    def test_a_hand_written_comment_fails_on_either_line(self, tmp_path, version):
+        root = _repo(tmp_path, version=version)
+        reg = root / fragments.REGISTRY
+        reg.write_text(reg.read_text() + "\n" + entry("MADD-ANO-004", title="by hand").replace(
+            '  - anomaly_id: "MADD-ANO-004"\n',
+            '  - anomaly_id: "MADD-ANO-004"\n    # label: NEW-never-a-fragment-1\n'))
+        hw = root / fragments.HW_FILE
+        hw.write_text(hw.read_text().replace("= 3", "= 4"))
+        _commit(root, "number an entry by hand")
+        found = check_fragments.findings(root)
+        assert any("records MADD-ANO-NEW-never-a-fragment-1, which no fragment in this "
+                   "tree's history ever held" in f for f in found), found
+
+    def test_a_label_another_line_assembled_has_its_history_through_the_merge(self, tmp_path):
+        """A 0.4 fragment added and assembled between two forward merges never
+        appears in the 0.5 line's first-parent history; its label was held in
+        a commit the merge reaches."""
+        root = _two_lines(tmp_path)
+        _merge_branch(root, "fix/mid", {_anomaly_file("fix-mid"): anomalies_fragment(
+            "fix-mid", entry(L("fix-mid", 1), title="mid one"))})
+        fragments.assemble(root, soup=False, out=lambda *_: None)
+        _commit(root, "assemble the 0.4 line")
+        _git(root, "checkout", "-q", "line-05")
+        done = subprocess.run(["git", "-C", str(root), "merge", "-q", "--no-ff", "-m",
+                               "forward merge", "main"], capture_output=True, text=True)
+        assert done.returncode == 0, done.stdout + done.stderr
+        fragments.relabel(root)
+        _commit(root, "relabel")
+        assert check_fragments.findings(root) == []
+
+
+def test_a_fragment_only_libyaml_reads_is_refused_by_both_gates(tmp_path, gate, capsys):
+    """F5: fragments are read with yaml.safe_load, as the assembler's SOUP
+    generator reads the registry they become."""
+    root = _repo(tmp_path)
+    _write(root, _anomaly_file("fix-heat"), anomalies_fragment(
+        "fix-heat", entry(L("fix-heat", 1))).replace('severity: "minor"', 'severity:\t"minor"'))
+    found = _findings(root)
+    assert any("does not parse as YAML" in f for f in found), found
+    status, _, err = _gate(gate, root, capsys)
+    assert status == 1 and "does not parse as YAML" in err
+
+
+def test_a_dot0_release_assembly_names_every_reachable_entry(tmp_path, monkeypatch):
+    """F7: from its .0 notes on, a line's notes are read alone, so the .0
+    release assembly names every reachable entry there, not only those it
+    numbered (as 0.4.0's notes did)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_release_notes_rules", REPO_ROOT / "tests" / "compliance"
+        / "test_release_notes_known_anomalies.py")
+    rules = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rules)
+    root = _repo(tmp_path, version="0.5.0.dev0")
+    monkeypatch.setattr(fragments, "RELEASE_LINES", ("0.5",))      # the hand-over commit
+    _write(root, "docs/validation/development_record_v0.5.0.md", _RECORD)
+    _commit(root, "the 0.5 line's record")
+    _merge_branch(root, "feat/x", {
+        _changes_file("feat-x"): 'line: "0.5"\nchangelog:\n  Added:\n    - "A thing."\n',
+        _anomaly_file("feat-x"): anomalies_fragment("feat-x", entry(L("feat-x", 1)), line="0.5"),
+    })
+    _release(root, "0.5.0", "2026-12-01")
+    notes = (root / "docs/release_notes/v0.5.0.md").read_text()
+    known = rules.section(notes, rules.NOTES_HEADING)
+    assert "- `MADD-ANO-002`: two." in known and "- `MADD-ANO-003`: three." in known
+    assert "- `MADD-ANO-004`: Avoid it; see the guide." in known
+    assert "MADD-ANO-001" not in known                      # resolved
+    reg = yaml.safe_load((root / fragments.REGISTRY).read_text())
+    names = sorted(p.name for p in (root / "docs/release_notes").glob("v*.md"))
+    line_notes = [(n, (root / "docs/release_notes" / n).read_text())
+                  for n in rules.line_notes(names, "0.5.0")]
+    assert [n for n, _ in line_notes] == ["v0.5.0.md"]
+    assert rules.notes_findings(line_notes, reg, *rules.fragment_view(root)) == []
+
+
+class TestBulletsAreCarriedVerbatim:
+    """F8: the release section holds each bullet as the fragment wrote it."""
+
+    CASES = {
+        "multi-line text": ("    - |\n      First line,\n      second line.\n",
+                            "- First line,\n  second line.\n"),
+        "a nested list": ("    - |\n      A fix with a list:\n\n      - first point\n"
+                          "      - second point\n",
+                          "- A fix with a list:\n\n  - first point\n  - second point\n"),
+        "a code fence": ("    - |\n      Para one.\n\n      ```python\n      x  =  1\n      ```\n",
+                         "- Para one.\n\n  ```python\n  x  =  1\n  ```\n"),
+        "a leading dash": ('    - "- starts with a dash"\n', "- - starts with a dash\n"),
+        "two spaces in code": ('    - "`a  b` keeps two spaces"\n', "- `a  b` keeps two spaces\n"),
+    }
+
+    @pytest.mark.parametrize("case", sorted(CASES))
+    def test_through_a_release_assembly(self, tmp_path, case):
+        given, written = self.CASES[case]
+        root = _repo(tmp_path)
+        _merge_branch(root, "fix/t", {_changes_file("fix-t"):
+                                      'line: "0.4"\nchangelog:\n  Fixed:\n' + given})
+        _version(root, "0.4.2")
+        _release(root)
+        section = _release_section(root)
+        assert "### Fixed\n\n" + written in section, section
+        _commit(root, "release assembly")
+        assert check_fragments.findings(root) == []
+
+    def test_rendering_loses_nothing(self):
+        for text in ("one", "a\n\n  - b\n  - c", "x  y", "- dash", "```\ncode  here\n```"):
+            assert fragments.unrender_bullet(fragments.render_bullet(text)) == text
+
+    def test_a_lossy_rendering_is_caught_and_the_tree_restored(self, tmp_path, monkeypatch):
+        root = _repo(tmp_path)
+        _merge_branch(root, "fix/t", {_changes_file("fix-t"):
+                                      'line: "0.4"\nchangelog:\n  Fixed:\n    - "`a  b`"\n'})
+        _version(root, "0.4.2")
+        before = _tree(root)
+        render = fragments.render_bullet
+        monkeypatch.setattr(fragments, "render_bullet",
+                            lambda text: render(" ".join(str(text).split())))
+        with pytest.raises(fragments.AssemblyError, match="does not survive its rendering"):
+            _release(root)
+        assert _tree(root) == before
+
+    def test_a_bullet_the_section_loses_is_caught(self, tmp_path, monkeypatch):
+        """_verify's count of each bullet in the section (audit mutant F1)."""
+        root = _repo(tmp_path)
+        _merge_branch(root, "fix/t", {_changes_file("fix-t"):
+                                      'line: "0.4"\nchangelog:\n  Fixed:\n    - "Kept."\n'
+                                      '    - "Lost."\n'})
+        _version(root, "0.4.2")
+        before = _tree(root)
+        section = fragments.release_section
+        monkeypatch.setattr(fragments, "release_section", lambda existing, v, d, bullets, c: section(
+            existing, v, d, {k: [b for b in items if b != "Lost."] for k, items in bullets.items()},
+            c))
+        with pytest.raises(fragments.AssemblyError, match="added 0 time"):
+            _release(root)
+        assert _tree(root) == before
+
+    def test_a_notes_block_the_notes_lose_is_caught(self, tmp_path, monkeypatch):
+        """_verify's check of each release-notes block (audit mutant F2)."""
+        root = _repo(tmp_path)
+        _merge_branch(root, "fix/t", {_changes_file("fix-t"):
+                                      'line: "0.4"\nrelease_notes:\n  Fixed: "The text."\n'})
+        _version(root, "0.4.2")
+        before = _tree(root)
+        append = fragments._notes_append
+        monkeypatch.setattr(fragments, "_notes_append", lambda root_, snap, version, heading, block:
+                            append(root_, snap, version, None, None))
+        with pytest.raises(fragments.AssemblyError, match="release-notes block is missing"):
+            _release(root)
+        assert _tree(root) == before
+
+
+class TestTheGatesRefuseWhatTheAssemblerWould:
+    """F9: each input the assembler refused passed both gates; now the gates
+    refuse it, or the assembler takes it."""
+
+    def test_a_label_with_a_leading_zero(self, tmp_path, gate, capsys):
+        root = _repo(tmp_path)
+        lab = _NEW + "fix-z-01"
+        _write(root, _anomaly_file("fix-z"), anomalies_fragment("fix-z", entry(lab)))
+        found = _findings(root)
+        assert any(f"anomaly_id '{lab}' is not a label" in f for f in found), found
+        assert _gate(gate, root, capsys)[0] == 1
+        assert fragments.LABEL_RE.fullmatch(lab) is None
+        assert fragments.LABEL_COMMENT_RE.match("    # label: NEW-fix-z-01") is None
+
+    @pytest.mark.parametrize("kind", ["anomalies", "changes"])
+    def test_a_fragment_renamed_after_it_merged(self, tmp_path, kind):
+        root = _repo(tmp_path)
+        if kind == "anomalies":
+            old, new = _anomaly_file("fix-a"), _anomaly_file("fix-aa")
+            _merge_branch(root, "fix/a", {old: anomalies_fragment("fix-a", entry(L("fix-a", 1)))})
+            text = (root / old).read_text().replace("fix-a-1", "fix-aa-1")
+        else:
+            old, new = _changes_file("fix-a"), _changes_file("fix-b")
+            _merge_branch(root, "fix/a", {old: 'line: "0.4"\nchangelog:\n  Fixed:\n    - "A fix."\n'})
+            text = (root / old).read_text()
+        _git(root, "mv", old, new)
+        _write(root, new, text)
+        _commit(root, "rename")
+        found = check_fragments.findings(root)
+        assert any("came into the line" in f for f in found), found
+        # The assembler's merge order sees the renamed file as an addition.
+        assert new in fragments.merge_order(root, [new])
+
+    def test_a_label_in_a_path_with_a_space_or_an_accent(self, tmp_path):
+        root = _repo(tmp_path)
+        lab = L("fix-s", 1)
+        _merge_branch(root, "fix/s", {_anomaly_file("fix-s"): anomalies_fragment("fix-s", entry(lab)),
+                                      "docs/user guide/notes.md": f"See {lab}.\n",
+                                      "docs/notes é.md": f"See {lab}.\n"})
+        assert check_fragments.findings(root) == []
+        assert fragments.assemble(root, soup=False, out=lambda *_: None) == {lab: "MADD-ANO-004"}
+        assert (root / "docs/user guide/notes.md").read_text() == "See MADD-ANO-004.\n"
+        assert (root / "docs/notes é.md").read_text() == "See MADD-ANO-004.\n"
+
+    def test_relabel_reads_a_path_with_a_space(self, tmp_path):
+        root = _repo(tmp_path)
+        _two_fragments(root)
+        fragments.assemble(root, soup=False, out=lambda *_: None)
+        _commit(root, "assembly")
+        _write(root, "docs/a b/late.md", f"# {L('fix-a', 1)}\n")
+        _commit(root, "a merge brings the label back")
+        assert fragments.relabel(root) == [("docs/a b/late.md", 1)]
+
+    def test_from_branch_on_a_reused_stem_numbers_after_the_recorded_labels(self, tmp_path):
+        root = _repo(tmp_path)
+        _merge_branch(root, "fix/b", {_anomaly_file("fix-b"): anomalies_fragment(
+            "fix-b", entry(L("fix-b", 1)))})
+        fragments.assemble(root, soup=False, out=lambda *_: None)
+        _commit(root, "assembly")
+        _git(root, "branch", "-D", "fix/b")
+        _git(root, "checkout", "-q", "-b", "fix/b")
+        reg = root / fragments.REGISTRY
+        reg.write_text(reg.read_text() + "\n" + entry("MADD-ANO-005", title="old style"))
+        hw = root / fragments.HW_FILE
+        hw.write_text(hw.read_text().replace("= 4", "= 5"))
+        _commit(root, "an entry the old way")
+        assert fragments.from_branch(root, "main") == {"MADD-ANO-005": L("fix-b", 2)}
+        found = _findings(root)
+        assert not any("already assembled" in f for f in found), found
+
+
+@pytest.mark.parametrize("heading", ["## [Unreleased]", "## [unreleased]", "## Unreleased",
+                                     "## UNRELEASED"])
+def test_the_release_gate_reads_every_spelling_of_unreleased(tmp_path, heading):
+    """N1."""
+    root = _repo(tmp_path, version="0.4.2")
+    _write(root, "docs/release_notes/v0.4.2.md", "# v0.4.2\n")
+    changelog = root / "CHANGELOG.md"
+    changelog.write_text(changelog.read_text().replace(
+        "## [Unreleased]\n", f"{heading}\n\n- by hand\n"))
+    found = _findings(root)
+    assert any(f"'{heading}' is not empty at release version 0.4.2" in f for f in found), found
+
+
+# ---------------------------------------------------------------------------
+# Tests the audit's surviving mutants showed missing
+# ---------------------------------------------------------------------------
+
+def test_is_dev_is_the_dot_dev_suffix_alone():
+    """Mutant F7: anything else is a release version, so the gate fails closed."""
+    for version in ("0.4.2.dev0", "0.5.0.dev3", "1.0.0.dev"):
+        assert fragments.is_dev(version), version
+    for version in ("0.4.2", "0.4.2rc1", "0.4.2.dev0+local", "0.4.2dev0", "0.4.2.devel"):
+        assert not fragments.is_dev(version), version
+
+
+def test_release_must_be_the_trees_release(tmp_path):
+    """Mutant F6."""
+    root = _repo(tmp_path)
+    _two_fragments(root)
+    before = _tree(root)
+    with pytest.raises(fragments.AssemblyError, match="--release 0.4.3 is not this tree's"):
+        _release(root, "0.4.3")
+    assert _tree(root) == before
+
+
+def test_the_templates_multi_line_extra_keys_never_reach_the_registry(tmp_path):
+    """Mutant F9: the template writes ``release_note: >`` over several lines."""
+    root = _repo(tmp_path)
+    text = (entry(L("fix-m", 1), note=None) + "    release_note: >\n      Line one of the note,\n"
+            "      line two.\n    record_index: >\n      `MADD-ANO-004` — *m* —\n      **open**.\n")
+    _merge_branch(root, "fix/m", {_anomaly_file("fix-m"): anomalies_fragment("fix-m", text)})
+    fragments.assemble(root, soup=False, out=lambda *_: None)
+    reg = (root / fragments.REGISTRY).read_text()
+    assert "release_note" not in reg and "record_index" not in reg and "Line one" not in reg
+    assert yaml.safe_load(reg)["anomalies"][-1]["anomaly_id"] == "MADD-ANO-004"
+
+
+def test_a_stem_used_again_is_ordered_by_its_latest_addition(tmp_path):
+    """Mutant F10: a fragment path added, assembled (deleted) and added again
+    by a later branch of the same name is numbered where it merged last."""
+    root = _repo(tmp_path)
+    _merge_branch(root, "fix/b", {_anomaly_file("fix-b"): anomalies_fragment(
+        "fix-b", entry(L("fix-b", 1)))})
+    fragments.assemble(root, soup=False, out=lambda *_: None)
+    _commit(root, "assembly")                                   # fix-b-1 -> 004
+    _git(root, "branch", "-D", "fix/b")
+    _merge_branch(root, "fix/c", {_anomaly_file("fix-c"): anomalies_fragment(
+        "fix-c", entry(L("fix-c", 1)))})
+    _merge_branch(root, "fix/b", {_anomaly_file("fix-b"): anomalies_fragment(
+        "fix-b", entry(L("fix-b", 2)))})
+    assert fragments.assemble(root, soup=False, out=lambda *_: None) == {
+        L("fix-c", 1): "MADD-ANO-005", L("fix-b", 2): "MADD-ANO-006"}
+
+
+def test_relabel_leaves_a_resurrected_fragments_id_lines_alone(tmp_path):
+    """Mutant F11: the fragment then still says 'already assembled', not 'is a
+    number', and its labels elsewhere in the file are rewritten."""
+    root = _repo(tmp_path)
+    _two_fragments(root)
+    old = (root / _anomaly_file("fix-a")).read_text()
+    fragments.assemble(root, soup=False, out=lambda *_: None)
+    _commit(root, "assembly")
+    _write(root, _anomaly_file("fix-a"), old)
+    _commit(root, "a stale merge brings it back")
+    fragments.relabel(root)
+    text = (root / _anomaly_file("fix-a")).read_text()
+    assert f'  - anomaly_id: "{L("fix-a", 1)}"' in text
+    assert "Like MADD-ANO-004: avoid it." in text                # its release_note
+    found = check_fragments.findings(root)
+    assert any(f"{L('fix-a', 1)} is already assembled as MADD-ANO-006" in f for f in found), found
+
+
+def test_a_label_runs_to_a_word_boundary(tmp_path):
+    """Mutant F12: ``...-1x`` is not the label ``...-1`` followed by text."""
+    assert fragments.LABEL_RE.search(L("fix-heat", 1) + "x") is None
+    assert fragments.LABEL_RE.search(L("fix-heat", 1) + "_x") is None
+    root = _repo(tmp_path)
+    _write(root, _anomaly_file("fix-heat"), anomalies_fragment("fix-heat", entry(L("fix-heat", 1))))
+    _write(root, "tests/test_pin.py", f"# {L('fix-heat', 1)}x\n")
+    found = _findings(root)
+    assert any("is not the label spelling" in f for f in found), found
+
+
+def test_a_label_comment_inside_a_fragment_is_refused(tmp_path):
+    """Mutant X1: only the registry records labels."""
+    root = _repo(tmp_path)
+    _write(root, _anomaly_file("fix-heat"), anomalies_fragment("fix-heat", entry(
+        L("fix-heat", 1), extra="    # label: NEW-fix-heat-1")))
+    found = _findings(root)
+    assert any("a '# label:' comment; only the registry records labels" in f
+               for f in found), found
+
+
+def test_the_label_comment_sits_right_after_the_id_line():
+    """Mutant X2: invariant 5.4's layout half."""
+    text = ('  - anomaly_id: "MADD-ANO-004"\n    title: "x"\n    # label: NEW-fix-b-1\n')
+    found = check_fragments.label_record_findings(text)
+    assert any("not right after its id line" in f for f in found), found
+    assert check_fragments.label_record_findings(
+        '  - anomaly_id: "MADD-ANO-004"\n    # label: NEW-fix-b-1\n    title: "x"\n') == []
+
+
+def test_the_cross_line_allowance_ignores_pre_release_headings(gate):
+    """Mutant A5: an rc of 0.4.2 is not a 0.4 release, so the next patch is
+    still 0.4.2."""
+    from packaging.version import Version
+
+    released = frozenset(Version(v) for v in ("0.4.0", "0.4.1", "0.4.2rc1"))
+    assert gate.cross_line_versions(Version("0.5.0.dev0"), released, Version) == {
+        Version("0.4.2")}

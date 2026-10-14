@@ -420,7 +420,8 @@ def _last_text(root: Path, line: str, rel: str) -> str | None:
     if here:
         return here
     gone = F.git(root, "log", "--first-parent", "--diff-merges=first-parent", "--no-renames",
-                 "--diff-filter=D", "--format=%H", "-1", line, "--", rel, check=False).strip()
+                 "--diff-filter=D", "--no-patch", "--format=%H", "-1", line, "--", rel,
+                 check=False).strip()
     if not gone:
         return None
     return F.git(root, "show", f"{gone}^1:{rel}", check=False) or None
@@ -435,8 +436,18 @@ def _not_merged_hint(root: Path, sha: str) -> str:
 
 
 def ratchet_findings(root: Path, hist: History, live: set, recorded: dict,
-                     line: str = "HEAD") -> list[str]:
+                     line: str = "HEAD", own_branch_hint: bool = False) -> list[str]:
     """Nothing the line ever merged under ``docs/fragments/`` was dropped."""
+    out = _ratchet_findings(root, hist, live, recorded, line)
+    if out and own_branch_hint:
+        out.append("(Reading HEAD's history: on a branch of your own, a fragment you added "
+                   "and dropped before merging shows above.  Run with --base <the branch "
+                   "you merge into>, which reads that line's history only, as CI does for "
+                   "a pull request.)")
+    return out
+
+
+def _ratchet_findings(root, hist, live, recorded, line):
     if hist.error:
         return [f"the ratchet cannot check that no merged fragment was deleted: "
                 f"{hist.error}"]
@@ -504,7 +515,7 @@ def findings(root, base: str | None = None, release_gate: bool = True) -> list[s
     out += changelog_findings(root)
     if release_gate:
         out += release_findings(root, version, live)
-    out += ratchet_findings(root, hist, live, recorded, line)
+    out += ratchet_findings(root, hist, live, recorded, line, own_branch_hint=base is None)
     return out
 
 

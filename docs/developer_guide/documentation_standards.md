@@ -282,7 +282,15 @@ the notes' `For contributors` heading, or in a single changelog line at most.
 release assembly (`scripts/fragments.py assemble --release X.Y.Z --date D`,
 run inside the version-bump pull request) writes the dated section and the
 release notes from every fragment of the line, and deletes the fragments it
-used.
+used. Each bullet is carried as written: a multi-line bullet, a nested list
+or a code fence stays inside its list item.
+
+A fragment that merges after the release assembly but before the tag fails
+the release gate. Run the release assembly again: it adds the fragment to the
+`## [X.Y.Z]` section it wrote the first time, and a run with nothing new
+changes nothing. Once `vX.Y.Z` is tagged, the assembly refuses: the fragment
+belongs to the next version, so bump the tree to the next `.dev0` and the
+fragment waits for that release.
 
 ### A new anomaly
 
@@ -317,9 +325,12 @@ it assigned. It records each label as a `# label:` comment after the entry's
 id line, rewrites every label in the tree to its number, writes the index line
 and the release note, and regenerates the SOUP table. Every entry from
 `MADD-ANO-297` on carries that comment, so `scripts/check_fragments.py` fails
-an entry numbered by hand. A fragment that was merged is never deleted by hand
-(the ratchet in CI refuses it): close a wrong entry as `duplicate` or
-`resolved` instead.
+an entry numbered by hand, and a `# label:` comment that names a label no
+fragment in the history held. A fragment that was merged is never deleted or
+renamed by hand: close a wrong entry as `duplicate` or `resolved` instead. The
+ratchet in CI reads the line's whole first-parent history, and refuses a
+merged label that is in no fragment and not recorded by the registry, and a
+merged changes fragment whose bullets are not in `CHANGELOG.md`.
 
 Changing an entry that is already numbered (resolving it, correcting it) is
 still an edit to the registry. Its Known-anomalies text goes in a changes
@@ -339,6 +350,22 @@ release-assembly pull request). After each forward merge, run
 `python scripts/fragments.py relabel`: it rewrites every label the registry
 records to its number. `scripts/check_fragments.py` names each conflict a
 forward merge can leave and its resolution.
+
+A forward merge goes through a pull request, like every other change: a
+branch from the 0.5 line merges the 0.4 line in, runs `relabel`, and opens a
+pull request against the 0.5 line. Its checks then run on the merge before it
+lands. Never push a forward merge to a release branch directly.
+
+The 0.4 line closes when 0.5.0 is tagged. Numbering moves to the 0.5 line in
+0.5.0's release-assembly pull request: its first commit sets `RELEASE_LINES`
+in `scripts/fragments.py` to `("0.5",)`, and the release assembly that
+follows numbers the 0.5 line's own entries, from the next id after the last
+one the 0.4 line assigned. From then on the 0.5 line numbers at its quiet
+points, and the next minor line keeps its labels until its own `.0` release
+assembly takes numbering over the same way. A 0.4.x release after 0.5.0 is a
+separate decision. Until it is made, the 0.4 line takes no assembly: it still
+names itself first in `RELEASE_LINES`, so it would assign ids the 0.5 line
+assigns too.
 
 A pull request opened before fragments existed moves its own registry
 entries into a fragment with `python scripts/fragments.py from-branch --base

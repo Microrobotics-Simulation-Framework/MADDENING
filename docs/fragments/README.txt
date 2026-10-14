@@ -16,8 +16,11 @@ Start one with:
 
 and check it with:
 
-  python scripts/check_fragments.py
+  python scripts/check_fragments.py --base origin/<your base branch>
   python scripts/check_anomalies.py --prefix MADD-ANO-
+
+(--base: the ratchet reads the history of the line you merge into, not your
+branch's own commits before it merges.)
 
 Name a new anomaly by its label in tests and other files.  The assembler
 (scripts/fragments.py assemble, run as its own pull request) numbers the

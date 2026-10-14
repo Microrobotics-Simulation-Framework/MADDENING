@@ -301,11 +301,51 @@ def test_a_reachable_entry_the_notes_omit_is_found(notes, registry, status):
     assert any(f.startswith("MADD-ANO-999 is reachable") for f in findings), findings
 
 
-def test_a_reachable_entry_deleted_from_the_notes_is_found(notes, registry):
+def _edit_every(notes, change):
+    """Every notes file of the line with ``change`` applied to its Known
+    anomalies section (a file without one is left as it is)."""
+    edited = []
+    for name, text in notes:
+        body = _section_or_empty(text, NOTES_HEADING)
+        edited.append((name, text.replace(body, change(body)) if body else text))
+    return edited
+
+
+def _deleting_an_entry_from_the_notes_is_found(notes, registry):
+    """The newest reachable entry, deleted from every notes file of the line
+    that names it, is reported.  (Deleting it from the ``.0`` notes alone
+    proved nothing once a later notes file named it too.)"""
     victim = sorted(_reachable(registry["anomalies"]))[-1]
-    edited = _edit_first(notes, lambda body: body.replace(victim, "MADD-ANO-XXX"))
+    edited = _edit_every(notes, lambda body: body.replace(victim, "MADD-ANO-XXX"))
     findings = notes_findings(edited, registry)
     assert any(f.startswith(f"{victim} is reachable") for f in findings), findings
+
+
+def test_a_reachable_entry_deleted_from_the_notes_is_found(notes, registry):
+    _deleting_an_entry_from_the_notes_is_found(notes, registry)
+
+
+def test_it_is_found_after_an_assembly_names_a_new_entry_in_a_later_file(notes, registry):
+    """A quiet-point assembly numbers the next entry and names it in the
+    patch release's notes (``vX.Y.Z.md``) only, never in the ``.0`` notes."""
+    newest = max(int(a["anomaly_id"][-3:]) for a in registry["anomalies"])
+    new = f"MADD-ANO-{newest + 1:03d}"
+    assembled = [*notes, ("v9.9.9.md", f"# x\n\n## Known anomalies\n\n- `{new}`: new.\n")]
+    grown = _grown(registry, _entry(new))
+    assert notes_findings(assembled, grown) == []
+    _deleting_an_entry_from_the_notes_is_found(assembled, grown)
+
+
+def test_only_a_changes_fragments_known_anomalies_text_covers_an_entry(tmp_path):
+    """A changes fragment names an entry for the notes under its 'Known
+    anomalies' heading; the same id under another heading covers nothing."""
+    folder = tmp_path / "docs" / "fragments" / "changes"
+    folder.mkdir(parents=True)
+    (folder / "fix-x.yaml").write_text(
+        'line: "0.4"\nrelease_notes:\n  Fixed: "MADD-ANO-998 is fixed."\n'
+        '  Known anomalies: "MADD-ANO-999 remains."\n')
+    _, named = fragment_view(tmp_path)
+    assert named == {"MADD-ANO-999"}
 
 
 def test_a_later_notes_file_covers_a_new_reachable_entry(notes, registry):

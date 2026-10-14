@@ -1,0 +1,139 @@
+name: Re-run degraded runners
+
+# When a test lane fails because a job drew a degraded runner, run the failed
+# jobs once more.
+#
+# Why: both test lanes fail a job at once, in a step named "Runner canary
+# (degraded runner check)" with exit code 75, when its runner is far slower
+# than any healthy one (scripts/ci_runner_health.py; on 2026-10-13 one
+# per-push job ran 3.8x slower than its sibling and a slow-lane runner
+# installed in 9 minutes against about 1).  That says nothing about the code
+# under test, and the remedy is a fresh runner.  This does it, once.
+#
+# What it re-runs: only a run whose every failed job is marked degraded --
+# the canary step is the step that failed, and the artifact
+# degraded-runner-<job id> exists -- and only the first attempt
+# (run_attempt == 1), so a second degraded runner leaves a red run for a
+# person.  A run with any other failure, even beside a degraded job, is left
+# alone: a real failure re-run by luck would hide a flaky test.
+#
+# Safety: it never checks out or executes the code of the run it re-runs.
+# It has no checkout step, and the decision reads only the run's jobs and
+# artifacts through the API.  The names it reads (job, step, artifact) are
+# data: the script parses them as JSON and compares them, and nothing from
+# the run is interpolated into a shell command (the run id, attempt and
+# conclusion reach the script through the environment).  Its token is `actions: write` and
+# nothing else (`gh run rerun --failed` is one call of the Actions API).
+#
+# Limitation: GitHub runs a `workflow_run` workflow from the default branch's
+# copy only, so this workflow does nothing until it is on `main`.  The
+# fail-fast detection in the test lanes works from the branch it is on.
+#
+# The decision is the function `decide` in the script below.  Its test
+# (tests/compliance/test_rerun_degraded.py) extracts the script from this
+# file and runs it on canned API output.
+
+on:
+  workflow_run:
+    workflows: ["CI", "Slow tests (scheduled)"]
+    types: [completed]
+
+permissions:
+  actions: write
+
+concurrency:
+  group: rerun-degraded-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  rerun:
+    # The cheap half of the decision, so most runs cost a skipped job.
+    if: ${{ github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.run_attempt == 1 }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Re-run the failed jobs if every one drew a degraded runner
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+
+          #: The step the canary runs in (both lanes) and the artifact it is marked by.
+          CANARY_STEP = "Runner canary (degraded runner check)"
+          MARKER_PREFIX = "degraded-runner-"
+          #: A job in one of these states did not fail.
+          NOT_FAILED = {"success", "skipped", "neutral"}
+
+
+          def decide(run, jobs, artifacts):
+              """``(rerun?, why)`` from a run, its jobs and its artifacts (canned or real API objects)."""
+              if run.get("conclusion") != "failure":
+                  return False, f"the run's conclusion is {run.get('conclusion')!r}, not 'failure'"
+              if int(run.get("run_attempt") or 0) != 1:
+                  return False, f"this is attempt {run.get('run_attempt')}: a run is re-run once"
+              markers = {a["name"] for a in artifacts if not a.get("expired")}
+              bad = [j for j in jobs if j.get("conclusion") not in NOT_FAILED]
+              if not bad:
+                  return False, "no job failed"
+              unmarked = []
+              for job in bad:
+                  canary_failed = any(s.get("name") == CANARY_STEP and s.get("conclusion") == "failure"
+                                      for s in job.get("steps") or [])
+                  marked = f"{MARKER_PREFIX}{job.get('id')}" in markers
+                  if not (job.get("conclusion") == "failure" and canary_failed and marked):
+                      unmarked.append(f"{job.get('name')} ({job.get('conclusion')}"
+                                      f"{'' if canary_failed else ', canary step did not fail'}"
+                                      f"{'' if marked else ', no degraded-runner artifact'})")
+              if unmarked:
+                  return False, "not every failed job is a degraded runner: " + "; ".join(unmarked)
+              return True, f"every failed job drew a degraded runner: {', '.join(j.get('name', '?') for j in bad)}"
+
+
+          def _documents(text):
+              """Every JSON document of ``gh api --paginate`` output (one per page, back to back)."""
+              decoder, index, out = json.JSONDecoder(), 0, []
+              while index < len(text):
+                  while index < len(text) and text[index].isspace():
+                      index += 1
+                  if index >= len(text):
+                      break
+                  document, index = decoder.raw_decode(text, index)
+                  out.append(document)
+              return out
+
+
+          def _api(path):
+              result = subprocess.run(["gh", "api", "--paginate", path], capture_output=True, text=True, check=True)
+              return _documents(result.stdout)
+
+
+          def main():
+              run_id = os.environ["RUN_ID"]
+              run = {"conclusion": os.environ["RUN_CONCLUSION"], "run_attempt": os.environ["RUN_ATTEMPT"]}
+              jobs = [j for page in _api(f"repos/{os.environ['GH_REPO']}/actions/runs/{run_id}/jobs?per_page=100&filter=latest")
+                      for j in page.get("jobs", [])]
+              artifacts = [a for page in _api(f"repos/{os.environ['GH_REPO']}/actions/runs/{run_id}/artifacts?per_page=100")
+                           for a in page.get("artifacts", [])]
+              rerun, why = decide(run, jobs, artifacts)
+              print(f"run {run_id}: {'re-running the failed jobs' if rerun else 'not re-running'}: {why}")
+              summary = os.environ.get("GITHUB_STEP_SUMMARY")
+              if summary:
+                  with open(summary, "a", encoding="utf-8") as fh:
+                      fh.write(f"Run {run_id}: {'re-ran the failed jobs' if rerun else 'did not re-run'}: {why}\n")
+              if rerun:
+                  subprocess.run(["gh", "run", "rerun", run_id, "--failed"], check=True)
+                  print(f"::notice title=Degraded runner::re-ran the failed jobs of run {run_id} once")
+              return 0
+
+
+          if __name__ == "__main__":
+              sys.exit(main())
+          PY

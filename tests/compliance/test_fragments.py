@@ -326,9 +326,10 @@ class TestFormat:
         found = _findings(root)
         assert any(needle in f for f in found), found
 
+    # Each spelling in two pieces, so that this file holds none of them.
     @pytest.mark.parametrize("spelling", [
-        "madd-ano-new-fix-heat-1", "MADD_ANO_NEW_fix_heat_1", "MADD-ANO-NEW-Fix-heat-1",
-        "MADD-ANO-NEW_fix-heat-1", "MADDANONEW-fix-heat-1"])
+        "madd-ano-" "new-fix-heat-1", "MADD_ANO_" "NEW_fix_heat_1", "MADD-ANO-" "NEW-Fix-heat-1",
+        "MADD-ANO-" "NEW_fix-heat-1", "MADD" "ANONEW-fix-heat-1"])
     def test_a_variant_spelling_is_refused(self, tmp_path, spelling):
         root = _repo(tmp_path)
         _write(root, _anomaly_file("fix-heat"),

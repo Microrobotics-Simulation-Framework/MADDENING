@@ -894,7 +894,7 @@
         "numpy==2.5.4",
         "scipy==1.18.1"
       ],
-      "ref": "maddening==0.4.2.dev0"
+      "ref": "maddening==0.5.0.dev0"
     },
     {
       "dependsOn": [
@@ -927,7 +927,7 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "maddening==0.4.2.dev0",
+      "bom-ref": "maddening==0.5.0.dev0",
       "description": "Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph",
       "externalReferences": [
         {
@@ -960,9 +960,9 @@
         }
       ],
       "name": "maddening",
-      "purl": "pkg:pypi/maddening@0.4.2.dev0",
+      "purl": "pkg:pypi/maddening@0.5.0.dev0",
       "type": "library",
-      "version": "0.4.2.dev0"
+      "version": "0.5.0.dev0"
     },
     "properties": [
       {
@@ -971,7 +971,7 @@
       },
       {
         "name": "maddening:sbom:exclude-newer",
-        "value": "2026-10-13T00:00:00Z"
+        "value": "2026-10-14T00:00:00Z"
       },
       {
         "name": "maddening:sbom:generator",
@@ -1034,7 +1034,7 @@
         "value": "uv 0.11.15 (x86_64-unknown-linux-gnu)"
       }
     ],
-    "timestamp": "2026-10-13T00:00:00Z",
+    "timestamp": "2026-10-14T00:00:00Z",
     "tools": {
       "components": [
         {
@@ -1138,7 +1138,7 @@
       ]
     }
   },
-  "serialNumber": "urn:uuid:6757d0e7-d9fe-5ba8-a596-296823924df0",
+  "serialNumber": "urn:uuid:ba9c9a77-c3de-5c64-8a95-4e6d313d5845",
   "specVersion": "1.6",
   "version": 1
 }

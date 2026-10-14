@@ -18,6 +18,7 @@ so that none returns without a test failing:
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -276,6 +277,46 @@ def test_a_listed_file_that_grew_is_named_and_a_slow_runner_alone_is_not(drift, 
     slow = {p: float(weights[p]) * 1.4 for p in listed}
     result = drift.assess(slow, weights, __import__("tests._sharding", fromlist=["x"]).deal(weights, n), shard, 10)
     assert result["grown"] == [] and result["unmeasured"] == [] and not drift.drifted(result, 0.5, 300)
+
+
+def test_the_prediction_is_scaled_to_the_runner_the_report_says_it_ran_on(drift, tmp_path):
+    """A shard 1.76 times its weights on a runner 1.6 times the table's is on its prediction.
+
+    Shard 4 ran 95 to 108 minutes against 68 predicted on 2026-10-12 and 13,
+    on runners that collected the suite in 37 to 41 s, where its heaviest
+    file had been weighed on runners that took 26 and 28: "stale table or
+    slow runner?" is answered by the report itself.  The same report
+    without the runner's collection time warns.
+    """
+    from tests import _sharding
+    n, shard = 10, 3
+    weights, listed = _weights_of_shard(shard, n)
+    predicted = sum(weights[p] for p in listed)
+    speed = json.loads(_sharding.WEIGHTS_FILE.read_text(encoding="utf-8"))["runner_speed"]
+    collect = speed["reference_seconds"] * 1.6 ** (1 / speed["exponent"])
+    body = "".join(f'<testcase classname="x" name="t{i}" file="{p}" time="{weights[p] * 1.76}"/>'
+                   for i, p in enumerate(listed))
+    props = (f'<properties><property name="{_sharding.COLLECT_SECONDS_PROPERTY}" value="{collect:.4f}"/>'
+             '<property name="runner_cpu" value="A Slow CPU"/></properties>')
+    env = {k: v for k, v in os.environ.items() if k != "GITHUB_STEP_SUMMARY"}
+    env["PYTHONPATH"] = str(REPO_ROOT)
+    outs = []
+    for name, head in (("timed.xml", props), ("untimed.xml", "")):
+        report = tmp_path / name
+        report.write_text(f'<testsuites><testsuite name="pytest">{head}{body}</testsuite></testsuites>',
+                          encoding="utf-8")
+        proc = subprocess.run([sys.executable, str(SCRIPT), str(report), "--shard", f"{shard}/{n}:weighted"],
+                              cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
+        assert proc.returncode == 0, proc.stderr
+        outs.append(proc.stdout)
+    timed, untimed = outs
+    assert "::warning" not in timed, timed
+    assert "this runner (A Slow CPU) collected the suite in" in timed and "so x1.60" in timed, timed
+    assert f"{predicted * 1.6 / 60:.1f} min expected (+10%)" in timed, timed
+    assert "::warning title=Slow-lane weights are stale::" in untimed, untimed
+    result = drift.assess({p: weights[p] * 1.76 for p in listed}, weights, _sharding.deal(weights, n),
+                          shard, 10, speed=1.6)
+    assert result["predicted"] == predicted and result["expected"] == pytest.approx(predicted * 1.6)
 
 
 @pytest.mark.parametrize("measured, predicted, margin, excess", [

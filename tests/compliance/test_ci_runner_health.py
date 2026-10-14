@@ -12,10 +12,11 @@ that calls it wrongly still goes green, so these tests pin both halves:
 * a tripped canary exits 75 and leaves the annotation, the summary line, the
   output and the marker file; a healthy one leaves none of them;
 * the limits are set, and sit above the healthy maxima they were derived from;
-* in both lanes the steps are in the order the script needs, the sidecar the
-  script writes is the file the artifact uploads, and no step that runs after
-  a failure runs after a tripped canary (a re-run could not upload the same
-  artifact twice).
+* in both lanes the steps are in the order the script needs, no step writes a
+  runner file beside the JUnit report (the report is the one carrier of the
+  runner's fields for the weights tooling: ``tests/_sharding.py``), and no
+  step that runs after a failure runs after a tripped canary (a re-run could
+  not upload the same artifact twice).
 """
 
 from __future__ import annotations
@@ -184,7 +185,7 @@ def test_the_exit_code_is_not_one_pytest_or_timeout_or_a_signal_uses():
 # the commands, run as a step runs them
 # ---------------------------------------------------------------------------
 
-def test_machine_before_after_write_the_log_lines_and_the_sidecar(tmp_path, monkeypatch):
+def test_machine_before_after_write_the_log_lines_and_the_summary(tmp_path, capsys, monkeypatch):
     proc = tmp_path / "proc"
     proc.mkdir()
     (proc / "cpuinfo").write_text(CPUINFO)
@@ -194,22 +195,21 @@ def test_machine_before_after_write_the_log_lines_and_the_sidecar(tmp_path, monk
     monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary"))
     monkeypatch.delenv("MADDENING_RUNNER_STATE", raising=False)
-    sidecar = tmp_path / "runner-shard3.json"
 
     assert crh.main(["machine"]) == 0
     assert crh.main(["before-tests"]) == 0
     (proc / "meminfo").write_text(MEMINFO.replace("15028880", "9000000"))
     (proc / "stat").write_text("cpu  4100 0 150 1500 30 0 15 1203 0 0\n")
-    assert crh.main(["after-tests", "--label", "lane 3", "--sidecar", str(sidecar)]) == 0
+    capsys.readouterr()
+    assert crh.main(["after-tests", "--label", "lane 3"]) == 0
 
-    data = json.loads(sidecar.read_text())
-    assert data["cpu_model"] == "AMD EPYC 7763 64-Core Processor" and data["vcpus"] == 4
-    assert data["mem_total_kib"] == 16379276 and data["label"] == "lane 3" and data["degraded"] is False
-    tests = data["tests"]
-    assert tests["available_kib_start"] == 15028880 and tests["available_kib_end"] == 9000000
-    assert tests["steal_s"] == pytest.approx(12.0) and tests["cpu_s"] == pytest.approx(60.3)
+    line = capsys.readouterr().out.strip()
+    assert line.startswith("runner: after the tests, memory 8.6 GiB available of 15.6 GiB; "), line
+    assert "cpu steal 12.0 s of 60 cpu-s" in line and "(19.90%)" in line, line
     summary = (tmp_path / "summary").read_text()
     assert "lane 3" in summary and "cpu steal 12.0 s" in summary
+    # The weights tooling reads the runner from the JUnit report: no file here for it.
+    assert sorted(f.name for f in tmp_path.iterdir()) == ["maddening-runner-health.json", "proc", "summary"]
 
 
 def test_the_log_lines_are_the_ones_the_variance_report_reads(tmp_path, capsys, monkeypatch):
@@ -318,9 +318,11 @@ def test_the_steps_call_the_script_with_the_arguments_it_takes(workflow, job, py
     assert steps[CANARY_STEP]["id"] == "canary"
     assert re.fullmatch(r'python scripts/ci_runner_health\.py canary --label "[^"]+"', steps[CANARY_STEP]["run"].strip())
     after = steps[AFTER_STEP]["run"]
-    assert "ci_runner_health.py after-tests" in after and "--sidecar runner-shard${{ matrix.shard }}.json" in after
-    # The sidecar is uploaded with the durations: the weights tooling reads it from there.
-    assert "runner-shard${{ matrix.shard }}.json" in steps[upload_step]["with"]["path"]
+    assert re.fullmatch(r'python scripts/ci_runner_health\.py after-tests --label "[^"]+"', after.strip()), after
+    # One carrier for the runner's fields: the JUnit report (tests/_sharding.py).
+    # The durations artifact carries no runner file for the weights tooling to
+    # read instead, so the two can never disagree.
+    assert "runner-shard" not in steps[upload_step]["with"]["path"]
     # The script has every subcommand the workflow names.
     script = (REPO_ROOT / "scripts" / "ci_runner_health.py").read_text(encoding="utf-8")
     for command in ("machine", "canary", "before-tests", "after-tests"):

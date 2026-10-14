@@ -366,10 +366,11 @@ jobs:
 
       - name: Runner health (after the tests)
         # Memory at the end of the test step and the CPU steal time over it
-        # (/proc/stat), and the sidecar that tells the weights tooling which
-        # CPU this shard's times were measured on.
+        # (/proc/stat), in the log.  The weights tooling reads this shard's
+        # runner (collection time, CPU) from its JUnit report, written by
+        # tests/_sharding.py, not from this step.
         if: ${{ !cancelled() && steps.health-before.outcome == 'success' }}
-        run: python scripts/ci_runner_health.py after-tests --label "per-push JAX ${{ matrix.jax-version }} shard ${{ matrix.shard }}/6" --sidecar runner-shard${{ matrix.shard }}.json
+        run: python scripts/ci_runner_health.py after-tests --label "per-push JAX ${{ matrix.jax-version }} shard ${{ matrix.shard }}/6"
 
       - name: Test time budget
         # Runs after a red test step too.  The gate half only: warns on any
@@ -433,7 +434,6 @@ jobs:
           path: |
             test-results-shard${{ matrix.shard }}.xml
             cache-mode-shard${{ matrix.shard }}.txt
-            runner-shard${{ matrix.shard }}.json
           retention-days: 90
           if-no-files-found: warn
 

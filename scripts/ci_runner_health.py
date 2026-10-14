@@ -19,10 +19,13 @@ except the canary, which imports NumPy and JAX the way the tests do.
 ``before-tests`` / ``after-tests``
     Bracket the test step.  They log the memory available at each end and
     the CPU *steal time* between them (``/proc/stat``: the time the
-    hypervisor gave this VM's CPUs to another guest), and ``after-tests``
-    writes the sidecar JSON that goes into the durations artifact, so that
-    ``scripts/slow_lane_weights.py`` and ``scripts/ci_variance_report.py``
-    can read the CPU a shard's times were measured on.
+    hypervisor gave this VM's CPUs to another guest), in the job log and the
+    step summary.  ``scripts/ci_variance_report.py`` reads the CPU and the
+    canary from the log.  The weights tooling reads a shard's runner from its
+    JUnit report instead (``runner_collect_seconds`` and ``runner_cpu``,
+    written by ``tests/_sharding.py``): that is the one carrier of the
+    runner's fields for ``scripts/slow_lane_weights.py`` and
+    ``scripts/slow_lane_drift.py``, so this script writes no file for them.
 
 Degraded runners
 ----------------
@@ -337,26 +340,16 @@ def cmd_after_tests(args) -> int:
     state = load_state()
     after = _snapshot()
     before = state.get("before_tests")
-    out = {"schema": 1, "label": args.label, "cpu_model": state.get("cpu_model", "unknown"),
-           "vcpus": state.get("vcpus"), "mem_total_kib": after["total_kib"],
-           "canary": state.get("canary"), "degraded": False}
     line = f"runner: after the tests, memory {_gib(after['available_kib'])} available of {_gib(after['total_kib'])}"
     if before:
         steal = steal_between(before["ticks"], after["ticks"])
         wall = after["time"] - before["time"]
-        out["tests"] = {"wall_s": round(wall, 1), "available_kib_start": before["available_kib"],
-                        "available_kib_end": after["available_kib"],
-                        "steal_s": round(steal["steal_s"], 2), "cpu_s": round(steal["cpu_s"], 1),
-                        "steal_pct": round(steal["steal_pct"], 3)}
         line += (f"; cpu steal {steal['steal_s']:.1f} s of {steal['cpu_s']:.0f} cpu-s over the "
                  f"{wall / 60:.1f} min test step ({steal['steal_pct']:.2f}%)")
     else:
         line += "; no before-tests snapshot, so no steal figure"
     print(line)
     _append("GITHUB_STEP_SUMMARY", f"- {args.label or 'job'}: {line.removeprefix('runner: ')}\n")
-    if args.sidecar:
-        Path(args.sidecar).write_text(json.dumps(out, indent=1) + "\n", encoding="utf-8")
-        print(f"runner: wrote {args.sidecar}")
     return 0
 
 
@@ -368,9 +361,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--label", default="", help="the job, for the step summary")
     p.set_defaults(fn=cmd_canary)
     sub.add_parser("before-tests", help="snapshot memory and CPU steal").set_defaults(fn=cmd_before_tests)
-    p = sub.add_parser("after-tests", help="log memory and the steal since before-tests; write the sidecar")
-    p.add_argument("--label", default="", help="the job, for the step summary and the sidecar")
-    p.add_argument("--sidecar", default="", help="write the JSON sidecar here")
+    p = sub.add_parser("after-tests", help="log memory and the steal since before-tests")
+    p.add_argument("--label", default="", help="the job, for the step summary")
     p.set_defaults(fn=cmd_after_tests)
     args = ap.parse_args(argv)
     return args.fn(args)

@@ -661,6 +661,29 @@ measurement of a file wins). `test_ci_sharding.py` fails if the table lists
 a file that no longer exists, or predicts more than 100 minutes on the
 heaviest shard; then raise `SLOW_LANE_SHARDS`, or split the heaviest file.
 
+The slow lane's table goes stale without a sound: a file added since is not in
+it and goes by the hash of its path, and a file that grew keeps its old weight
+(shard 10 ran 95 to 153 minutes against 63 predicted on 2026-10-11). Each
+shard's `Weights against this run` step reads its own JUnit report against the
+table (`scripts/slow_lane_drift.py`) and, when the measured time is more than
+half again the prediction and five minutes more, warns and names the files the
+table has not measured, and the listed files that took more than twice their
+weight, heaviest first. It reports only; the answer is the refresh above. A
+warning on one shard alone, naming no file, is a slow runner.
+
+The pytest step's time limit is the job's, less what the job has used. The
+job's own `timeout-minutes` (200) counts from before its first step, so a
+limit that counted from the pytest step could outlast it: on 2026-10-13 a
+degraded runner took 11 minutes to set up, the job's limit fired under
+`timeout 175m`, and the classifier and issue steps never ran. The first step
+reads the clock; pytest gets 200 minutes less what the clock saw used, less 15
+for the setup before the clock, less 5 for the steps after pytest, and at most
+175 (`PYTEST_MAX_MIN`; a floor of one minute, as `timeout 0` is no limit).
+`test_slow_lane_hygiene.py` holds the sum under the job's limit. A shard that
+times out, runs out of memory or aborts opens a tracking issue only when the
+run is on `main` or on `release/**`: a dispatch on any other branch is still
+red and emailed, and a notice says why no issue was opened.
+
 A run's times carry the speed of each runner it drew. Between two runs of
 one deal on 2026-10-10 the same files on the same shard took from 0.57 to
 1.59 times as long, in compile time as in the rest: the hosted runners are

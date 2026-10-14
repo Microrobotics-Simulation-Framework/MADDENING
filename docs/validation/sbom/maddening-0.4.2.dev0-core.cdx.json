@@ -770,55 +770,6 @@
       "version": "4.16.0"
     },
     {
-      "bom-ref": "usd-core==26.8",
-      "description": "Pixar's Universal Scene Description",
-      "externalReferences": [
-        {
-          "comment": "from packaging metadata Project-URL: Documentation",
-          "type": "documentation",
-          "url": "https://openusd.org"
-        },
-        {
-          "comment": "from packaging metadata Project-URL: Discussion Group",
-          "type": "other",
-          "url": "https://forum.openusd.org"
-        },
-        {
-          "comment": "from packaging metadata Project-URL: Source",
-          "type": "other",
-          "url": "https://github.com/PixarAnimationStudios/OpenUSD"
-        },
-        {
-          "comment": "from packaging metadata Project-URL: Developer Docs",
-          "type": "other",
-          "url": "https://www.openusd.org/release/apiDocs.html"
-        },
-        {
-          "comment": "from packaging metadata: Home-page",
-          "type": "website",
-          "url": "https://openusd.org"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "acknowledgement": "declared",
-            "name": "LicenseRef-TOST-1.0"
-          }
-        }
-      ],
-      "name": "usd-core",
-      "properties": [
-        {
-          "name": "maddening:sbom:requires-dist-count",
-          "value": "0"
-        }
-      ],
-      "purl": "pkg:pypi/usd-core@26.8",
-      "type": "library",
-      "version": "26.8"
-    },
-    {
       "bom-ref": "wadler_lindig==0.1.7",
       "description": "A Wadler–Lindig pretty-printer for Python.",
       "externalReferences": [
@@ -941,10 +892,9 @@
         "jaxlib==0.11.2",
         "lineax==0.1.1",
         "numpy==2.5.4",
-        "scipy==1.18.1",
-        "usd-core==26.8"
+        "scipy==1.18.1"
       ],
-      "ref": "maddening==0.4.1"
+      "ref": "maddening==0.4.2.dev0"
     },
     {
       "dependsOn": [
@@ -969,9 +919,6 @@
       "ref": "typing_extensions==4.16.0"
     },
     {
-      "ref": "usd-core==26.8"
-    },
-    {
       "dependsOn": [
         "numpy==2.5.4"
       ],
@@ -980,7 +927,7 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "maddening==0.4.1",
+      "bom-ref": "maddening==0.4.2.dev0",
       "description": "Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph",
       "externalReferences": [
         {
@@ -1013,9 +960,9 @@
         }
       ],
       "name": "maddening",
-      "purl": "pkg:pypi/maddening@0.4.1",
+      "purl": "pkg:pypi/maddening@0.4.2.dev0",
       "type": "library",
-      "version": "0.4.1"
+      "version": "0.4.2.dev0"
     },
     "properties": [
       {
@@ -1036,7 +983,7 @@
       },
       {
         "name": "maddening:sbom:install",
-        "value": "usd"
+        "value": "core"
       },
       {
         "name": "maddening:sbom:libc",
@@ -1064,7 +1011,7 @@
       },
       {
         "name": "maddening:sbom:marker:python_full_version",
-        "value": "3.12.3"
+        "value": "3.12.15"
       },
       {
         "name": "maddening:sbom:marker:python_version",
@@ -1080,7 +1027,7 @@
       },
       {
         "name": "maddening:sbom:requirement",
-        "value": "maddening[usd]"
+        "value": "maddening"
       },
       {
         "name": "maddening:sbom:resolver",
@@ -1191,7 +1138,7 @@
       ]
     }
   },
-  "serialNumber": "urn:uuid:48e1d84f-f9cb-5b7a-95c0-ba4f87973abe",
+  "serialNumber": "urn:uuid:6757d0e7-d9fe-5ba8-a596-296823924df0",
   "specVersion": "1.6",
   "version": 1
 }

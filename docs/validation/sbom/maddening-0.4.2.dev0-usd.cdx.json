@@ -3,50 +3,6 @@
   "bomFormat": "CycloneDX",
   "components": [
     {
-      "bom-ref": "absl-py==2.5.1",
-      "description": "Abseil Python Common Libraries, see https://github.com/abseil/abseil-py.",
-      "externalReferences": [
-        {
-          "comment": "from packaging metadata Project-URL: Documentation",
-          "type": "documentation",
-          "url": "https://abseil.io/docs/python/"
-        },
-        {
-          "comment": "from packaging metadata Project-URL: Issues",
-          "type": "issue-tracker",
-          "url": "https://github.com/abseil/abseil-py/issues"
-        },
-        {
-          "comment": "from packaging metadata Project-URL: Source",
-          "type": "other",
-          "url": "https://github.com/abseil/abseil-py"
-        },
-        {
-          "comment": "from packaging metadata Project-URL: Changelog",
-          "type": "release-notes",
-          "url": "https://github.com/abseil/abseil-py/blob/main/CHANGELOG.md"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "acknowledgement": "declared",
-            "id": "Apache-2.0"
-          }
-        }
-      ],
-      "name": "absl-py",
-      "properties": [
-        {
-          "name": "maddening:sbom:requires-dist-count",
-          "value": "0"
-        }
-      ],
-      "purl": "pkg:pypi/absl-py@2.5.1",
-      "type": "library",
-      "version": "2.5.1"
-    },
-    {
       "bom-ref": "equinox==0.13.8",
       "description": "Elegant easy-to-use neural networks in JAX.",
       "externalReferences": [
@@ -492,121 +448,6 @@
       "version": "3.4.0"
     },
     {
-      "bom-ref": "optax==0.2.8",
-      "description": "A gradient processing and optimization library in JAX.",
-      "externalReferences": [
-        {
-          "comment": "from packaging metadata Project-URL: documentation",
-          "type": "documentation",
-          "url": "https://optax.readthedocs.io/"
-        },
-        {
-          "comment": "from packaging metadata Project-URL: repository",
-          "type": "vcs",
-          "url": "https://github.com/google-deepmind/optax"
-        },
-        {
-          "comment": "from packaging metadata Project-URL: homepage",
-          "type": "website",
-          "url": "https://github.com/google-deepmind/optax"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "acknowledgement": "declared",
-            "name": "License :: OSI Approved :: Apache Software License"
-          }
-        }
-      ],
-      "name": "optax",
-      "properties": [
-        {
-          "name": "maddening:sbom:requires-dist",
-          "value": "absl-py>=0.7.1"
-        },
-        {
-          "name": "maddening:sbom:requires-dist",
-          "value": "flax ; extra == \"docs\""
-        },
-        {
-          "name": "maddening:sbom:requires-dist",
-          "value": "flax>=0.5.3 ; extra == \"test\""
-        },
-        {
-          "name": "maddening:sbom:requires-dist",
-          "value": "ipython>=8.8.0 ; extra == \"docs\""
-        },
-        {
-          "name": "maddening:sbom:requires-dist",
-          "value": "jax>=0.5.3"
-        },
-        {
-          "name": "maddening:sbom:requires-dist",
-          "value": "jaxlib>=0.5.3"
-        },
-        {
-          "name": "maddening:sbom:requires-dist",
-          "value": "matplotlib>=3.5.0 ; extra == \"docs\""
-        },
-        {
-          "name": "maddening:sbom:requires-dist",
-          "value": "myst-nb>=1.0.0 ; extra == \"docs\""
-        },
-        {
-          "name": "maddening:sbom:requires-dist",
-          "value": "numpy>=1.18.0"
-        },
-        {
-          "name": "maddening:sbom:requires-dist",
-          "value": "scikit-learn ; extra == \"test\""
-        },
-        {
-          "name": "maddening:sbom:requires-dist",
-          "value": "scipy>=1.7.1 ; extra == \"test\""
-        },
-        {
-          "name": "maddening:sbom:requires-dist",
-          "value": "setuptools ; extra == \"docs\""
-        },
-        {
-          "name": "maddening:sbom:requires-dist",
-          "value": "sphinx-autodoc-typehints ; extra == \"docs\""
-        },
-        {
-          "name": "maddening:sbom:requires-dist",
-          "value": "sphinx-book-theme>=1.0.1 ; extra == \"docs\""
-        },
-        {
-          "name": "maddening:sbom:requires-dist",
-          "value": "sphinx-collections>=0.0.1 ; extra == \"docs\""
-        },
-        {
-          "name": "maddening:sbom:requires-dist",
-          "value": "sphinx-gallery>=0.14.0 ; extra == \"docs\""
-        },
-        {
-          "name": "maddening:sbom:requires-dist",
-          "value": "sphinx>=6.0.0 ; extra == \"docs\""
-        },
-        {
-          "name": "maddening:sbom:requires-dist",
-          "value": "sphinx_contributors ; extra == \"docs\""
-        },
-        {
-          "name": "maddening:sbom:requires-dist",
-          "value": "sphinxcontrib-katex ; extra == \"docs\""
-        },
-        {
-          "name": "maddening:sbom:requires-dist-count",
-          "value": "19"
-        }
-      ],
-      "purl": "pkg:pypi/optax@0.2.8",
-      "type": "library",
-      "version": "0.2.8"
-    },
-    {
       "bom-ref": "PyYAML==6.0.3",
       "description": "YAML parser and emitter for Python",
       "externalReferences": [
@@ -929,6 +770,55 @@
       "version": "4.16.0"
     },
     {
+      "bom-ref": "usd-core==26.8",
+      "description": "Pixar's Universal Scene Description",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: Documentation",
+          "type": "documentation",
+          "url": "https://openusd.org"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Discussion Group",
+          "type": "other",
+          "url": "https://forum.openusd.org"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Source",
+          "type": "other",
+          "url": "https://github.com/PixarAnimationStudios/OpenUSD"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Developer Docs",
+          "type": "other",
+          "url": "https://www.openusd.org/release/apiDocs.html"
+        },
+        {
+          "comment": "from packaging metadata: Home-page",
+          "type": "website",
+          "url": "https://openusd.org"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "name": "LicenseRef-TOST-1.0"
+          }
+        }
+      ],
+      "name": "usd-core",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "0"
+        }
+      ],
+      "purl": "pkg:pypi/usd-core@26.8",
+      "type": "library",
+      "version": "26.8"
+    },
+    {
       "bom-ref": "wadler_lindig==0.1.7",
       "description": "A Wadler–Lindig pretty-printer for Python.",
       "externalReferences": [
@@ -1003,9 +893,6 @@
       "ref": "PyYAML==6.0.3"
     },
     {
-      "ref": "absl-py==2.5.1"
-    },
-    {
       "dependsOn": [
         "jax==0.11.2",
         "jaxtyping==0.3.11",
@@ -1050,19 +937,17 @@
     {
       "dependsOn": [
         "PyYAML==6.0.3",
-        "equinox==0.13.8",
         "jax==0.11.2",
         "jaxlib==0.11.2",
         "lineax==0.1.1",
         "numpy==2.5.4",
-        "optax==0.2.8",
-        "scipy==1.18.1"
+        "scipy==1.18.1",
+        "usd-core==26.8"
       ],
-      "ref": "maddening==0.4.1"
+      "ref": "maddening==0.4.2.dev0"
     },
     {
       "dependsOn": [
-        "absl-py==2.5.1",
         "numpy==2.5.4"
       ],
       "ref": "ml_dtypes==0.6.0"
@@ -1075,16 +960,6 @@
     },
     {
       "dependsOn": [
-        "absl-py==2.5.1",
-        "jax==0.11.2",
-        "jaxlib==0.11.2",
-        "numpy==2.5.4",
-        "scipy==1.18.1"
-      ],
-      "ref": "optax==0.2.8"
-    },
-    {
-      "dependsOn": [
         "numpy==2.5.4",
         "typing_extensions==4.16.0"
       ],
@@ -1092,6 +967,9 @@
     },
     {
       "ref": "typing_extensions==4.16.0"
+    },
+    {
+      "ref": "usd-core==26.8"
     },
     {
       "dependsOn": [
@@ -1102,7 +980,7 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "maddening==0.4.1",
+      "bom-ref": "maddening==0.4.2.dev0",
       "description": "Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph",
       "externalReferences": [
         {
@@ -1135,9 +1013,9 @@
         }
       ],
       "name": "maddening",
-      "purl": "pkg:pypi/maddening@0.4.1",
+      "purl": "pkg:pypi/maddening@0.4.2.dev0",
       "type": "library",
-      "version": "0.4.1"
+      "version": "0.4.2.dev0"
     },
     "properties": [
       {
@@ -1158,7 +1036,7 @@
       },
       {
         "name": "maddening:sbom:install",
-        "value": "surrogates"
+        "value": "usd"
       },
       {
         "name": "maddening:sbom:libc",
@@ -1186,7 +1064,7 @@
       },
       {
         "name": "maddening:sbom:marker:python_full_version",
-        "value": "3.12.3"
+        "value": "3.12.15"
       },
       {
         "name": "maddening:sbom:marker:python_version",
@@ -1202,7 +1080,7 @@
       },
       {
         "name": "maddening:sbom:requirement",
-        "value": "maddening[surrogates]"
+        "value": "maddening[usd]"
       },
       {
         "name": "maddening:sbom:resolver",
@@ -1313,7 +1191,7 @@
       ]
     }
   },
-  "serialNumber": "urn:uuid:75f36814-e35d-511a-93d7-093137d03471",
+  "serialNumber": "urn:uuid:1f9bc2b6-ea38-5b5f-918b-66b93698562d",
   "specVersion": "1.6",
   "version": 1
 }

@@ -672,7 +672,9 @@ def _preflight(root: Path, release: str | None) -> tuple[str, str]:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import check_fragments                                   # noqa: PLC0415
 
-    problems = check_fragments.findings(root)
+    # The release gate is left out: at a release version it is red until this
+    # assembly has run.  _verify holds it on the result.
+    problems = check_fragments.findings(root, release_gate=False)
     if problems:
         raise AssemblyError("check_fragments.py is red; fix it first:\n  "
                             + "\n  ".join(problems))
@@ -809,10 +811,12 @@ def _apply(root, snap, version, line, release, date, take, mapping, appended,
         for heading, block in blocks:
             _notes_append(root, snap, release, heading, block)
 
-    # 6. rewrite every assigned label in every tracked text file
+    # 6. rewrite every assigned label in every tracked text file, and in the
+    #    files this run created (a new notes file is not tracked yet)
     if mapping:
         hits = git(root, "grep", "-l", "-I", "-F", "MADD-ANO-NEW-", check=False).split()
-        for rel in sorted(set(hits)):
+        created = [rel for rel, data in snap.saved.items() if data is None]
+        for rel in sorted(set(hits) | set(created)):
             path = root / rel
             if not path.exists():
                 continue
@@ -916,6 +920,11 @@ def _verify(root, take, mapping, appended, hw, k, release, out):
                 if notes.count(text) < 1:
                     problems.append(f"a release-notes block from {f.rel} is missing")
     problems += check_fragments.label_record_findings(reg_text)
+    version = tree_version(root)
+    if not is_dev(version):
+        # Invariant 3 at a release version: no label at all, nor any fragment.
+        problems += [f"release gate: {p}" for p in check_fragments.release_findings(
+            root, version, set())]
     if problems:
         raise AssemblyError("the assembly's own checks failed:\n  " + "\n  ".join(problems))
 

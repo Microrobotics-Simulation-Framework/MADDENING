@@ -219,7 +219,7 @@ def label_findings(root: Path, live: set, recorded: dict, registry_text: str) ->
             else:
                 out.append(f"{where}: {lab} names no label any fragment defines")
     for name in F.git(root, "ls-files").splitlines():
-        if F.ATTEMPT_RE.search(name):
+        if re.search(r"MADD[-_ ]?ANO[-_ ]?NEW", name, re.I):
             out.append(f"{name}: a label in a file name; name files by what they hold")
     for m in re.finditer(r'^\s*-?\s*anomaly_id:\s*["\']?([^"\'\s]+)', registry_text, re.M):
         if F.ATTEMPT_RE.match(m.group(1)) or F.LABEL_RE.fullmatch(m.group(1)):
@@ -318,7 +318,10 @@ def ratchet_findings(root: Path, base: str, live: set, recorded: dict) -> list[s
             for lab in sorted(before - live - set(recorded))]
 
 
-def findings(root, base: str | None = None) -> list[str]:
+def findings(root, base: str | None = None, release_gate: bool = True) -> list[str]:
+    """Every finding of the gate; ``release_gate=False`` leaves out the release
+    gate alone (the assembler's preflight: a release assembly is what clears
+    it)."""
     root = Path(root)
     version = F.tree_version(root)
     tree_line = F.line_of(version)
@@ -329,7 +332,8 @@ def findings(root, base: str | None = None) -> list[str]:
     out += fmt
     out += label_findings(root, live, recorded, registry_text)
     out += label_record_findings(registry_text)
-    out += release_findings(root, version, live)
+    if release_gate:
+        out += release_findings(root, version, live)
     if base:
         out += ratchet_findings(root, base, live, recorded)
     return out

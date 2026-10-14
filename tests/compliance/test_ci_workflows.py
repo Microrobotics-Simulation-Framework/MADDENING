@@ -367,8 +367,9 @@ _COLD_CASES = {
                      "true"),
     "test file deleted": ("tests/test_shared.py", None, "true"),
     "allowlist edited": ("tests/duration_allowlist.txt", "t # kept: why\n", "true"),
-    "shard assignment edited": ("tests/_sharding.py", "PINS = {'tests/test_shared.py': 2}\n",
-                                "true"),
+    "shard assignment edited": ("tests/_sharding.py", "PER_PUSH_SHARDS = 5\n", "true"),
+    "shard weights edited": ("tests/per_push_weights.json", '{"seconds": {"tests/test_shared.py": 99}}\n',
+                             "true"),
     "test added at the end": ("tests/test_shared.py", _SHARED + (
         "\n\ndef test_new():\n    pass\n"), "false"),
     "test body changed": ("tests/test_shared.py", _SHARED.replace("x = 2", "x = 3"), "false"),
@@ -409,7 +410,8 @@ def test_a_pull_request_that_can_move_a_compile_cost_runs_cold(tmp_path, case):
     _git(repo, "init", "-q", "-b", "main")
     _commit(repo, "src/m.py", "x = 1\n")
     _commit(repo, "tests/duration_allowlist.txt", "# empty\n")
-    _commit(repo, "tests/_sharding.py", "PINS = {}\n")
+    _commit(repo, "tests/_sharding.py", "PER_PUSH_SHARDS = 6\n")
+    _commit(repo, "tests/per_push_weights.json", '{"seconds": {"tests/test_shared.py": 9}}\n')
     base = _commit(repo, "tests/test_shared.py", _SHARED)
     rel, text, cold = _COLD_CASES[case]
     if text is None:
@@ -434,6 +436,7 @@ GATED_ON_CODE = {
                        "${{ !cancelled() && needs.changes.outputs.code == 'true' }}"),
     "test-usd": ("changes", "needs.changes.outputs.code == 'true'"),
     "test-streaming": ("changes", "needs.changes.outputs.code == 'true'"),
+    "lineax-floor": ("changes", "needs.changes.outputs.code == 'true'"),
     "typecheck": ("changes", "needs.changes.outputs.code == 'true'"),
     "verify-hypothesis": ("changes", "needs.changes.outputs.code == 'true'"),
 }
@@ -578,7 +581,7 @@ def test_pushes_start_cold_and_a_pull_request_restores_the_base_cache_unless_tol
     assert outputs["mode"] == mode, f"{event} {message!r} cold={cold_diff}: {outputs}\n{log}"
     assert "::warning" not in log, log
     # One cache per shard and lane (whatever else the key holds).
-    assert re.fullmatch(r"jaxcc-v1-Linux-.*py3\.12-jax0\.10\.2-shard3of6", outputs["key"]), outputs["key"]
+    assert re.fullmatch(r"jaxcc-v2-Linux-.*py3\.12-jax0\.10\.2-shard3of6", outputs["key"]), outputs["key"]
 
 
 def test_a_cold_ci_request_that_cannot_be_read_runs_cold_and_says_so(tmp_path):
@@ -859,7 +862,7 @@ def test_the_slow_lane_files_an_abort_as_an_abort_and_names_both_causes():
 # ---------------------------------------------------------------------------
 
 #: The workflows whose jobs run tests or gates.
-TEST_WORKFLOWS = ("ci.yml", "slow-tests.yml")
+TEST_WORKFLOWS = ("ci.yml", "slow-tests.yml", "scheduled-checks.yml")
 
 #: ``(workflow, job, step)`` allowed ``continue-on-error``: the slow lane's
 #: pytest step, so that the failure classifier after it runs on a red

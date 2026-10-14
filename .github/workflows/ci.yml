@@ -93,9 +93,10 @@ jobs:
           # A cold test run (see "Compilation cache mode") when the diff can
           # move a compile cost onto another test: a slow mark added or
           # removed, a test function removed (deleted, renamed or moved),
-          # or the allowlist or the shard assignment edited.
+          # or the allowlist or the shard assignment (the sharding module, or
+          # the weights table it deals) edited.
           cold=false
-          if grep -qxE 'tests/duration_allowlist\.txt|tests/_sharding\.py' <<< "$changed" \
+          if grep -qxE 'tests/duration_allowlist\.txt|tests/_sharding\.py|tests/per_push_weights\.json' <<< "$changed" \
               || git diff -U0 --no-renames "$base" HEAD -- 'tests/*.py' \
                  | grep -qE '^[-+][^-+].*mark\.slow|^-[[:space:]]*(async[[:space:]]+)?def[[:space:]]+test'; then
             cold=true
@@ -152,18 +153,23 @@ jobs:
         # in tests/core/test_sysid_degenerate_inputs.py).
         jax-version: ["0.10.2", "0.11.2"]
         # Each lane runs as six jobs, each on its own runner and each
-        # running its share one test at a time.  The split is by test file
-        # and stable (tests/_sharding.py): a file's shard is a hash of its
-        # path, or an explicit pin for the heaviest files, never a function
-        # of the test list -- so shard i of a pull request holds the same
-        # files as shard i of the base branch.  One process per runner
-        # keeps per-test times comparable to the budget and memory at a
-        # sixth of the suite's; xdist on one runner did neither (four
-        # workers stretched every test's wall time, and memory grew to
-        # 14 GB of 16 before a runner died, PR #133).  Changing the count
+        # running its share one test at a time.  The split is by test file,
+        # weighted by measured seconds, and stable (tests/_sharding.py,
+        # `:weighted-push`, tests/per_push_weights.json): the files of the
+        # table are dealt longest first onto the lightest shard, and a file
+        # it does not list goes by a hash of its path.  The deal is a
+        # function of the committed table alone, never of the test list --
+        # so shard i of a pull request holds the same files as shard i of
+        # the base branch, until the table changes (that run is cold).  One
+        # process per runner keeps per-test times comparable to the budget
+        # and memory at a sixth of the suite's; xdist on one runner did
+        # neither (four workers stretched every test's wall time, and
+        # memory grew to 14 GB of 16 before a runner died, PR #133).  Changing the count
         # means changing MADDENING_TEST_SHARD, the cache key and the
         # artifact name below, the three counts in the test-durations
-        # job, and PINS_FOR with its pins in tests/_sharding.py.
+        # job, and PER_PUSH_SHARDS in tests/_sharding.py; regenerate the
+        # table (scripts/slow_lane_weights.py --lane per-push) when a shard
+        # runs persistently long.
         shard: [1, 2, 3, 4, 5, 6]
 
     steps:
@@ -180,6 +186,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
+        env:
+          # The versions CI installs against (ci/constraints.txt, written by
+          # scripts/generate_ci_constraints.py): a run is reproducible, and a
+          # new release of a dependency is taken on purpose.  The weekly
+          # scheduled-checks.yml installs without it.
+          PIP_CONSTRAINT: ci/constraints.txt
         run: |
           python -m pip install --upgrade pip
           # Exact JAX pin per lane; jaxlib tracks jax version-for-version.
@@ -247,7 +259,8 @@ jobs:
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           # One cache per shard: shard i holds the same test files on every
           # branch (tests/_sharding.py), so it compiles the same programs.
-          echo "key=jaxcc-v1-${{ runner.os }}-$cpu-py${{ matrix.python-version }}-jax${{ matrix.jax-version }}-shard${{ matrix.shard }}of6" >> "$GITHUB_OUTPUT"
+          # v2: the weighted deal of 2026-10-14 re-dealt every file.
+          echo "key=jaxcc-v2-${{ runner.os }}-$cpu-py${{ matrix.python-version }}-jax${{ matrix.jax-version }}-shard${{ matrix.shard }}of6" >> "$GITHUB_OUTPUT"
           echo "compilation cache: $mode on '$model'"
 
       - name: Restore compilation cache
@@ -296,7 +309,7 @@ jobs:
           # proof stopped running -- fail instead.
           MADDENING_REQUIRE_PACKAGING_TESTS: "1"
           # This job's share of the suite (tests/_sharding.py).
-          MADDENING_TEST_SHARD: "${{ matrix.shard }}/6"
+          MADDENING_TEST_SHARD: "${{ matrix.shard }}/6:weighted-push"
         run: |
           # -rs prints every skip's reason.  A skip whose reason nobody
           # reads is indistinguishable from a test that never existed,
@@ -316,7 +329,18 @@ jobs:
         # fails on one over 20 s.  The summary is written once per lane,
         # from all six shards, by the "Test durations" job below.  The
         # budget is in docs/developer_guide/testing_standards.md.
+        #
+        # An unlisted test over the hard line is re-run once, alone, with an
+        # empty compilation cache before the step fails (--retry-outliers):
+        # one runner's stall read 23.9 s for a test that takes 1.1-1.6 s
+        # everywhere else and failed a pull request (2026-10-13).  A test
+        # over the line twice still fails.  The re-run is a pytest of this
+        # checkout, so it needs the environment the test step runs in.
         if: ${{ !cancelled() }}
+        env:
+          JAX_PLATFORMS: cpu
+          XLA_FLAGS: "--xla_gpu_autotune_level=0"
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: |
           # What this shard's cache was, for the lane summary: warm only if a
           # cache was actually restored.  Written first: this runs under
@@ -325,7 +349,8 @@ jobs:
           echo "${{ (steps.cc.outputs.mode == 'warm' && steps.cc-restore.outputs.cache-matched-key != '') && 'warm' || 'cold' }}" \
             > cache-mode-shard${{ matrix.shard }}.txt
           python scripts/report_test_durations.py test-results-shard${{ matrix.shard }}.xml \
-            --allowlist tests/duration_allowlist.txt --markdown /dev/null
+            --allowlist tests/duration_allowlist.txt --markdown /dev/null \
+            --retry-outliers
 
       - name: Drop unreadable compilation-cache entries
         # A truncated entry (see "No JAX_COMPILATION_CACHE_MAX_SIZE" above)
@@ -421,6 +446,12 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies (with USD)
+        env:
+          # The versions CI installs against (ci/constraints.txt, written by
+          # scripts/generate_ci_constraints.py): a run is reproducible, and a
+          # new release of a dependency is taken on purpose.  The weekly
+          # scheduled-checks.yml installs without it.
+          PIP_CONSTRAINT: ci/constraints.txt
         run: |
           python -m pip install --upgrade pip
           pip install "jax==0.10.2" "jaxlib==0.10.2"
@@ -494,6 +525,70 @@ jobs:
             -v "$PWD":/src:ro maddening-streaming-test:ci \
             python3 -m pytest tests/cloud/test_webrtc_loopback.py tests/cloud/test_entrypoint_streams.py tests/cloud/test_local_webrtc_viewer_example.py -v -rs --tb=short -p no:cacheprovider
 
+  lineax-floor:
+    # `pyproject.toml` allows lineax>=0.0.7 and the lanes above install the
+    # newest (0.1.1 when this job was written), so the floor of the range was
+    # claimed and never installed: the same gap the JAX matrix closes for jax.
+    # This installs lineax at its floor, on both JAX versions, and runs every
+    # test that names lineax.  The floor is read from pyproject.toml by
+    # tests/compliance/test_ci_workflows.py, which also fails when a test
+    # file that names lineax is missing from the list below.
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        jax-version: ["0.10.2", "0.11.2"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies (lineax at its floor)
+        run: |
+          python -m pip install --upgrade pip
+          # The same constraints as every other job, but for lineax itself.
+          grep -v '^lineax==' ci/constraints.txt > "$RUNNER_TEMP/constraints-without-lineax.txt"
+          export PIP_CONSTRAINT="$RUNNER_TEMP/constraints-without-lineax.txt"
+          pip install "jax==${{ matrix.jax-version }}" "jaxlib==${{ matrix.jax-version }}" "lineax==0.0.7"
+          pip install -e ".[ci]"
+          # Installed first, so `.[ci]` keeps it; make sure of it.
+          python -c "import importlib.metadata as m; v = m.version('lineax'); print('lineax', v); assert v == '0.0.7', v"
+
+      - name: Run the tests that name lineax
+        env:
+          JAX_PLATFORMS: cpu
+          XLA_FLAGS: "--xla_gpu_autotune_level=0"
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+        run: |
+          python -m pytest -v -rs --tb=short \
+            tests/adaptive/test_ift_linear_solve.py \
+            tests/cloud/multigpu/test_a_sharded_solve_of_a_non_finite_rhs_is_nan_on_a_mesh.py \
+            tests/cloud/multigpu/test_derivatives_through_the_sharded_solvers.py \
+            tests/cloud/multigpu/test_iterative_solver.py \
+            tests/cloud/multigpu/test_sharded_cg_default_route_in_every_context.py \
+            tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py \
+            tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py \
+            tests/cloud/multigpu/test_what_the_sharded_solvers_refuse_and_report.py \
+            tests/core/test_coupling_claims_helpers.py \
+            tests/core/test_coupling_claims_in_every_domain.py \
+            tests/core/test_coupling_ift_iqn_imvj.py \
+            tests/core/test_coupling_ift_lineax.py \
+            tests/core/test_coupling_sixteen_bit_groups.py \
+            tests/core/test_ift_linear_solve_never_returns_a_non_solution_on_a_floor_that_is_not_normal.py \
+            tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py \
+            tests/core/test_library_programs_trace_products_at_their_matmul_precision.py \
+            tests/core/test_linear_solvers_in_any_units.py \
+            tests/core/test_show_versions.py \
+            tests/core/test_solver_ift_lineax_is_core.py \
+            tests/nodes/adaptive/test_wavelet_cg_conditioning.py \
+            tests/property/test_coupling_adjoint_solve.py
+
   typecheck:
     # Phase 2 of the typing policy (docs/developer_guide/typing.md): the
     # pyright run is BLOCKING, in two tiers defined by typing_tiers.json.
@@ -536,6 +631,12 @@ jobs:
         # same.  The lane pins the lower of the two JAX versions the
         # test matrix runs; pyright reads stubs, not behaviour, and the
         # ceilings were measured against this one.
+        env:
+          # The versions CI installs against (ci/constraints.txt, written by
+          # scripts/generate_ci_constraints.py): a run is reproducible, and a
+          # new release of a dependency is taken on purpose.  The weekly
+          # scheduled-checks.yml installs without it.
+          PIP_CONSTRAINT: ci/constraints.txt
         run: |
           python -m pip install --upgrade pip
           pip install "jax==0.10.2" "jaxlib==0.10.2"
@@ -611,6 +712,12 @@ jobs:
       # maddening.compliance._validate -- which is what a contributor
       # running them locally relies on.
       - name: Install dependencies
+        env:
+          # The versions CI installs against (ci/constraints.txt, written by
+          # scripts/generate_ci_constraints.py): a run is reproducible, and a
+          # new release of a dependency is taken on purpose.  The weekly
+          # scheduled-checks.yml installs without it.
+          PIP_CONSTRAINT: ci/constraints.txt
         run: |
           python -m pip install --upgrade pip
           pip install "jax==0.10.2" "jaxlib==0.10.2"
@@ -720,6 +827,12 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
+        env:
+          # The versions CI installs against (ci/constraints.txt, written by
+          # scripts/generate_ci_constraints.py): a run is reproducible, and a
+          # new release of a dependency is taken on purpose.  The weekly
+          # scheduled-checks.yml installs without it.
+          PIP_CONSTRAINT: ci/constraints.txt
         run: |
           python -m pip install --upgrade pip
           pip install "jax==0.10.2" "jaxlib==0.10.2"

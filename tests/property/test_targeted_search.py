@@ -340,14 +340,22 @@ def test_no_hunt_in_the_tree_is_written_without_a_seed():
     assert not without, f"the scan found no seeded hunt in {without}: it no longer reads them"
 
 
+#: The one workflow that explores: the weekly exploring searches
+#: (``scheduled-checks.yml``), which never gates a merge.
+_EXPLORING_WORKFLOWS = {"scheduled-checks.yml"}
+
+
 def test_the_slow_lane_sets_no_switch():
-    """What the scan's verdict rests on: nothing in CI turns the hunts'
-    seeds into fresh entropy.  (An exploring job is a workflow of its own,
-    and joins this list's exceptions when it exists.)"""
+    """What the scan's verdict rests on: nothing that gates a merge or makes
+    the release's verdict turns the hunts' seeds into fresh entropy.  The
+    exploring job is a workflow of its own (``scheduled-checks.yml``, on a
+    schedule and on demand, a red run of it a find and never a failed check);
+    it is the only one that sets the switch, and it does."""
     workflows = sorted((_TESTS.parent / ".github" / "workflows").glob("*.y*ml"))
     assert workflows
-    setting = [w.name for w in workflows if ENTROPY_VARIABLE in w.read_text(encoding="utf-8")]
-    assert not setting, f"{ENTROPY_VARIABLE} is set in {setting}"
+    setting = {w.name for w in workflows if ENTROPY_VARIABLE in w.read_text(encoding="utf-8")}
+    assert setting == _EXPLORING_WORKFLOWS, (
+        f"{ENTROPY_VARIABLE} is set in {sorted(setting)}; only {sorted(_EXPLORING_WORKFLOWS)} may set it")
 
 
 _IMPORT = f"from {_HELPER} import PER_PUSH, SLOW, targeted_search\nimport dataclasses\n"

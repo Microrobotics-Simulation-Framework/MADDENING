@@ -238,6 +238,16 @@ def _wrong_cell(id: str, domain: str, cited: str, wrong: str, lets_through: str)
 _USD_SPEC = "tests/usd/test_usd_mapping_spec.py"
 _USD_GONE = "test_a_stage_written_with_a_kind_that_is_no_longer_registered_is_refused"
 
+#: The test lane's canary step and the start of its marker step, which pins the marker's name to
+#: that lane: the viz3d job has an identical marker step.
+_TEST_LANE_CANARY = (
+    '        run: python scripts/ci_runner_health.py canary --label "per-push JAX ${{ matrix.jax-version }} '
+    'shard ${{ matrix.shard }}/6"\n\n'
+    "      - name: Mark a degraded runner\n"
+    "        if: ${{ always() && steps.canary.outputs.degraded == 'true' }}\n"
+    "        uses: actions/upload-artifact@v4\n"
+    "        with:\n")
+
 MUTANTS: tuple[Mutant, ...] = (
     # --- R: the time budget, scripts/report_test_durations.py --------------
     _M("R1", RTD, '    return 1 if verdict["failing"] else 0', "    return 0", DUR,
@@ -1096,8 +1106,8 @@ MUTANTS: tuple[Mutant, ...] = (
        "the canary can never trip: a degraded runner burns the job's hours"),
     _M("RH5", "scripts/ci_runner_health.py", "INSTALL_LIMIT_S = 204.0\n", "INSTALL_LIMIT_S = 20.0\n", HEALTH,
        "a healthy install trips the canary: every job fails"),
-    _M("RH6", CI, "          name: degraded-runner-${{ job.check_run_id }}\n",
-       "          name: degraded-runner-${{ github.job }}\n", HEALTH + RERUN,
+    _M("RH6", CI, _TEST_LANE_CANARY + "          name: degraded-runner-${{ job.check_run_id }}\n",
+       _TEST_LANE_CANARY + "          name: degraded-runner-${{ github.job }}\n", HEALTH + RERUN,
        "the marker artifact is not named by the job: the re-run finds no marker and never re-runs"),
     _M("RH7", SL, "        id: canary\n", "", HEALTH,
        "the slow lane's canary has no id: steps.canary.* is empty, so no later step knows it tripped"),

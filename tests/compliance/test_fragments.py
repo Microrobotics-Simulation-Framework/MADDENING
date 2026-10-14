@@ -1253,7 +1253,8 @@ class TestTheRatchetReadsTheWholeHistory:
         found = check_fragments.findings(shallow)
         assert any("the ratchet cannot check" in f and "shallow clone" in f
                    for f in found), found
-        with pytest.raises(fragments.AssemblyError, match="shallow clone"):
+        # The assembler's own refusal comes first (the gate's would follow it).
+        with pytest.raises(fragments.AssemblyError, match="this is a shallow clone: merge order"):
             fragments.assemble(shallow, soup=False, out=lambda *_: None)
 
 

@@ -71,3 +71,6 @@ seeded_cmp.py, lane_cmp.py, speed_model.py).
 - Merged origin/release/0.4.2 (#347 per-push weights) at 634ea1e3.
 
 ## Step 5: PR + one slow-lane dispatch (next)
+- Pushed; PR #352 (into release/0.4.2), mergeable. Slow lane dispatched
+  once on the branch: run 38504812929 (do NOT dispatch again). PR body
+  draft: scratch shard4/pr_body.md (CI_RESULTS_PLACEHOLDER to fill).

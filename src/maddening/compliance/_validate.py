@@ -23,15 +23,23 @@ cannot drift apart on what "this symbol exists" means.
 from __future__ import annotations
 
 import ast
+import contextlib
+import contextvars
 import functools
 import importlib
 import inspect
+import io
 import os
 import re
 from types import ModuleType
-from typing import NamedTuple, Optional
+from typing import Iterator, NamedTuple, Optional
 
 import yaml
+
+#: libyaml's loader where PyYAML was built with it, else the pure-Python one.
+#: The two build the same objects from a valid document; the C one is about
+#: ten times faster on a registry of several hundred entries.
+_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 
 _VALID_SEVERITIES = {"critical", "major", "minor", "enhancement"}
@@ -402,12 +410,100 @@ def resolve_dotted_name(
 _DEFINITION = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
 
-def _parse(py_path: str) -> Optional[ast.Module]:
+def _parse_source(data: bytes, py_path: str) -> Optional[ast.Module]:
+    """``data``, the bytes of ``py_path``, parsed as Python, or ``None``.
+
+    Decoded exactly as ``open(py_path).read()`` decodes the file (the
+    platform's default text encoding, universal newlines), which is how this
+    module has always read a test file.
+    """
     try:
-        with open(py_path) as f:
-            return ast.parse(f.read(), filename=py_path)
-    except (SyntaxError, UnicodeDecodeError, OSError):
+        return ast.parse(io.TextIOWrapper(io.BytesIO(data)).read(),
+                         filename=py_path)
+    except (SyntaxError, UnicodeDecodeError):
         return None
+
+
+def _parse_uncached(py_path: str) -> Optional[ast.Module]:
+    try:
+        with open(py_path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return None
+    return _parse_source(data, py_path)
+
+
+class ParseCache:
+    """Parsed test modules for one validation run, keyed on their content.
+
+    A registry cites the same few hundred test files thousands of times,
+    and each citation used to parse its file again (about 2,800 parses of
+    326 files for MADDENING's registry, over half of a gate run).  This
+    holds one tree per file *content*: every lookup reads the file's bytes
+    and returns the held tree only when they are identical to the bytes it
+    was parsed from, so an edit between two lookups is always seen.  A tree
+    is shared by every lookup that hits it and must not be modified.
+
+    Never module-global: a cache lives for one run, held by
+    :func:`parse_cache` (or handed to it), and is dropped when the run
+    ends.
+    """
+
+    def __init__(self) -> None:
+        self._trees: dict[str, tuple[bytes, Optional[ast.Module]]] = {}
+
+    def parse(self, py_path: str) -> Optional[ast.Module]:
+        """``py_path`` parsed, or ``None`` if it cannot be read or parsed."""
+        try:
+            with open(py_path, "rb") as f:
+                data = f.read()
+        except OSError:
+            return None
+        held = self._trees.get(py_path)
+        if held is not None and held[0] == data:
+            return held[1]
+        tree = _parse_source(data, py_path)
+        self._trees[py_path] = (data, tree)
+        return tree
+
+
+#: The cache of the run in progress: set only inside :func:`parse_cache`'s
+#: ``with`` block, and reset when the block exits.  Outside one it is
+#: ``None``, and every parse reads and parses its file afresh.
+_ACTIVE_PARSE_CACHE: contextvars.ContextVar[Optional[ParseCache]] = (
+    contextvars.ContextVar("maddening_compliance_parse_cache", default=None))
+
+
+@contextlib.contextmanager
+def parse_cache(cache: Optional[ParseCache] = None) -> Iterator[ParseCache]:
+    """Share one :class:`ParseCache` across the validation run in the block.
+
+    Inside ``with parse_cache():`` every test-file parse -- the
+    validator's, and a caller's own such as ``scripts/check_anomalies.py``'s
+    -- goes through one cache, which is dropped when the block exits.  In a
+    block that already holds a cache, the outer one is reused unless
+    ``cache`` names another.  :func:`validate_anomaly_registry` opens one
+    for its own call, so one validation never parses a file twice; a caller
+    opens an outer one to share it with its own rules.
+    """
+    outer = _ACTIVE_PARSE_CACHE.get()
+    if cache is None and outer is not None:
+        yield outer
+        return
+    held = ParseCache() if cache is None else cache
+    token = _ACTIVE_PARSE_CACHE.set(held)
+    try:
+        yield held
+    finally:
+        _ACTIVE_PARSE_CACHE.reset(token)
+
+
+def _parse(py_path: str) -> Optional[ast.Module]:
+    """``py_path`` parsed, through the active run's cache when there is one."""
+    cache = _ACTIVE_PARSE_CACHE.get()
+    if cache is not None:
+        return cache.parse(py_path)
+    return _parse_uncached(py_path)
 
 
 def _defined_in(body: list) -> dict:
@@ -560,8 +656,25 @@ def validate_anomaly_registry(
             f"name: it must be a key named '<project>_version' with <project> "
             f"matching [a-z][a-z0-9_]*, and not 'schema_version'"
         )
+    # One run: every test file the entries cite is parsed once, however
+    # often it is cited (or once for the caller's whole run, when the
+    # caller holds an outer ``parse_cache``).
+    with parse_cache():
+        return _registry_errors(path, prefix, repo_root, resolve_references,
+                                notes, version_field)
+
+
+def _registry_errors(
+    path: str,
+    prefix: str,
+    repo_root: Optional[str],
+    resolve_references: bool,
+    notes: Optional[list[str]],
+    version_field: Optional[str],
+) -> list[str]:
+    """:func:`validate_anomaly_registry`'s findings, inside its run's cache."""
     with open(path) as f:
-        data = yaml.safe_load(f)
+        data = yaml.load(f, Loader=_YAML_LOADER)
 
     errors: list[str] = []
 

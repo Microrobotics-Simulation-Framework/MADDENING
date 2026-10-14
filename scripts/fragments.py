@@ -1018,10 +1018,9 @@ def _name_every_reachable_entry(root, snap, release, registry):
     if not lines:
         return
     intro = ("" if span else
-             f"These are the registry entries a user can reach in {release}: those still "
-             f"open and those resolved in part. The registry, "
-             f"`docs/validation/known_anomalies.yaml`, has the full description of each, "
-             f"and the development record indexes every entry.\n\n")
+             f"These are the registry entries a user can reach in {release}. The "
+             f"registry, `docs/validation/known_anomalies.yaml`, has the full description "
+             f"of each, and the development record indexes every entry.\n\n")
     snap.write(rel, append_to_section(text, "Known anomalies", intro + "\n".join(lines)))
 
 

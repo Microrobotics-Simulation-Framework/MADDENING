@@ -1632,8 +1632,10 @@ def _fragment_view(root, data, args, repo_root, notes):
                               f"by hand")
             if release:
                 errors.append(f"{frag.rel}: {aid} is still a fragment entry at "
-                              f"release version {version}; assemble the release "
-                              f"(scripts/fragments.py assemble --release)")
+                              f"release version {version}; run the release assembly "
+                              f"(scripts/fragments.py assemble --release), or, once "
+                              f"v{_fragments.base_of(version)} is tagged, move the tree "
+                              f"to the next .dev0 version, where the entry belongs")
             clean.append(_fragments.strip_extra(entry))
         found_notes: list[str] = []
         with tempfile.TemporaryDirectory() as tmp:

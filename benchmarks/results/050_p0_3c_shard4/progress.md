@@ -56,10 +56,18 @@ seeded_cmp.py, lane_cmp.py, speed_model.py).
   _level=0: 52 vs 70 s on a noisy box (-25%), changes the compiled code.
   Neither adopted.
 
-## Decision: fix = runner-speed-normalised weights (step 3 in progress)
+## Decision: fix = runner-speed-normalised weights (done: f5c9cce0, merge 634ea1e3)
 - tests/_sharding.py Plugin records runner_collect_seconds / runner_cpu /
   runner_cpus as JUnit testsuite properties.
 - scripts/slow_lane_weights.py normalises each report by
   (median collect / report's collect) ** 1.5 before merging.
 - Regenerate tests/slow_lane_weights.json from A, C, B with collection
   seconds injected from the job logs (scratch collect_speed.json).
+- New table: seeded file 3152 s (was 1798). Old deal in median-runner
+  minutes: shard 4 at 99.3 (0.10.2); new deal: worst 74.2 / 74.5.
+- Drift script scales its prediction by the report's runner speed.
+- Mutants G4, G6 (moved), G8, G9, S26, Z18 (moved), Z21, Z22: all caught
+  locally (slow guard test, -k by id). Gates green; compliance files green.
+- Merged origin/release/0.4.2 (#347 per-push weights) at 634ea1e3.
+
+## Step 5: PR + one slow-lane dispatch (next)

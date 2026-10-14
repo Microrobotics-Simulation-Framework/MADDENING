@@ -2485,7 +2485,7 @@
       "version": "1.17.0"
     },
     {
-      "bom-ref": "starlette==1.7.0",
+      "bom-ref": "starlette==1.8.0",
       "description": "The little ASGI library that shines.",
       "externalReferences": [
         {
@@ -2565,9 +2565,9 @@
           "value": "9"
         }
       ],
-      "purl": "pkg:pypi/starlette@1.7.0",
+      "purl": "pkg:pypi/starlette@1.8.0",
       "type": "library",
-      "version": "1.7.0"
+      "version": "1.8.0"
     },
     {
       "bom-ref": "typing_extensions==4.16.0",
@@ -2968,7 +2968,7 @@
         "annotated-doc==0.0.5",
         "opentelemetry-api==1.45.1",
         "pydantic==2.14.1",
-        "starlette==1.7.0",
+        "starlette==1.8.0",
         "typing-inspection==0.4.4",
         "typing_extensions==4.16.0",
         "uvicorn==0.54.0"
@@ -3040,7 +3040,7 @@
         "websockets==17.2",
         "zstandard==0.25.0"
       ],
-      "ref": "maddening==0.4.2.dev0"
+      "ref": "maddening==0.5.0.dev0"
     },
     {
       "dependsOn": [
@@ -3146,7 +3146,7 @@
         "opentelemetry-api==1.45.1",
         "typing_extensions==4.16.0"
       ],
-      "ref": "starlette==1.7.0"
+      "ref": "starlette==1.8.0"
     },
     {
       "dependsOn": [
@@ -3182,7 +3182,7 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "maddening==0.4.2.dev0",
+      "bom-ref": "maddening==0.5.0.dev0",
       "description": "Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph",
       "externalReferences": [
         {
@@ -3215,9 +3215,9 @@
         }
       ],
       "name": "maddening",
-      "purl": "pkg:pypi/maddening@0.4.2.dev0",
+      "purl": "pkg:pypi/maddening@0.5.0.dev0",
       "type": "library",
-      "version": "0.4.2.dev0"
+      "version": "0.5.0.dev0"
     },
     "properties": [
       {
@@ -3226,7 +3226,7 @@
       },
       {
         "name": "maddening:sbom:exclude-newer",
-        "value": "2026-10-13T00:00:00Z"
+        "value": "2026-10-14T00:00:00Z"
       },
       {
         "name": "maddening:sbom:generator",
@@ -3289,7 +3289,7 @@
         "value": "uv 0.11.15 (x86_64-unknown-linux-gnu)"
       }
     ],
-    "timestamp": "2026-10-13T00:00:00Z",
+    "timestamp": "2026-10-14T00:00:00Z",
     "tools": {
       "components": [
         {
@@ -3393,7 +3393,7 @@
       ]
     }
   },
-  "serialNumber": "urn:uuid:1448d73d-abaf-5894-b6eb-7e423ba3a66a",
+  "serialNumber": "urn:uuid:3b2f32b8-1da7-545a-90b7-bb36fe9aa214",
   "specVersion": "1.6",
   "version": 1
 }

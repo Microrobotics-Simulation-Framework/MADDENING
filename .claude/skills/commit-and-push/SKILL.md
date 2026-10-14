@@ -30,9 +30,21 @@ three times during 0.4.0, and a copied list (this section's own, which said
 claimed.
 
 ```bash
+# The branch this one merges into, as CI's ratchet reads it: the base of this
+# branch's pull request; else its upstream, unless that is only the branch's
+# own remote copy (after `git push -u`); else origin/main.  Say which you used.
+git fetch -q origin
+branch=$(git branch --show-current)
+base=$(gh pr view --json baseRefName -q .baseRefName 2>/dev/null)
+if [ -n "$base" ]; then base="origin/$base"
+else base=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null); fi
+case "$base" in ""|"origin/$branch") base=origin/main ;; esac
+echo "merges into: $base"
+
 for gate in scripts/check_*.py; do
   args=""
   [ "$gate" = scripts/check_anomalies.py ] && args="--prefix MADD-ANO-"  # as CI runs it
+  [ "$gate" = scripts/check_fragments.py ] && args="--base $base"        # as CI runs it
   python "$gate" $args || echo "GATE FAILED ($?): $gate"
 done
 python scripts/generate_soup_tables.py --check
@@ -40,11 +52,14 @@ python scripts/generate_soup_tables.py --check
 
 What to expect from the gates whose behaviour is not simply "exit 0 or 1":
 
-- `check_fragments.py` reads the history of HEAD for its ratchet.  On your
-  own branch, an anomaly label you added and then dropped before merging
-  shows as a dropped fragment: run it again with `--base origin/<the branch
-  you merge into>`, which reads that line's history only, as CI does for a
-  pull request.
+- `check_fragments.py` reads the history of the line you merge into for its
+  ratchet, which is why the loop above passes `--base`.  Without it the gate
+  reads HEAD's whole history, and an anomaly label you added and then dropped
+  on your own branch before merging shows as a dropped fragment; with it, only
+  what the line itself holds counts, as in CI for a pull request.  A branch
+  with no pull request and no upstream of its own is judged against
+  `origin/main`: if it merges into a release branch, set `base` by hand
+  (`base=origin/release/0.4.2`).
 - `check_doctests.py` executes every `>>>` example in `src/maddening/` under
   pytest (about two minutes).  It fails if an example fails or is skipped,
   or if fewer examples run than its committed floor (`MIN_EXAMPLES`).  Adding

@@ -246,6 +246,14 @@ from a template for the branch you are on. `scripts/check_fragments.py`
 checks both on every push, and `scripts/check_anomalies.py` checks the
 entries of an anomalies fragment exactly as it checks the registry's own.
 
+Pull requests into `main` and `release/**` land as merge commits only, never
+squashed or rebased: the repository's settings turn both off. The ratchet in
+`scripts/check_fragments.py` reads the line's merge history, one merge commit
+per pull request, each read as its change against the line. A rebase merge
+would put the branch's own commits on the line instead, so a fragment the
+branch added and then renamed or dropped would read as a merged fragment
+deleted, and every later push and pull request into that line would fail.
+
 ### The changelog and the release notes
 
 A changes fragment maps the changelog's sections to bullets, and the release
@@ -329,8 +337,11 @@ an entry numbered by hand, and a `# label:` comment that names a label no
 fragment in the history held. A fragment that was merged is never deleted or
 renamed by hand: close a wrong entry as `duplicate` or `resolved` instead. The
 ratchet in CI reads the line's whole first-parent history, and refuses a
-merged label that is in no fragment and not recorded by the registry, and a
-merged changes fragment whose bullets are not in `CHANGELOG.md`.
+merged label that is in no fragment and not recorded by the registry. It also
+refuses a merged changes fragment whose deleting commit did not write its
+bullets into `CHANGELOG.md` and its text into the release notes, as the
+release assembly does. Released text stays yours to edit afterwards: a typo
+fix or a tooltip sweep in a released section is never refused.
 
 Changing an entry that is already numbered (resolving it, correcting it) is
 still an edit to the registry. Its Known-anomalies text goes in a changes

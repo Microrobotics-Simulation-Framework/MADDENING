@@ -67,6 +67,16 @@ When the anomaly is resolved:
 
 Because a silent wrong result is at least `major`, it is always Tier 2 or Tier 1: it never takes the grace period.  The Tier 3 cycle counting is not automated yet (DOCUMENTATION_ARCHITECTURE.md section 9.7), so nothing in CI enforces the grace period either way.
 
+## Pull Requests
+
+Pull requests into `main` and `release/**` merge with a merge commit only:
+squash and rebase merging are turned off in the repository's settings.
+`scripts/check_fragments.py` reads each line's merge history, one merge commit
+per pull request.  A rebase merge would put the branch's own commits on the
+line, where a fragment the branch added and then renamed or dropped reads as a
+merged fragment deleted, and every later run on that line fails.  The
+developer guide's "Recording a change" has the rest.
+
 ## Code Style
 
 - NumPy-style docstrings

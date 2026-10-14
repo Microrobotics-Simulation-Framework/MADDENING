@@ -578,6 +578,40 @@ of its path. The table of 2026-10-10 (243 files, 635 minutes) predicts 64
 minutes of test time on every shard (eight shards held 79 each); the
 heaviest file alone is 49.
 
+The table's seconds are for a runner of median speed. Hosted runners
+differ: over the same files one took 1.6 to 1.9 times as long as another
+on the runs of 2026-10-11 to 13. A table taken as measured weighs each
+file by the luck of the runner that ran it, and on 2026-10-12 and 13 shard
+4 ran 95 to 108 minutes against 68 predicted: its heaviest file,
+`tests/cloud/multigpu/test_run_pod_seeded_faults.py`, had been weighed on
+the two fastest runners of sixty, at 30 minutes against 47 on a median
+one. Nothing in the shard was slowing it: the file ran at the same speed
+alone, after the files before it on the shard, and after a whole CI-like
+collection. So each shard's JUnit report records how fast its runner was
+(`tests/_sharding.py`): `runner_collect_seconds`, the time pytest took to
+collect the suite (the same work on every shard, before any test), with
+`runner_cpu` and `runner_cpus`. The report is the one place these fields
+are written and read; the durations artifact carries nothing else about
+the runner. The collection time is the speed measure:
+`scripts/slow_lane_weights.py` scales each shard's times by (median
+collection time / its own) to the power 1.5 before it weighs them
+(`_sharding.runner_scale`); the exponent is fitted on the sixty runners of
+those runs, where the collection time and each runner's speed over its
+files agree with r = 0.86. It tracks the runner, not its model: a slow
+instance of a fast CPU collects slowly too. `scripts/slow_lane_drift.py`
+divides the prediction it compares a shard against by the same function
+and says by how much, so a slow runner is not reported as a stale table.
+The CPU model is recorded and used only for a report that has no
+collection time: the weights script divides such a report by its model's
+speed factor, estimated from the files it shares with the scaled reports.
+A report from before the property existed can be given its collection
+time from the job log (pytest's "test session starts" line to its
+"collected N items" line, which agree with the property to a few
+milliseconds); the table's runs of 2026-10-11 to 13 were, and the times
+are in `benchmarks/results/050_p0_3c_shard4/ci_collect_seconds.json`.
+Expect a shard to run up to about a quarter over the prediction on a slow
+runner, and up to two fifths under it on a fast one.
+
 The table deals by time, not memory. Each shard runs in one process, and
 JAX keeps every program it compiles; a file that keeps graphs in a
 module-level `functools.lru_cache` keeps them and their programs too. So
@@ -623,8 +657,8 @@ python scripts/slow_lane_weights.py --lane per-push --write \
 ```
 
 The median across runs is the default (`--aggregate last` takes the last run's),
-and each shard's seconds are divided by the speed factor of the CPU it ran on
-before the median is taken (see "Runner variance and degraded runners" below).
+and each shard's seconds are scaled to a runner of median speed by its
+collection time before the median is taken, as for the slow lane (below).
 Take only runs whose shards all ran cold (a push to `main` or `release/**`):
 a warm run's compile times are the cache's (`--latest` reads pushes only, and
 either way a shard whose `cache-mode` file says warm is left out). Changing the job count re-deals every
@@ -664,7 +698,7 @@ python scripts/slow_lane_weights.py --run <run id>=/tmp/slow --commit <run id>=<
 ```
 
 The table is the median over the runs given (three by default for
-`--latest`, or as many as exist), on the reference CPU model. A shard that
+`--latest`, or as many as exist), on a runner of median speed. A shard that
 timed out wrote no report, so its files have no measurement in that run;
 the median is over the runs that did measure them (`--aggregate last`, with
 `--run` repeated, is the older "later measurement wins").
@@ -746,9 +780,11 @@ runner: after the tests, memory 14.6 GiB available of 15.6 GiB; cpu steal 0.0 s 
 ```
 (shard 3 of the per-push lane, run 38505341499)
 
-and `runner-shardK.json` in the durations artifact (the CPU model, vCPUs, memory,
-the canary and the steal over the test step), which `slow_lane_weights.py` reads.
-The slow lane never logged its CPU before this.
+and the same lines in the step summary. `ci_variance_report.py` reads the CPU
+and the canary from the log. The weights tooling does not: it reads a shard's
+runner from its JUnit report (`runner_collect_seconds`, `runner_cpu`), the one
+carrier of those fields, and scales by the collection time, not the CPU model
+(see the weighted split, above). The slow lane never logged its CPU before this.
 
 Rarely a job draws a degraded machine: on 2026-10-13 one per-push job ran the
 same tests 3.8 times slower than its sibling, and a slow-lane runner took 9

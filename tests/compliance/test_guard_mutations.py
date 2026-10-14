@@ -143,6 +143,13 @@ GUARD_FILES = (_DURATIONS, _SHARDING, _WORKFLOWS, _DEPS, _PRUNE, _COMPILE_CACHE,
 
 GUARD_FILES = GUARD_FILES + (_HYGIENE, _HEALTH, _RERUN, _NORMALISE, _VARIANCE)
 
+#: What the anomaly gate holds to the workflows: the paths it records as run by no job are
+#: derived from ``ci.yml``, the extras and the test files, and must equal its own list.
+_GATE_PATHS = ("tests/compliance/test_gate_scripts.py::TestAnomalyGateRefusesEvidenceCINeverRuns"
+               "::test_the_paths_the_gate_refuses_are_the_paths_no_ci_lane_runs")
+GATE_PATHS = (_GATE_PATHS,)
+GUARD_FILES = GUARD_FILES + GATE_PATHS
+
 
 @dataclass(frozen=True)
 class Mutant:
@@ -230,6 +237,16 @@ def _wrong_cell(id: str, domain: str, cited: str, wrong: str, lets_through: str)
 # A test under tests/usd that a claims row cites.
 _USD_SPEC = "tests/usd/test_usd_mapping_spec.py"
 _USD_GONE = "test_a_stage_written_with_a_kind_that_is_no_longer_registered_is_refused"
+
+#: The test lane's canary step and the start of its marker step, which pins the marker's name to
+#: that lane: the viz3d job has an identical marker step.
+_TEST_LANE_CANARY = (
+    '        run: python scripts/ci_runner_health.py canary --label "per-push JAX ${{ matrix.jax-version }} '
+    'shard ${{ matrix.shard }}/6"\n\n'
+    "      - name: Mark a degraded runner\n"
+    "        if: ${{ always() && steps.canary.outputs.degraded == 'true' }}\n"
+    "        uses: actions/upload-artifact@v4\n"
+    "        with:\n")
 
 MUTANTS: tuple[Mutant, ...] = (
     # --- R: the time budget, scripts/report_test_durations.py --------------
@@ -367,10 +384,12 @@ MUTANTS: tuple[Mutant, ...] = (
        SHARD, "an empty table accepted: a weighted run that is a hash split"),
     _M("S23", SH, '    if not re.fullmatch(r"[0-9]+/[0-9]+", counts):', '    if not re.fullmatch(r".+/.+", counts):',
        SHARD, "a malformed spec dies in int() with a traceback instead of a usage error, or (' 1/4') is accepted"),
+    _M("S26", SH, "            record_suite_property(session.config, name, value)", "            pass", SHARD,
+       "no shard records how fast its runner was: the next table is weighed by the luck of its runners"),
     # --- SW: the slow lane's table, tests/slow_lane_weights.json ----------------
     _M("SW1", SWT, '  "tests/property/test_sysid_truth_recovery.py": ',
        '  "tests/property/test_sysid_truth_recovered.py": ', SHARD,
-       "the table's heaviest entry names a file that does not exist: its shard is 49 minutes lighter than dealt"),
+       "a heavy entry of the table names a file that does not exist: its shard is 46 minutes lighter than dealt"),
     _M("SW2", SWT, ' "min_seconds": ', ' "min_seconds": 1000', SHARD,
        "the table claims a floor its entries are under"),
     _M("SW3", SWT, ' "runs": [', ' "runs": [], "earlier": [', SHARD, "weights with no CI run to trace them to"),
@@ -399,6 +418,13 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("G4", SLW, "            files[path] += float(case.get(\"time\") or 0.0)",
        "            files[path] = float(case.get(\"time\") or 0.0)", SHARD,
        "a file weighs what its last test took"),
+    _M("G8", SLW,
+       "    scales = [_sharding.runner_scale(u.collect, reference, exponent) if u.collect else 1.0 for u in units]",
+       "    scales = [1.0 for u in units]", SHARD,
+       "every shard's times taken as measured: a file weighed on a fast runner is under-weighed and its "
+       "shard runs long (shard 4, 2026-10-12 and 13: 95 to 108 minutes against 68 predicted)"),
+    _M("G9", SH, "    return (reference_seconds / seconds) ** exponent", "    return (seconds / reference_seconds) ** exponent",
+       SHARD, "a slow runner's times scaled up and a fast one's down: the runner's luck doubled, not removed"),
     # --- D: the dependency jobs and the constraints file ------------------------
     _M("D1", GEN, "        if differing:\n", "        if False:\n", DEPS,
        "one constraints file written for two JAX versions that resolved to different numpy: one lane installs a pin it was not resolved with"),
@@ -618,9 +644,14 @@ MUTANTS: tuple[Mutant, ...] = (
        HYGIENE, "a run on a release branch opens no tracking issue"),
     _M("Z17", SL, '            --shard "${{ matrix.shard }}/10:weighted"\n', '            --shard "${{ matrix.shard }}/10"\n',
        HYGIENE, "the drift check is told the hash split and refuses every shard: the warning never runs"),
-    _M("Z18", SLD, "    return (result[\"measured\"] > result[\"predicted\"] * (1 + margin)\n",
-       "    return (result[\"measured\"] > result[\"predicted\"] * (1 + margin) * 2\n", HYGIENE,
+    _M("Z18", SLD, "    return result[\"measured\"] > expected * (1 + margin) and",
+       "    return result[\"measured\"] > expected * (1 + margin) * 2 and", HYGIENE,
        "the warning waits for the shard to take twice the margin past its prediction"),
+    _M("Z21", SLD, "            \"expected\": predicted * speed}", "            \"expected\": predicted}", HYGIENE,
+       "the runner's speed is read and ignored: a slow runner's shard is called a stale table"),
+    _M("Z22", SLD, "    factor = 1.0 / _sharding.runner_scale(seconds, reference, exponent)",
+       "    factor = _sharding.runner_scale(seconds, reference, exponent)",
+       HYGIENE, "a slow runner's prediction scaled down: the runner's luck doubled, not removed"),
     _M("Z19", SLD, "                        key=lambda kv: (-kv[1], kv[0]))\n    grown", "                        key=lambda kv: (kv[1], kv[0]))\n    grown", HYGIENE,
        "the files the table has not measured are named lightest first, the heavy one cut off the list"),
     _M("Z20", SLD, "    unmeasured = sorted(((p, s) for p, s in measured.items() if p not in weights and s >= min_seconds),",
@@ -1089,8 +1120,8 @@ MUTANTS: tuple[Mutant, ...] = (
        "the canary can never trip: a degraded runner burns the job's hours"),
     _M("RH5", "scripts/ci_runner_health.py", "INSTALL_LIMIT_S = 204.0\n", "INSTALL_LIMIT_S = 20.0\n", HEALTH,
        "a healthy install trips the canary: every job fails"),
-    _M("RH6", CI, "          name: degraded-runner-${{ job.check_run_id }}\n",
-       "          name: degraded-runner-${{ github.job }}\n", HEALTH + RERUN,
+    _M("RH6", CI, _TEST_LANE_CANARY + "          name: degraded-runner-${{ job.check_run_id }}\n",
+       _TEST_LANE_CANARY + "          name: degraded-runner-${{ github.job }}\n", HEALTH + RERUN,
        "the marker artifact is not named by the job: the re-run finds no marker and never re-runs"),
     _M("RH7", SL, "        id: canary\n", "", HEALTH,
        "the slow lane's canary has no id: steps.canary.* is empty, so no later step knows it tripped"),
@@ -1104,8 +1135,6 @@ MUTANTS: tuple[Mutant, ...] = (
        "the test lane on ubuntu-latest again: the image changes to 26.04 mid-cycle"),
     _M("RH11", SL, "jobs:\n  slow:\n    runs-on: ubuntu-24.04\n", "jobs:\n  slow:\n    runs-on: ubuntu-latest\n", HEALTH,
        "the slow lane on ubuntu-latest again"),
-    _M("RH12", SL, "            runner-shard${{ matrix.shard }}.json\n", "", HEALTH,
-       "the slow lane's durations artifact carries no CPU model: the weights table cannot be normalised"),
     # --- RR: the re-run of degraded runners (P0.3b) -------------------------------
     _M("RR1", RR_WF, '              if int(run.get("run_attempt") or 0) != 1:', "              if False:", RERUN,
        "a run is re-run on every attempt: two degraded runners in a row loop"),
@@ -1127,19 +1156,25 @@ MUTANTS: tuple[Mutant, ...] = (
        "                     ]", RERUN,
        "a lane whose six shards all drew degraded runners is never re-run: its summary job fails too and counts"),
     # --- GN: the weights generator's CPU normalisation (P0.3b) --------------------
-    _M("GN1", SLW, "                 {p: s / factors.get(u.cpu, 1.0) for p, s in u.files.items()}, u.cache, u.run)",
-       "                 {p: s for p, s in u.files.items()}, u.cache, u.run)", NORMALISE,
-       "shard seconds are not divided by their CPU's factor: the unlucky draw sets the table"),
+    _M("GN1", SLW, "    return [Unit(u.lane, u.artifact, u.cpu, {p: s * k for p, s in u.files.items()}, u.cache, u.run, u.collect)",
+       "    return [Unit(u.lane, u.artifact, u.cpu, {p: s for p, s in u.files.items()}, u.cache, u.run, u.collect)",
+       NORMALISE, "no report is scaled, whatever its runner: the unlucky draw sets the table"),
     _M("GN2", SLW, "            factors[cpu] = statistics.median(ratios)", "            factors[cpu] = statistics.mean(ratios)",
        NORMALISE, "one file's outlier ratio sets a model's factor"),
     _M("GN3", SLW, '            units = [u for u in units if u.cache != "warm"]', "            units = units", NORMALISE,
        "a warm per-push shard's times are taken for a cold table's"),
     _M("GN4", SLW, "                if base >= min_seconds:", "                if True:", NORMALISE,
        "a file of a second or two, all noise, sets the speed factor"),
-    _M("GN5", SLW, "        ref = max(sorted(count), key=lambda c: count[c])", "        ref = min(sorted(count), key=lambda c: count[c])",
+    _M("GN5", SLW, "else max(sorted(count), key=lambda c: count[c])", "else min(sorted(count), key=lambda c: count[c])",
        NORMALISE, "the reference is the model with the fewest shards"),
     _M("GN6", SLW, "        if len(ratios) >= MIN_FILES_FOR_FACTOR:", "        if len(ratios) >= 1:", NORMALISE,
        "a factor from one file's ratio"),
+    _M("GN7", SLW, "    fallback = [i for i, u in enumerate(units) if not u.collect and u.cpu != UNKNOWN_CPU]",
+       "    fallback = [i for i, u in enumerate(units) if u.cpu != UNKNOWN_CPU]", NORMALISE,
+       "a report scaled by its collection time is divided by its CPU model's factor too: corrected twice"),
+    _M("GN8", SLW, "speed_factors(pool, MEDIAN_RUNNER if timed else None)", "speed_factors(pool, None)", NORMALISE,
+       "the CPU fallback is estimated against the commonest model, not the scaled reports: a table on two "
+       "references at once"),
     # --- VR: the variance report ---------------------------------------------------
     _M("VR1", "scripts/ci_variance_report.py",
        "        others = [o for o in records if o is not r and o.lane == r.lane and o.shard == r.shard]",
@@ -1148,6 +1183,28 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("VR2", "scripts/ci_variance_report.py", "            limit, basis = flag_ratio * CPU_SPREAD,",
        "            limit, basis = flag_ratio,", VARIANCE,
        "the generation spread is flagged as degradation whenever a CPU has few peers"),
+    # --- VZ: the viz3d job and the anomaly gate's record of what no job runs ------------
+    # `tests/api/test_frame_renderer_3d.py` ran in no job until the viz3d job; the gate's
+    # PATHS_CI_NEVER_RUNS is held equal to what the workflow, the extras and the test files give.
+    _M("VZ1", CI, '          pip install -e ".[ci,viz3d]"\n', '          pip install -e ".[ci]"\n', GATE_PATHS,
+       "the viz3d job installing no PyVista: the renderer's tests skip in it, and the gate's record "
+       "says the file runs in CI"),
+    _M("VZ2", CI, "--tb=short tests/api/test_frame_renderer_3d.py\n",
+       "--tb=short tests/api/test_bearer_auth.py\n", GATE_PATHS + WF,
+       "the viz3d job running some other file: nothing in CI runs the renderer's tests"),
+    _M("VZ3", "scripts/check_anomalies.py", 'PATHS_CI_NEVER_RUNS = ("tests/viz",)',
+       'PATHS_CI_NEVER_RUNS = ("tests/viz", "tests/api/test_frame_renderer_3d.py")', GATE_PATHS,
+       "the gate refusing a citation of the renderer's tests as evidence that never runs, "
+       "though the viz3d job runs them (and the verification page saying so)"),
+    _M("VZ4", "scripts/check_anomalies.py", "IMPORTS_NO_CI_JOB_INSTALLS: dict[str, tuple[str, ...]] = {}",
+       'IMPORTS_NO_CI_JOB_INSTALLS: dict[str, tuple[str, ...]] = {"tests/api/test_frame_renderer_3d.py": ("pyvista",)}',
+       GATE_PATHS, "the gate's record of what a skipped file waits for out of step with the derivation"),
+    _M("VZ5", CI, "        run: xvfb-run -a python -m pytest -v -rs", "        run: python -m pytest -v -rs", WF,
+       "the viz3d job running with no display: VTK cannot open a render window and every test errors "
+       "(or, with the switch off, skips)"),
+    _M("VZ6", CI, '          MADDENING_REQUIRE_VIZ3D_TESTS: "1"\n', '          MADDENING_REQUIRE_VIZ3D_TESTS: "0"\n', WF,
+       "a missing PyVista skipping the whole module in the viz3d job, which would stay green with "
+       "the tests running nowhere"),
 )
 
 

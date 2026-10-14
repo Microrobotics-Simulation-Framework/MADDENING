@@ -555,9 +555,14 @@ def _entries_in(text, aids):
     """
     import yaml
 
-    loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+    # The loader every other reader of a registry uses (``yaml.safe_load``),
+    # not libyaml's: the two disagree on some documents, and a historical
+    # text must be read as the registry itself is.  The two agreed on all 531
+    # distinct revisions the registry has had.  Costs about 0.2 s a revision
+    # against libyaml's 0.016 s, and is paid only when an entry has been
+    # retired (``_RETIRED_ANOMALY_IDS``; none is).
     try:
-        data = yaml.load(text, Loader=loader) or {}
+        data = yaml.safe_load(text) or {}
     except yaml.YAMLError:
         return {}
     found = {}
@@ -970,13 +975,18 @@ _TEST_FUNCTION_PREFIX = "test"
 #: extras each job installs and the test files by
 #: ``tests/compliance/test_gate_scripts.py``, which derives the same set
 #: from them and fails when the two differ.
-PATHS_CI_NEVER_RUNS = ("tests/viz", "tests/api/test_frame_renderer_3d.py")
+PATHS_CI_NEVER_RUNS = ("tests/viz",)
 
 #: The files of :data:`PATHS_CI_NEVER_RUNS`, with the modules each waits
-#: for at import that no job running it installs (``pyvista`` is in the
-#: ``viz3d`` and ``all`` extras only; the jobs install ``ci`` or
-#: ``ci,usd``).  The derivation holds this equal too.
-IMPORTS_NO_CI_JOB_INSTALLS = {"tests/api/test_frame_renderer_3d.py": ("pyvista",)}
+#: for at import that no job running it installs.  The derivation holds
+#: this equal too.  Empty now: ``tests/api/test_frame_renderer_3d.py`` waited
+#: for ``pyvista`` (in the ``viz3d`` and ``all`` extras only; the sharded
+#: lanes install ``ci``) until the ``viz3d`` job of ``ci.yml`` installed
+#: that extra and ran the file under a virtual display.  The mechanism stays:
+#: a file that waits for a package no job installs is entered here and in
+#: :data:`PATHS_CI_NEVER_RUNS` together, and the derivation says when a
+#: job comes to run it.
+IMPORTS_NO_CI_JOB_INSTALLS: dict[str, tuple[str, ...]] = {}
 
 
 def _ci_never_runs(rel):

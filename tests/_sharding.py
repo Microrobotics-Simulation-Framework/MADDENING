@@ -40,13 +40,30 @@ and of committed data, and a file's tests still stay together.
   diff touches the table.
 
 A plain ``i/N`` is the hash split alone.
+
+GitHub's runners differ in speed: on the slow lane of 2026-10-11 to 13
+one runner took 1.6 to 1.9 times as long as another over the same files.
+A table measured on fast runners under-weighs what they ran (shard 4
+ran 95 to 108 minutes against 68 predicted: its heaviest file had
+been weighed on the two fastest runners of sixty).  So each shard
+records how fast its runner was, as properties of its JUnit report
+(:data:`RUNNER_PROPERTIES`): the seconds pytest took to collect the
+suite, which is the same work on every shard and comes before any test,
+and the runner's CPU.  The report is the one place these are written and
+read.  The collection time is the speed measure: ``scripts/slow_lane_weights.py``
+scales each shard's times to a runner of median speed by
+:func:`runner_scale`, and ``scripts/slow_lane_drift.py`` scales its
+prediction by the same function.  The CPU model is recorded; the weights
+script uses it only for a report that has no collection time.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import time
 from pathlib import Path
 
 import pytest
@@ -80,6 +97,91 @@ WEIGHTS_FILE = Path(__file__).with_name("slow_lane_weights.json")
 PER_PUSH_WEIGHTS_FILE = Path(__file__).with_name("per_push_weights.json")
 #: ``{suffix of a shard spec: its table}``.
 TABLES = {WEIGHTED: WEIGHTS_FILE, WEIGHTED_PUSH: PER_PUSH_WEIGHTS_FILE}
+
+#: The JUnit report's property holding the seconds from the session's start
+#: to the end of collection: the runner's speed, measured on the same work
+#: on every shard (every test module of the suite is imported; the other
+#: shards' tests are only deselected).
+COLLECT_SECONDS_PROPERTY = "runner_collect_seconds"
+#: ... the runner's CPU model (metadata; see :func:`runner_scale`).
+CPU_PROPERTY = "runner_cpu"
+#: Every property :class:`Plugin` adds to the report (``testsuite`` level).
+RUNNER_PROPERTIES = (COLLECT_SECONDS_PROPERTY, CPU_PROPERTY, "runner_cpus")
+#: How a runner's collection time scales its test time: a test file's
+#: seconds go as the collection seconds to this power.  Fitted on the
+#: sixty runners of the slow-lane runs 38182068116, 38206585198 and
+#: 38332673699 (2026-10-11 to 13): the collection time and each runner's
+#: speed over the files it ran agree with r = 0.86, slope 1.54 in logs, and
+#: scaling by it halves the spread of one file's time between runners (the
+#: standard deviation of the log, over 146 files, from 0.17 to 0.09).
+SPEED_EXPONENT = 1.5
+
+def runner_fields(report) -> dict[str, str]:
+    """The :data:`RUNNER_PROPERTIES` of a parsed JUnit report (an ``Element``), those it has."""
+    suites = [report] if report.tag == "testsuite" else list(report.iter("testsuite"))
+    found: dict[str, str] = {}
+    for suite in suites:
+        for prop in suite.findall("properties/property"):
+            if prop.get("name") in RUNNER_PROPERTIES and prop.get("value"):
+                found.setdefault(prop.get("name"), prop.get("value"))
+    return found
+
+
+def collect_seconds(report) -> float | None:
+    """A parsed report's :data:`COLLECT_SECONDS_PROPERTY` in seconds, or None without a usable one."""
+    try:
+        seconds = float(runner_fields(report).get(COLLECT_SECONDS_PROPERTY, ""))
+    except ValueError:
+        return None
+    return seconds if seconds > 0 else None
+
+
+def runner_scale(seconds: float, reference_seconds: float, exponent: float = SPEED_EXPONENT) -> float:
+    """What one second on a runner that collected in ``seconds`` is on one that collected in ``reference_seconds``.
+
+    ``(reference_seconds / seconds) ** exponent``: below 1 for a runner slower
+    than the reference, above 1 for a faster one.  The one rule both the
+    weights table (each report times this) and the drift check (its
+    prediction divided by this) use.
+    """
+    return (reference_seconds / seconds) ** exponent
+
+
+def cpu_model() -> str:
+    """The CPU's model name from ``/proc/cpuinfo``, or ``"unknown"``."""
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8", errors="replace") as info:
+            for line in info:
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return "unknown"
+
+
+def usable_cpus() -> int:
+    """The CPUs this process may run on (its affinity), else the machine's count."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        return os.cpu_count() or 0
+
+
+def record_suite_property(config, name: str, value: str) -> bool:
+    """Add a ``testsuite`` property to the ``--junitxml`` report, if one is written.
+
+    The same call pytest's ``record_testsuite_property`` fixture makes; it
+    returns False when no report is being written.
+    """
+    try:
+        from _pytest.junitxml import xml_key
+    except ImportError:  # checked against a real report in tests/compliance/test_ci_sharding.py
+        return False
+    xml = config.stash.get(xml_key, None)
+    if xml is None:
+        return False
+    xml.add_global_property(name, value)
+    return True
 
 
 def parse(spec: str) -> tuple[int, int, str | None]:
@@ -155,6 +257,20 @@ class Plugin:
         self.shard, self.of = shard, of
         self.weighted = weights is not None
         self._dealt = deal(weights, of) if weights is not None else {}
+        self._session_start: float | None = None
+
+    def pytest_sessionstart(self, session):
+        self._session_start = time.perf_counter()
+
+    @pytest.hookimpl(trylast=True)
+    def pytest_collection_finish(self, session):
+        # trylast: after every other plugin's work on the collected items.
+        if self._session_start is None:
+            return
+        seconds = time.perf_counter() - self._session_start
+        for name, value in zip(RUNNER_PROPERTIES,
+                               (f"{seconds:.3f}", cpu_model(), str(usable_cpus()))):
+            record_suite_property(session.config, name, value)
 
     def shard_of(self, path: str) -> int:
         if self.weighted:

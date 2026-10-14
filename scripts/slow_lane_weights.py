@@ -29,28 +29,42 @@ JUnit XML.  The artifact's name without its ``-shardKofN`` suffix is the
 *lane*.  Give several runs to cover a shard that one of them lost (a
 timed-out shard writes no report).  For a file and a lane, with
 ``--aggregate median`` (the default) the median of the runs that measured
-it, which averages out the speed of the runners each run drew (a factor of
-up to 1.6 between two runs of one file); with ``--aggregate last`` the last
-run given that measured it.  ``--latest [N]`` (three by default) downloads
-the lane's last N runs that left artifacts, or as many as there are.  Use
-only runs whose shards all ran cold (a push to ``main`` or ``release/**``, or
-a pull request run with ``[cold-ci]``): a warm shard's compile times are
-the cache's.  A per-push shard whose ``cache-mode-shardK.txt`` says warm is
-left out, with a message.
+it; with ``--aggregate last`` the last run given that measured it.
+``--latest [N]`` (three by default) downloads the lane's last N runs that
+left artifacts, or as many as there are.  Use only runs whose shards all
+ran cold (a push to ``main`` or ``release/**``, or a pull request run with
+``[cold-ci]``): a warm shard's compile times are the cache's.  A per-push
+shard whose ``cache-mode-shardK.txt`` says warm is left out, with a
+message.
 
-Speed of the runner.  The jobs of one lane run on whatever CPU the pool
-gives them, and generations differ by about 1.5x, so a run that drew slow
-runners would raise every file's weight.  Each shard's artifact carries a
-``runner-shardK.json`` sidecar (``scripts/ci_runner_health.py``) naming its
-CPU model.  From the files that ran on several models the script estimates
-each model's speed factor relative to a reference model (the ratio of the
-medians, over those files, the median of the ratios), divides every
-measurement by its model's factor, and only then takes the median across
-runs: the table is the time on the reference model.  The reference is the
-model with the most shards (``--reference SUBSTRING`` names another).  A
-shard with no sidecar (runs before the sidecar existed) is not scaled, and
-a model sharing no file with the reference stays at 1.0, both said in the
-output.  ``--no-normalise`` turns it off.
+Speed of the runner.  The jobs of one lane run on whatever runner the
+pool gives them, and one runner takes 1.6 to 1.9 times as long as another
+over the same files.  A table taken as measured weighs each file by the
+luck of its runner: on 2026-10-11 the heaviest file was weighed on the two
+fastest runners of sixty, at 30 minutes against 47 on a median one, and
+the shard it was dealt to ran 95 to 108 minutes against 68 predicted.  So
+the script scales every shard's report before it takes the median across
+runs, by one measure of its runner's speed: the seconds pytest took to
+collect the suite, the same work on every shard before any test.
+``tests/_sharding.py`` writes it into the JUnit report as the testsuite
+property ``runner_collect_seconds``, beside ``runner_cpu``, and the report
+is the only place this script reads either from.  Each report's seconds
+are multiplied by ``(median / its own) ** 1.5`` (``_sharding.runner_scale``;
+the median is over every report given): the table is the time on a runner
+of median speed, and its ``runner_speed`` says so.
+
+The CPU model is recorded, not used, except for a report that has no
+collection time: that one is divided by its CPU model's speed factor,
+estimated from the files it shares with the scaled reports (the median,
+over those files, of the ratio of the medians; when no report has a
+collection time, relative to the model with the most shards).  A report
+with neither, or whose model shares too few files, is taken as measured.
+The script says how many reports went each way, and ``--no-normalise``
+takes every report as measured.  A report written before the property
+existed (before 2026-10-14) can be given its collection time from the job
+log: the seconds from pytest's "test session starts" line to its
+"collected N items" line, which agree with the property to a few
+milliseconds.
 
 A file's weight is its slower lane's total (setup, call and teardown of
 every test in it), in whole seconds.  Files under ``--min-seconds`` in
@@ -74,7 +88,7 @@ import sys
 import tempfile
 import xml.etree.ElementTree as ET
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -85,6 +99,9 @@ from tests import _sharding  # noqa: E402
 _SHARD_SUFFIX = re.compile(r"-shard\d+of\d+$")
 AGGREGATES = ("last", "median")
 UNKNOWN_CPU = "unknown"
+#: The reference the CPU-model fallback is estimated against when some
+#: reports have a collection time: those reports, scaled.  Not a CPU name.
+MEDIAN_RUNNER = "(a runner of median speed)"
 #: A speed factor needs this many files measured on both models.
 MIN_FILES_FOR_FACTOR = 3
 #: Files lighter than this on the reference model are too noisy to set a factor.
@@ -111,25 +128,14 @@ LANES = {
 
 @dataclass
 class Unit:
-    """One shard's report of one run: the lane it belongs to, its CPU and its seconds per file."""
+    """One shard's report of one run: its lane, its runner's fields and its seconds per file."""
     lane: str
     artifact: str
     cpu: str
     files: dict[str, float]
     cache: str | None = None
     run: str = ""
-
-
-def _artifact_cpu(directory: Path) -> str:
-    """The CPU model the sidecar of a downloaded artifact names, or ``unknown``."""
-    for sidecar in sorted(directory.glob("runner-*.json")):
-        try:
-            model = json.loads(sidecar.read_text(encoding="utf-8")).get("cpu_model")
-        except (OSError, ValueError):
-            continue
-        if isinstance(model, str) and model:
-            return model
-    return UNKNOWN_CPU
+    collect: float | None = None
 
 
 def _artifact_cache_mode(directory: Path) -> str | None:
@@ -139,19 +145,21 @@ def _artifact_cache_mode(directory: Path) -> str | None:
 
 
 def read_units(directory: Path, run: str = "") -> list[Unit]:
-    """Every shard report of one downloaded run, with the CPU its sidecar names."""
+    """Every shard report of one downloaded run, with the runner fields the report carries."""
     reports = sorted(directory.glob("*/*.xml"))
     if not reports:
         raise SystemExit(f"{directory}: no <artifact>/<report>.xml below it")
     units = []
     for report in reports:
+        root = ET.parse(report).getroot()
         files: dict[str, float] = defaultdict(float)
-        for case in ET.parse(report).getroot().iter("testcase"):
+        for case in root.iter("testcase"):
             path = case.get("file") or case.get("classname", "").replace(".", "/") + ".py"
             files[path] += float(case.get("time") or 0.0)
         units.append(Unit(lane=_SHARD_SUFFIX.sub("", report.parent.name), artifact=report.parent.name,
-                          cpu=_artifact_cpu(report.parent), files=dict(files),
-                          cache=_artifact_cache_mode(report.parent), run=run))
+                          cpu=_sharding.runner_fields(root).get(_sharding.CPU_PROPERTY, UNKNOWN_CPU),
+                          files=dict(files), cache=_artifact_cache_mode(report.parent), run=run,
+                          collect=_sharding.collect_seconds(root)))
     return units
 
 
@@ -165,7 +173,7 @@ def lanes_of(units: list[Unit]) -> dict[str, dict[str, float]]:
 
 
 def read_run(directory: Path) -> dict[str, dict[str, float]]:
-    """``{lane: {test file: seconds}}`` from one downloaded run."""
+    """``{lane: {test file: seconds}}`` from one downloaded run, as measured."""
     return lanes_of(read_units(directory))
 
 
@@ -173,13 +181,15 @@ def speed_factors(units: list[Unit], reference: str | None = None,
                   min_seconds: float = FACTOR_MIN_SECONDS) -> tuple[dict[str, float], str | None, list[str]]:
     """``({cpu: factor}, reference, notes)``: how much slower each model ran than the reference.
 
-    A factor of 1.5 means the model took 1.5 times the reference's seconds
-    on the same files.  For every (lane, file) measured on both a model and
-    the reference, the ratio of the median seconds on each; the model's
-    factor is the median of those ratios.  A model with fewer than
-    ``MIN_FILES_FOR_FACTOR`` such files, and the ``unknown`` model, stay at
-    1.0 and are named in ``notes``.  ``reference`` is a substring of a model
-    name; by default the model with the most shards.
+    The CPU-model fallback of :func:`runner_scales`, for reports with no
+    collection time.  A factor of 1.5 means the model took 1.5 times the
+    reference's seconds on the same files.  For every (lane, file) measured
+    on both a model and the reference, the ratio of the median seconds on
+    each; the model's factor is the median of those ratios.  A model with
+    fewer than ``MIN_FILES_FOR_FACTOR`` such files, and the ``unknown``
+    model, stay at 1.0 and are named in ``notes``.  ``reference`` is the
+    exact name of one of the units' models; by default the model with the
+    most shards.
     """
     known = [u for u in units if u.cpu != UNKNOWN_CPU]
     notes: list[str] = []
@@ -190,13 +200,7 @@ def speed_factors(units: list[Unit], reference: str | None = None,
         if len(count) == 1:
             notes.append(f"every shard with a known CPU ran on {next(iter(count))}: nothing to normalise")
         return {c: 1.0 for c in count}, (next(iter(count)) if count else None), notes
-    if reference:
-        matches = sorted(c for c in count if reference.lower() in c.lower())
-        if not matches:
-            raise SystemExit(f"--reference {reference!r} matches none of: {', '.join(sorted(count))}")
-        ref = max(matches, key=lambda c: (count[c], c))
-    else:
-        ref = max(sorted(count), key=lambda c: count[c])
+    ref = reference if reference in count else max(sorted(count), key=lambda c: count[c])
     seen: dict[tuple[str, str], dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
     for u in known:
         for path, seconds in u.files.items():
@@ -220,11 +224,55 @@ def speed_factors(units: list[Unit], reference: str | None = None,
     return factors, ref, notes
 
 
-def normalise(units: list[Unit], factors: dict[str, float]) -> list[Unit]:
-    """The same units with every file's seconds divided by its model's factor."""
-    return [Unit(u.lane, u.artifact, u.cpu,
-                 {p: s / factors.get(u.cpu, 1.0) for p, s in u.files.items()}, u.cache, u.run)
-            for u in units]
+def runner_scales(units: list[Unit], exponent: float = _sharding.SPEED_EXPONENT,
+                  ) -> tuple[list[float], dict, list[str]]:
+    """``(one scale per unit, the table's runner_speed record, notes)``: one rule per report.
+
+    * A report with a collection time is scaled to a runner that collects
+      in the median of them: ``_sharding.runner_scale(its own, median)``.
+    * One without, that names its CPU, is divided by that model's factor
+      (:func:`speed_factors`) against the scaled reports, or, when no report
+      has a collection time, against the model with the most shards.
+    * One with neither stays as measured.
+    """
+    timed = [u.collect for u in units if u.collect]
+    reference = statistics.median(timed) if timed else None
+    scales = [_sharding.runner_scale(u.collect, reference, exponent) if u.collect else 1.0 for u in units]
+    fallback = [i for i, u in enumerate(units) if not u.collect and u.cpu != UNKNOWN_CPU]
+    factors: dict[str, float] = {}
+    cpu_reference, notes = None, []
+    if fallback:
+        pool = [Unit(u.lane, u.artifact, MEDIAN_RUNNER, {p: s * k for p, s in u.files.items()})
+                for u, k in zip(units, scales) if u.collect]
+        pool += [units[i] for i in fallback]
+        factors, cpu_reference, notes = speed_factors(pool, MEDIAN_RUNNER if timed else None)
+        factors.pop(MEDIAN_RUNNER, None)
+        for i in fallback:
+            scales[i] = 1.0 / factors.get(units[i].cpu, 1.0)
+    record = {
+        "property": _sharding.COLLECT_SECONDS_PROPERTY,
+        "reference_seconds": None if reference is None else round(reference, 2),
+        "exponent": exponent if reference is not None else 0,
+        "reports_scaled": len(timed),
+        "reports_by_cpu_model": len(fallback),
+        "cpu_reference": cpu_reference if fallback else None,
+        "cpu_factors": {cpu: round(f, 3) for cpu, f in sorted(factors.items())},
+        "reports_as_measured": len(units) - len(timed) - len(fallback),
+    }
+    return scales, record, notes
+
+
+def normalise(units: list[Unit], scales: list[float]) -> list[Unit]:
+    """The same units with every file's seconds multiplied by the unit's scale."""
+    return [Unit(u.lane, u.artifact, u.cpu, {p: s * k for p, s in u.files.items()}, u.cache, u.run, u.collect)
+            for u, k in zip(units, scales)]
+
+
+def as_measured(units: list[Unit]) -> dict:
+    """The ``runner_speed`` record of a table that scaled nothing (``--no-normalise``)."""
+    return {"property": _sharding.COLLECT_SECONDS_PROPERTY, "reference_seconds": None, "exponent": 0,
+            "reports_scaled": 0, "reports_by_cpu_model": 0, "cpu_reference": None, "cpu_factors": {},
+            "reports_as_measured": len(units)}
 
 
 def fetch_latest(lane: str, count: int, destination: Path, run=subprocess.run) -> list[tuple[str, str, Path]]:
@@ -307,6 +355,33 @@ def _row(label: str, minutes: list[float]) -> str:
     return f"  {label:<34}" + " ".join(f"{m:6.1f}" for m in minutes) + f"   worst {max(minutes):.1f}"
 
 
+def _speed_summary(units: list[Unit], record: dict, scales: list[float]) -> tuple[list[str], str]:
+    """``(lines to print, the clause for the table's "measured")``."""
+    lines, clause = [], ""
+    timed = [(u.collect, k) for u, k in zip(units, scales) if u.collect]
+    if timed:
+        seconds = [c for c, _k in timed]
+        factors = [k for _c, k in timed]
+        lines.append(f"runner speed: {len(timed)} reports scaled to a runner that collects in "
+                     f"{record['reference_seconds']:.1f} s (the median; theirs {min(seconds):.1f} to "
+                     f"{max(seconds):.1f} s, so x{min(factors):.2f} to x{max(factors):.2f}, "
+                     f"exponent {record['exponent']:g})")
+        clause = (" Each shard's seconds are scaled to a runner of median speed by the time it took to "
+                  "collect the suite (runner_speed).")
+    if record["reports_by_cpu_model"]:
+        against = ("the scaled reports" if record["cpu_reference"] == MEDIAN_RUNNER
+                   else record["cpu_reference"])
+        lines.append(f"runner speed: {record['reports_by_cpu_model']} reports without "
+                     f"{_sharding.COLLECT_SECONDS_PROPERTY} divided by their CPU model's factor against "
+                     f"{against}: " + ", ".join(f"{cpu} {f:.2f}" for cpu, f in record["cpu_factors"].items()))
+        clause += (f" {record['reports_by_cpu_model']} report(s) without a collection time are divided by "
+                   "their CPU model's speed factor (runner_speed.cpu_factors).")
+    if record["reports_as_measured"]:
+        lines.append(f"runner speed: {record['reports_as_measured']} reports taken as measured (no "
+                     f"{_sharding.COLLECT_SECONDS_PROPERTY} and no {_sharding.CPU_PROPERTY} in the report)")
+    return lines, clause
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--lane", choices=sorted(LANES), default="slow",
@@ -320,11 +395,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="where --latest puts the runs (default: a new temporary directory)")
     ap.add_argument("--aggregate", choices=AGGREGATES, default="median",
                     help="a file's seconds across runs: the median, or the last run's (default median)")
-    ap.add_argument("--reference", default=None, metavar="CPU",
-                    help="a substring of the CPU model the table is normalised to "
-                         "(default: the model with the most shards)")
+    ap.add_argument("--speed-exponent", type=float, default=_sharding.SPEED_EXPONENT,
+                    help="scale each report by (median collection time / its own) to this power "
+                         f"(default {_sharding.SPEED_EXPONENT})")
     ap.add_argument("--no-normalise", action="store_true",
-                    help="do not scale each shard's seconds by its CPU model's speed factor")
+                    help="take every report as measured: no scaling by the runner's speed")
     ap.add_argument("--commit", action="append", default=[], metavar="ID=SHA",
                     help="the commit a run measured, recorded in the table")
     ap.add_argument("--min-seconds", type=int, default=10,
@@ -335,6 +410,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--write", action="store_true", help="write the lane's table")
     ap.add_argument("--output", type=Path, default=None, help="where (default: the --lane's table)")
     args = ap.parse_args(argv)
+    if args.speed_exponent <= 0:
+        ap.error("--speed-exponent must be positive (--no-normalise takes the reports as measured)")
     lane_info = LANES[args.lane]
     n = args.shards if args.shards is not None else lane_info["shards"]
     output = args.output if args.output is not None else lane_info["file"]
@@ -378,26 +455,19 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("no shard report left to read: every one ran with a warm compilation cache "
                          "(the per-push table is made from cold runs: pushes to main or release/**, "
                          "or a pull request with [cold-ci])")
-    clause = ""
-    if not args.no_normalise:
-        factors, reference, notes = speed_factors(all_units, args.reference)
-        unscaled = sum(1 for u in all_units if u.cpu == UNKNOWN_CPU)
-        if len(factors) > 1:
-            print(f"speed factors, seconds on each CPU model relative to {reference}:")
-            counts = defaultdict(int)
-            for u in all_units:
-                counts[u.cpu] += 1
-            for cpu in sorted(factors, key=lambda c: (factors[c], c)):
-                print(f"  {factors[cpu]:5.2f}  {cpu}  ({counts[cpu]} shard reports)")
-            clause = (f" Each shard's seconds are divided by its CPU model's speed factor, so the table is "
-                      f"the time on {reference}: " + ", ".join(
-                          f"{cpu} {factors[cpu]:.2f}" for cpu in sorted(factors, key=lambda c: (factors[c], c))) + ".")
-            run_units = [normalise(units, factors) for units in run_units]
+    if args.no_normalise:
+        speed = as_measured(all_units)
+        print("runner speed: every report taken as measured (--no-normalise)")
+        clause = ""
+    else:
+        scales, speed, notes = runner_scales(all_units, args.speed_exponent)
+        lines, clause = _speed_summary(all_units, speed, scales)
+        for line in lines:
+            print(line)
         for note in notes:
             print(f"  note: {note}")
-        if unscaled:
-            print(f"  note: {unscaled} shard report(s) have no runner sidecar (a run from before "
-                  f"scripts/ci_runner_health.py) and are not scaled")
+        it = iter(scales)
+        run_units = [normalise(units, [next(it) for _ in units]) for units in run_units]
     runs = [lanes_of(units) for units in run_units]
     sources = [{"run": run_id, "commit": commits.get(run_id, "unknown"),
                 "artifacts": sorted({u.artifact for u in units})}
@@ -426,11 +496,12 @@ def main(argv: list[str] | None = None) -> int:
         document = {
             "what": f"{lane_info['name']}, for the weighted split of tests/_sharding.py. "
                     "Written by scripts/slow_lane_weights.py; do not edit by hand.",
-            "measured": f"{lane_info['measured']} "
+            "measured": f"{lane_info['measured']}" + clause + " "
                         + ("Where several runs measured a file, the median of them."
                            if args.aggregate == "median" else
-                           "Where two runs measured a file, the later.") + clause,
+                           "Where two runs measured a file, the later."),
             "runs": sources,
+            "runner_speed": speed,
             "min_seconds": args.min_seconds,
             "seconds": table,
         }

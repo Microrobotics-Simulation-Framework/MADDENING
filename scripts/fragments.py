@@ -43,7 +43,6 @@ parsed.
 from __future__ import annotations
 
 import argparse
-import difflib
 import os
 import re
 import subprocess
@@ -1021,22 +1020,6 @@ def cmd_relabel(args, root: Path) -> int:
 # from-branch
 # ---------------------------------------------------------------------------
 
-def _title_key(block: list[str]) -> str:
-    for i, ln in enumerate(block):
-        m = re.match(r"(\s+)(?:-\s+)?title:\s*(.*)", ln)
-        if m:
-            v, ind = m.group(2).strip(), len(m.group(1))
-            if v in ("", ">", "|", ">-", "|-"):
-                rest = []
-                for x in block[i + 1:]:
-                    if x.strip() and len(x) - len(x.lstrip()) <= ind:
-                        break
-                    rest.append(x.strip())
-                v = " ".join(rest)
-            return " ".join(v.strip("\"'").split())
-    return ""
-
-
 def _registry_blocks(text: str) -> list[tuple[int, int, int]]:
     """``(id, start line, end line)`` of each canonical entry, ends exclusive."""
     lines = text.splitlines()
@@ -1050,30 +1033,33 @@ def _registry_blocks(text: str) -> list[tuple[int, int, int]]:
 
 
 def from_branch(root: Path, base: str, branch: str | None = None) -> dict[str, str]:
-    """Move this branch's own registry entries into a fragment; ``{old id: label}``."""
+    """Move this branch's own registry entries into a fragment; ``{old id: label}``.
+
+    The branch's own entries are those whose id the registry at the merge
+    base of the branch and ``base`` does not hold: an entry the branch only
+    edited keeps its number.  Run it before the branch merges ``base`` (as
+    ``renumber`` was): after that merge, an id both sides used is in the
+    registry twice and cannot be told apart, and this refuses.
+    """
     branch = branch or git(root, "rev-parse", "--abbrev-ref", "HEAD").strip()
     stem = stem_of(branch)
     target = root / ANOMALIES / f"{stem}.yaml"
     if target.exists():
         raise AssemblyError(f"{target.relative_to(root)} exists already")
+    fork = git(root, "merge-base", "HEAD", base).strip()
     text = (root / REGISTRY).read_text(encoding="utf-8")
-    base_text = git(root, "show", f"{base}:{REGISTRY}")
-    base_lines = base_text.splitlines()
-    base_titles = {_title_key(base_lines[s:e]) for _, s, e in _registry_blocks(base_text)}
-    base_ids = {n for n, _, _ in _registry_blocks(base_text)}
+    fork_text = git(root, "show", f"{fork}:{REGISTRY}")
+    fork_ids = {n for n, _, _ in _registry_blocks(fork_text)}
     lines = text.splitlines()
-    own = []
-    for n, s, e in _registry_blocks(text):
-        title = _title_key(lines[s:e])
-        if title in base_titles:
-            continue
-        if n in base_ids:
-            mine = title
-            theirs = next(_title_key(base_lines[bs:be]) for bn, bs, be
-                          in _registry_blocks(base_text) if bn == n)
-            if difflib.SequenceMatcher(None, mine, theirs).ratio() >= 0.6:
-                continue                  # the base's entry, its title edited here
-        own.append((n, s, e))
+    seen: dict[int, int] = {}
+    for n, _, _ in _registry_blocks(text):
+        seen[n] = seen.get(n, 0) + 1
+    twice = sorted(n for n, c in seen.items() if c > 1)
+    if twice:
+        raise AssemblyError(f"{[numbered(n) for n in twice]} are in the registry twice: "
+                            f"the base is merged already, so the branch's entries cannot "
+                            f"be told apart; run from-branch before merging {base}")
+    own = [(n, s0, e) for n, s0, e in _registry_blocks(text) if n not in fork_ids]
     if not own:
         return {}
     mapping = {numbered(n): label(stem, k) for k, (n, _, _) in enumerate(own, 1)}
@@ -1109,7 +1095,7 @@ def from_branch(root: Path, base: str, branch: str | None = None) -> dict[str, s
     target.write_text(full.sub(lambda m: mapping.get(numbered(int(m.group(1))),
                                                      m.group(0)), frag), encoding="utf-8")
     hw_text = (root / HW_FILE).read_text(encoding="utf-8")
-    base_hw = _HW_RE.search(git(root, "show", f"{base}:{HW_FILE}"))
+    base_hw = _HW_RE.search(git(root, "show", f"{fork}:{HW_FILE}"))
     if base_hw:
         (root / HW_FILE).write_text(
             _HW_RE.sub(lambda m: m.group(1) + base_hw.group(2), hw_text, count=1),

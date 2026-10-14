@@ -987,3 +987,100 @@ def test_the_compliance_job_runs_the_ratchet_against_the_right_base(tmp_path):
         assert out.read_text().strip() == want
     names = [s.get("name", "") for s in steps]
     assert names.index(step["name"]) < names.index("Run compliance tests")
+
+
+# ---------------------------------------------------------------------------
+# new and from-branch
+# ---------------------------------------------------------------------------
+
+class TestNew:
+    def test_it_writes_the_branchs_fragments_from_templates(self, tmp_path):
+        root = _repo(tmp_path)
+        _git(root, "checkout", "-q", "-b", "fix/Heat_CFL.check")
+        assert fragments.main(["--root", str(root), "new", "--anomaly", "--changes"]) == 0
+        anomalies = (root / _anomaly_file("fix-heat-cfl-check")).read_text()
+        assert f'  - anomaly_id: "{L("fix-heat-cfl-check", 1)}"' in anomalies
+        assert 'line: "0.4"' in anomalies
+        assert (root / _changes_file("fix-heat-cfl-check")).exists()
+        assert _findings(root) == []
+        assert fragments.main(["--root", str(root), "new", "--changes"]) == 2
+
+    def test_a_stem_reused_after_assembly_starts_after_the_recorded_labels(self, tmp_path):
+        root = _repo(tmp_path)
+        _two_fragments(root)
+        fragments.assemble(root, soup=False, out=lambda *_: None)
+        _commit(root, "assembly")
+        assert fragments.main(["--root", str(root), "new", "--anomaly",
+                               "--branch", "fix/b"]) == 0
+        text = (root / _anomaly_file("fix-b")).read_text()
+        assert f'"{L("fix-b", 3)}"' in text
+
+    def test_a_branch_name_that_gives_no_stem_is_refused(self, tmp_path, capsys):
+        root = _repo(tmp_path)
+        assert fragments.main(["--root", str(root), "new", "--branch", "fix/+plus"]) == 2
+        assert "not [a-z0-9]" in capsys.readouterr().err
+
+
+class TestFromBranch:
+    def test_it_moves_the_branchs_own_entries_into_a_fragment(self, tmp_path, gate, capsys):
+        root = _repo(tmp_path)
+        _git(root, "checkout", "-q", "-b", "fix/old-style")
+        reg = root / fragments.REGISTRY
+        text = reg.read_text().replace('title: "two"', 'title: "two, edited here"')
+        reg.write_text(text + "\n" + entry("MADD-ANO-004", title="mine four") + "\n"
+                       + entry("MADD-ANO-005", "resolved", title="mine five"))
+        hw = root / fragments.HW_FILE
+        hw.write_text(hw.read_text().replace("= 3", "= 5"))
+        _write(root, "tests/test_mine.py", '"""Pins MADD-ANO-004 and MADD-ANO-005, not MADD-ANO-002."""\n')
+        _commit(root, "the old way")
+        mapping = fragments.from_branch(root, "main")
+        assert mapping == {"MADD-ANO-004": L("fix-old-style", 1),
+                           "MADD-ANO-005": L("fix-old-style", 2)}
+        assert fragments.high_water(root) == 3
+        ids = [a["anomaly_id"] for a in yaml.safe_load(reg.read_text())["anomalies"]]
+        assert ids == ["MADD-ANO-001", "MADD-ANO-002", "MADD-ANO-003"]
+        assert 'title: "two, edited here"' in reg.read_text()     # the base's entry stays
+        assert (root / "tests/test_mine.py").read_text() == (
+            f'"""Pins {L("fix-old-style", 1)} and {L("fix-old-style", 2)}, not MADD-ANO-002."""\n')
+        frag = root / _anomaly_file("fix-old-style")
+        found = _findings(root)
+        assert found == [f"{_anomaly_file('fix-old-style')}: {L('fix-old-style', 1)} is "
+                         f"reachable ('open') and has no release_note (the release notes' "
+                         f"Known-anomalies text)"], found
+        frag.write_text(frag.read_text().replace(
+            "    resolution_status: \"open\"\n",
+            "    resolution_status: \"open\"\n    release_note: \"Avoid it.\"\n", 1))
+        assert _findings(root) == []
+        assert _gate(gate, root, capsys)[0] == 0
+        with pytest.raises(fragments.AssemblyError, match="exists already"):
+            fragments.from_branch(root, "main")
+
+    def test_an_id_the_base_also_used_meanwhile_is_still_the_branchs(self, tmp_path):
+        root = _repo(tmp_path)
+        _git(root, "checkout", "-q", "-b", "fix/mine")
+        reg = root / fragments.REGISTRY
+        reg.write_text(reg.read_text() + "\n" + entry("MADD-ANO-004", title="mine"))
+        _commit(root, "mine is 004")
+        _git(root, "checkout", "-q", "main")
+        reg.write_text(reg.read_text() + "\n" + entry("MADD-ANO-004", title="theirs"))
+        hw = root / fragments.HW_FILE
+        hw.write_text(hw.read_text().replace("= 3", "= 4"))
+        _commit(root, "theirs is 004 too")
+        _git(root, "checkout", "-q", "fix/mine")
+        assert fragments.from_branch(root, "main") == {"MADD-ANO-004": L("fix-mine", 1)}
+        _commit(root, "moved")
+        _git(root, "merge", "-q", "--no-edit", "main")
+        ids = [a["anomaly_id"] for a in yaml.safe_load(reg.read_text())["anomalies"]]
+        assert ids == ["MADD-ANO-001", "MADD-ANO-002", "MADD-ANO-003", "MADD-ANO-004"]
+        assert "theirs" in reg.read_text() and "mine" not in reg.read_text()
+
+    def test_after_merging_the_base_it_refuses(self, tmp_path):
+        root = _repo(tmp_path)
+        _git(root, "checkout", "-q", "-b", "fix/late")
+        reg = root / fragments.REGISTRY
+        reg.write_text(reg.read_text() + "\n" + entry("MADD-ANO-004", title="mine"))
+        _commit(root, "mine is 004")
+        reg.write_text(reg.read_text() + "\n" + entry("MADD-ANO-004", title="theirs"))
+        _commit(root, "as a merge of the base would leave it")
+        with pytest.raises(fragments.AssemblyError, match="in the registry twice"):
+            fragments.from_branch(root, "main")

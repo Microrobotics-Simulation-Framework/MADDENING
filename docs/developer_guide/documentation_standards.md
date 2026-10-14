@@ -225,38 +225,169 @@ Rules:
 
 Commit messages should be concise (1-2 sentences) and focus on the "why" rather than the "what".
 
-## CHANGELOG.md
+## Recording a change
 
-Follow [Keep a Changelog](https://keepachangelog.com/) with these sections:
+A pull request never edits the shared record files: `CHANGELOG.md`, the
+release notes under `docs/release_notes/`, the anomaly registry
+`docs/validation/known_anomalies.yaml`, `_HIGHEST_ANOMALY_ID` in
+`tests/compliance/test_soup_evidence.py`, the generated
+`docs/validation/soup_package.md`, and the anomaly index in the development
+record. Two open pull requests that both edited them always collided. Each
+pull request writes its own small files under `docs/fragments/` instead,
+named after its branch: lower-cased, with `/`, `_` and `.` turned into `-`.
 
-```markdown
-## [Unreleased]
+| File | Holds |
+|------|-------|
+| `docs/fragments/changes/<stem>.yaml` | the changelog bullets and the release-notes text |
+| `docs/fragments/anomalies/<stem>.yaml` | new registry entries, each under a provisional label |
 
-### Added
-### Changed
-### Deprecated
-### Removed
-### Fixed
-### Verification
-### Security
-### Known Anomalies
+`python scripts/fragments.py new --changes` (or `--anomaly`) writes either file
+from a template for the branch you are on. `scripts/check_fragments.py`
+checks both on every push, and `scripts/check_anomalies.py` checks the
+entries of an anomalies fragment exactly as it checks the registry's own.
+
+Pull requests into `main` and `release/**` land as merge commits only, never
+squashed or rebased: the repository's settings turn both off. The ratchet in
+`scripts/check_fragments.py` reads the line's merge history, one merge commit
+per pull request, each read as its change against the line. A rebase merge
+would put the branch's own commits on the line instead, so a fragment the
+branch added and then renamed or dropped would read as a merged fragment
+deleted, and every later push and pull request into that line would fail.
+
+### The changelog and the release notes
+
+A changes fragment maps the changelog's sections to bullets, and the release
+notes' headings to Markdown:
+
+```yaml
+line: "0.4"
+changelog:
+  Fixed:
+    - "**`HeatNode` keeps its timestep after a reset.** It fell back to the default."
+release_notes:
+  Fixed: |
+    - **`HeatNode` keeps its timestep after a reset.** ...
 ```
 
-The **Verification**, **Security**, and **Known Anomalies** sections are required for EU regulatory workflows (IEC 62304, {term}`MDCG 2019-16`).
+`line` is the release line the tree was on when you wrote it, quoted. The
+changelog's sections are `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`,
+`Security`, `Verification` and `Known Anomalies`. The **Verification**,
+**Security** and **Known Anomalies** sections are required for EU regulatory
+workflows (IEC 62304, {term}`MDCG 2019-16`). The release notes' headings are
+`Summary`, `What is new`, `What changes for existing code`, `Security`,
+`Fixed`, `Known anomalies`, `API stability`, `Upgrade checklist` and
+`For contributors`. The gate refuses any other section or heading.
 
-Update the changelog with every commit that adds, changes, fixes, or deprecates user-visible functionality. Empty sections can be omitted in the commit but must be present in release notes.
+Record every change that adds, changes, fixes or deprecates user-visible
+functionality. A changelog bullet answers two questions only: what changed,
+and what a user has to do about it. Measurements, file inventories, design
+rationale and test counts belong in the pull request description, or in the
+release-notes text. Internal test infrastructure (fuzz harnesses, Hypothesis
+profiles, CI gating, tooling like this) is contributor-facing: it goes under
+the notes' `For contributors` heading, or in a single changelog line at most.
 
-### Entry style
+`## [Unreleased]` in `CHANGELOG.md` stays empty. Before each release the
+release assembly (`scripts/fragments.py assemble --release X.Y.Z --date D`,
+run inside the version-bump pull request) writes the dated section and the
+release notes from every fragment of the line, and deletes the fragments it
+used. Each bullet is carried as written: a multi-line bullet, a nested list
+or a code fence stays inside its list item.
 
-Add exactly **one contiguous block, at most three lines**, at the **top** of the relevant subsection, and never edit or reorder existing lines: branches merge in parallel, and appending at the top is what keeps the conflicts trivial.
+A fragment that merges after the release assembly but before the tag fails
+the release gate. Run the release assembly again: it adds the fragment to the
+`## [X.Y.Z]` section it wrote the first time, and a run with nothing new
+changes nothing. Once `vX.Y.Z` is tagged, the assembly refuses: the fragment
+belongs to the next version, so bump the tree to the next `.dev0` and the
+fragment waits for that release.
 
-An entry answers two questions only — what changed, and what a user has to do about it. Measurements, file inventories, design rationale, test counts and "why" paragraphs belong in the pull request description and in the per-version release notes under `docs/release_notes/`; link to the release notes from the top of `## [Unreleased]`. If three lines are not enough, the surplus is release-notes material.
+### A new anomaly
 
-Internal test infrastructure — fuzz harnesses, Hypothesis profiles and depth tiers, property-test packages, CI gating — is contributor-facing rather than user-facing. It belongs in the release notes' engineering section, or in a single changelog line at most.
+A new registry entry goes in an anomalies fragment, in the registry's own
+layout, with two differences:
+
+```yaml
+line: "0.4"
+anomalies:
+  - anomaly_id: "MADD-ANO-NEW-<stem>-1"
+    title: "What a user sees"
+    # ... every field the registry requires ...
+    resolution_status: "open"
+    release_note: >
+      What a user sees and what to do about it: the release notes'
+      Known-anomalies text.
+```
+
+- The id is a **label**, `MADD-ANO-NEW-<stem>-<n>`, with the file's own stem
+  and `<n>` = 1, 2, … within the file. Name the entry by its label in tests,
+  in claims inventories and in prose until it is numbered. Use this one
+  spelling only: the assembler rewrites the label as an exact token.
+- `release_note` is required for a reachable entry (one that is not
+  `resolved` or `duplicate`). `record_index` is optional: the development
+  record's index line, generated from the title when it is missing.
+
+Do not pick a number. `scripts/fragments.py assemble --registry` runs as its
+own pull request at quiet points on the numbering line, the first of
+`RELEASE_LINES` in `scripts/fragments.py`. It appends the entries to the
+registry in merge order, and moves `_HIGHEST_ANOMALY_ID` by exactly the number
+it assigned. It records each label as a `# label:` comment after the entry's
+id line, rewrites every label in the tree to its number, writes the index line
+and the release note, and regenerates the SOUP table. Every entry from
+`MADD-ANO-297` on carries that comment, so `scripts/check_fragments.py` fails
+an entry numbered by hand, and a `# label:` comment that names a label no
+fragment in the history held. A fragment that was merged is never deleted or
+renamed by hand: close a wrong entry as `duplicate` or `resolved` instead. The
+ratchet in CI reads the line's whole first-parent history, and refuses a
+merged label that is in no fragment and not recorded by the registry. It also
+refuses a merged changes fragment whose deleting commit did not write its
+bullets into `CHANGELOG.md` and its text into the release notes, as the
+release assembly does. Released text stays yours to edit afterwards: a typo
+fix or a tooltip sweep in a released section is never refused.
+
+Changing an entry that is already numbered (resolving it, correcting it) is
+still an edit to the registry. Its Known-anomalies text goes in a changes
+fragment, under the `Known anomalies` heading.
+
+Before writing a new entry, check that it does not exist already:
+`python scripts/anom.py list --similar "a few words"` searches the registry
+and every fragment. `scripts/anom.py show`, `refs` and `next` look entries up
+by number or by label without opening the 21,000-line registry.
+
+### Two release lines
+
+While a 0.4.x line is open beside 0.5.0, fixes land on the 0.4 line first and
+are merged forward. Only the numbering line numbers anomalies; an entry
+written on the other line keeps its label until numbering moves (in 0.5.0's
+release-assembly pull request). After each forward merge, run
+`python scripts/fragments.py relabel`: it rewrites every label the registry
+records to its number. `scripts/check_fragments.py` names each conflict a
+forward merge can leave and its resolution.
+
+A forward merge goes through a pull request, like every other change: a
+branch from the 0.5 line merges the 0.4 line in, runs `relabel`, and opens a
+pull request against the 0.5 line. Its checks then run on the merge before it
+lands. Never push a forward merge to a release branch directly.
+
+The 0.4 line closes when 0.5.0 is tagged. Numbering moves to the 0.5 line in
+0.5.0's release-assembly pull request: its first commit sets `RELEASE_LINES`
+in `scripts/fragments.py` to `("0.5",)`, and the release assembly that
+follows numbers the 0.5 line's own entries, from the next id after the last
+one the 0.4 line assigned. From then on the 0.5 line numbers at its quiet
+points, and the next minor line keeps its labels until its own `.0` release
+assembly takes numbering over the same way. A 0.4.x release after 0.5.0 is a
+separate decision. Until it is made, the 0.4 line takes no assembly: it still
+names itself first in `RELEASE_LINES`, so it would assign ids the 0.5 line
+assigns too.
+
+A pull request opened before fragments existed moves its own registry
+entries into a fragment with `python scripts/fragments.py from-branch --base
+<its base>`.
 
 ## Anomaly Registry
 
-Known bugs, limitations, and failure modes go in `docs/validation/known_anomalies.yaml`. See [CONTRIBUTING.md](https://github.com/Microrobotics-Simulation-Framework/MADDENING/blob/main/CONTRIBUTING.md) for the three-phase anomaly lifecycle and release gate model.
+Known bugs, limitations and failure modes go in
+`docs/validation/known_anomalies.yaml`, by way of a fragment (above). See
+[CONTRIBUTING.md](https://github.com/Microrobotics-Simulation-Framework/MADDENING/blob/main/CONTRIBUTING.md)
+for the three-phase anomaly lifecycle and the release gate model.
 
 ## Versioning
 

@@ -788,6 +788,29 @@ jobs:
       - name: Validate anomaly registry
         run: python scripts/check_anomalies.py --prefix MADD-ANO-
 
+      # Changelog and registry fragments (scripts/fragments.py): every label
+      # live and spelled one way, every assembled entry recording its label,
+      # the release gate at a version without .dev, and the ratchet over the
+      # line's whole first-parent history: every label and changes fragment
+      # the line ever merged survives here, in a fragment, as a label the
+      # registry records, or as text the release assembly wrote.  So a merged
+      # fragment cannot be deleted unnoticed, however many commits a push
+      # holds.  On a pull request the line is HEAD^1: the checkout is GitHub's
+      # merge commit, whose first parent is the target branch as that merge
+      # was computed.  origin/<base> is fetched later, and a pull request
+      # merged in between would turn this one red on every re-run.  The
+      # branch's own commits before it merges are not read either way.  On a
+      # push the line is HEAD.  fetch-depth 0 above provides the whole history.
+      - name: Check changelog and registry fragments
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            python scripts/check_fragments.py --base HEAD^1
+          else
+            python scripts/check_fragments.py --base HEAD
+          fi
+
       - name: Check implementation mapping
         run: python scripts/check_impl_mapping.py
 

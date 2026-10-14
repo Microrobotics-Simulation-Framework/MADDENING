@@ -1758,6 +1758,16 @@ class TestAGoneChangesFragmentIsJudgedWhereItLeft:
         _commit(root, "release assembly")
         assert check_fragments.findings(root, "main") == []
 
+    def test_an_assembly_not_yet_committed_is_judged_against_the_working_tree(self, tmp_path):
+        """The assembler says to run the gates before committing: its new notes
+        file is untracked then, and still read."""
+        root = _repo(tmp_path)
+        _merge_branch(root, "fix/c", {_changes_file("fix-c"): _changes("A fix.", "- A fix.")})
+        _version(root, "0.4.2")
+        _release(root)
+        assert "docs/release_notes/v0.4.2.md" in _git(root, "ls-files", "--others")
+        assert check_fragments.findings(root) == []
+
     def test_a_forward_merge_settles_the_other_lines_assembled_fragment(self, tmp_path):
         """A 0.4 changes fragment that reached the 0.5 line leaves it in the
         forward merge that brings 0.4's release assembly.  That merge adds the

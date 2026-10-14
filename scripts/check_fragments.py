@@ -488,14 +488,18 @@ class _Tree:
             return path.read_text(encoding="utf-8") if path.is_file() else ""
         return F.git(self.root, "show", f"{self.rev}:{rel}", check=False)
 
-    def notes(self) -> list[str]:
-        if self.rev is None:
-            return [p.read_text(encoding="utf-8")
-                    for p in sorted((self.root / F.NOTES_DIR).glob("v*.md"))]
-        names = F.git(self.root, "ls-tree", "--name-only", f"{self.rev}:{F.NOTES_DIR}",
-                      check=False).split()
-        return [self.read(f"{F.NOTES_DIR}/{n}") for n in sorted(names)
-                if n.startswith("v") and n.endswith(".md")]
+
+def _changed_records(root: Path, line: str, gone: str | None) -> set[str]:
+    """The changelog and notes files that differ between the two sides of a
+    deletion (only those can have gained text); empty when git cannot tell,
+    so the ratchet fails closed."""
+    paths = (F.CHANGELOG, F.NOTES_DIR)
+    if gone is not None:
+        return set(F.git_paths(root, "diff", "-z", "--name-only", "--no-renames", f"{gone}^1",
+                               gone, "--", *paths))
+    return set(F.git_paths(root, "diff", "-z", "--name-only", "--no-renames", line, "--", *paths)
+               + F.git_paths(root, "ls-files", "-z", "--others", "--exclude-standard", "--",
+                             *paths))
 
 
 def _settled_findings(root: Path, line: str, gone: str | None,
@@ -510,18 +514,26 @@ def _settled_findings(root: Path, line: str, gone: str | None,
     else:
         after, before = _Tree(root, gone), _Tree(root, f"{gone}^1")
         left, verb = f"was deleted in {gone[:10]}", "which did not add"
-    mapping = {lab: ids[0] for lab, ids in F.recorded_labels(after.read(F.REGISTRY)).items()
-               if len(ids) == 1}
     out, cache = [], {}
 
     def gained(kind):
         if kind not in cache:
-            if kind == "items":
+            changed = cache.setdefault("changed", _changed_records(root, line, gone))
+            if kind == "mapping":
+                cache[kind] = {lab: ids[0] for lab, ids in
+                               F.recorded_labels(after.read(F.REGISTRY)).items() if len(ids) == 1}
+            elif kind == "items":
                 cache[kind] = (F.changelog_items(after.read(F.CHANGELOG))
-                               - F.changelog_items(before.read(F.CHANGELOG)))
+                               - F.changelog_items(before.read(F.CHANGELOG))
+                               if F.CHANGELOG in changed else Counter())
             else:
-                cache[kind] = (after.notes(), before.notes())
+                names = sorted(n for n in changed if os.path.dirname(n) == F.NOTES_DIR
+                               and os.path.basename(n).startswith("v") and n.endswith(".md"))
+                cache[kind] = ([after.read(n) for n in names], [before.read(n) for n in names])
         return cache[kind]
+
+    def labelled(text):
+        return F.rewrite_labels(text, gained("mapping"))[0] if F.LABEL_RE.search(text) else text
 
     used: Counter = Counter()
     for rel, added in sorted(frags):
@@ -538,7 +550,7 @@ def _settled_findings(root: Path, line: str, gone: str | None,
             continue
         for sec, items in (data.get("changelog") or {}).items():
             for item in items if isinstance(items, list) else []:
-                bullet = F.render_bullet(F.rewrite_labels(str(item), mapping)[0])
+                bullet = F.render_bullet(labelled(str(item)))
                 items_gained = gained("items")
                 hit = next((k for k in sorted(items_gained, key=str)
                             if k[1] == sec and k[2] == bullet and items_gained[k] > used[k]),
@@ -551,7 +563,7 @@ def _settled_findings(root: Path, line: str, gone: str | None,
                            f"merged changes fragment leaves only by a release assembly, "
                            f"which writes its text in the commit that deletes it" + hint)
         for heading, block in (data.get("release_notes") or {}).items():
-            text = F.rewrite_labels(str(block), mapping)[0].strip("\n")
+            text = labelled(str(block)).strip("\n")
             if not text.strip():
                 continue
             now, was = gained("notes")

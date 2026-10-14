@@ -786,13 +786,15 @@ def _files_on_each_shard_of_two() -> tuple[str, str]:
 def shard_run(tmp_path_factory):
     """One pytest run of a two-file tree through the real root conftest and ini.
 
-    The scratch tree holds copies of ``tests/conftest.py`` (and the two
-    modules it registers) and of ``pyproject.toml``, and runs as one CI
-    shard does: ``MADDENING_TEST_SHARD=1/2`` and ``MADDENING_TEST_JAX_TIMING=1``.
+    The scratch tree holds copies of ``tests/conftest.py`` (the two
+    modules it registers, and the one its teardown hook calls) and of
+    ``pyproject.toml``, and runs as one CI shard does:
+    ``MADDENING_TEST_SHARD=1/2`` and ``MADDENING_TEST_JAX_TIMING=1``.
     """
     root = tmp_path_factory.mktemp("shard_run")
     (root / "tests").mkdir()
-    for name in ("__init__.py", "conftest.py", "_sharding.py", "_jax_timing.py"):
+    for name in ("__init__.py", "conftest.py", "_sharding.py", "_jax_timing.py",
+                 "_hypothesis_line_events.py"):
         shutil.copy(REPO_ROOT / "tests" / name, root / "tests" / name)
     shutil.copy(REPO_ROOT / "pyproject.toml", root / "pyproject.toml")
     kept, dropped = _files_on_each_shard_of_two()

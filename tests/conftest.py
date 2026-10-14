@@ -147,6 +147,16 @@ def pytest_configure(config):
         _release_between_files.register(config)
 
 
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_teardown(item, nextitem):
+    """Turn off the LINE events Hypothesis left on, once the test's own
+    fixtures are torn down: a test whose example failed (a ``find``, a
+    ``verify_node`` made to fail) otherwise slows every later test of the
+    process several times over (``tests/_hypothesis_line_events.py``)."""
+    from tests import _hypothesis_line_events
+    _hypothesis_line_events.clear_line_events_hypothesis_left()
+
+
 def pytest_report_header(config):
     """Report the active profile even when the Hypothesis plugin is off.
 

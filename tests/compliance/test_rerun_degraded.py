@@ -164,9 +164,12 @@ def test_the_names_the_decision_reads_are_the_ones_the_lanes_write():
     for workflow in ("ci.yml", "slow-tests.yml"):
         steps = [s for job in yaml.safe_load((WORKFLOWS / workflow).read_text(encoding="utf-8"))["jobs"].values()
                  for s in job.get("steps", [])]
-        assert any(s.get("name") == CANARY_STEP for s in steps), workflow
+        canaries = [s for s in steps if s.get("name") == CANARY_STEP]
+        assert canaries, workflow
         marker = [s for s in steps if s.get("name") == "Mark a degraded runner"]
-        assert [m["with"]["name"] for m in marker] == ["degraded-runner-${{ job.check_run_id }}"], workflow
+        # One marker for each job that runs the canary (ci.yml: the test lane and the viz3d job).
+        assert [m["with"]["name"] for m in marker] == (
+            ["degraded-runner-${{ job.check_run_id }}"] * len(canaries)), workflow
 
 
 # ---------------------------------------------------------------------------

@@ -194,7 +194,7 @@ def test_every_install_of_the_project_in_ci_reads_the_constraints_file():
     """The per-push jobs resolve against ci/constraints.txt, not against whatever is newest today."""
     steps = list(_install_steps(_workflow("ci.yml")))
     assert {job for job, _ in steps} == {"test", "test-usd", "typecheck", "compliance", "verify-hypothesis",
-                                         "lineax-floor"}, steps
+                                         "lineax-floor", "viz3d"}, steps
     for job, step in steps:
         if job == "lineax-floor":
             # The same file with lineax's own pin taken out, which the floor job replaces.

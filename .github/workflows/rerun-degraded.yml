@@ -3,7 +3,7 @@ name: Re-run degraded runners
 # When a test lane fails because a job drew a degraded runner, run the failed
 # jobs once more.
 #
-# Why: both test lanes fail a job at once, in a step named "Runner canary
+# Why: both test lanes, and the viz3d job of ci.yml, fail a job at once, in a step named "Runner canary
 # (degraded runner check)" with exit code 75, when its runner is far slower
 # than any healthy one (scripts/ci_runner_health.py; on 2026-10-13 one
 # per-push job ran 3.8x slower than its sibling and a slow-lane runner

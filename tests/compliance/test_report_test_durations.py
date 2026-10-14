@@ -689,7 +689,10 @@ def test_the_budget_step_can_fail_the_job():
     assert "continue-on-error" not in job and "continue-on-error" not in step
     # GitHub's default for `run:` is `bash -e {0}`; a custom shell could drop -e.
     assert "shell" not in step
-    assert step["if"] == "${{ !cancelled() }}", "the budget must run after a red test step too"
+    # After a red test step (that is the point), and not after a runner the canary stopped: nothing
+    # ran there, and the report the gate reads does not exist.
+    assert step["if"] == "${{ !cancelled() && steps.canary.outcome != 'failure' }}", (
+        "the budget must run after a red test step too, and only not after a tripped canary")
     # The `${{ }}` expressions are GitHub's, evaluated before the shell runs.
     script = re.sub(r"\$\{\{.*?\}\}", "EXPR", step["run"])
     for undo in ("--fail-over", "||", "set +e"):

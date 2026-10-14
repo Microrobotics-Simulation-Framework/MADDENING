@@ -51,7 +51,7 @@ permissions:
 jobs:
   newest-dependencies:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.check != 'explore-searches' || github.event.schedule == '23 4 * * 1' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -107,7 +107,7 @@ jobs:
 
   explore-searches:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.check != 'newest-dependencies' || github.event.schedule == '41 4 * * 4' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The longest search takes about 25 minutes on a runner.
     timeout-minutes: 90
     strategy:

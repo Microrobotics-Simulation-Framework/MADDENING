@@ -201,12 +201,15 @@ def test_the_weights_table_says_where_its_numbers_came_from(split):
         return
     # The slow lane's weights are for a runner of median speed: every report
     # they were taken from carried its runner's collection time, so none is
-    # weighed by the luck of the runner that ran it.
+    # weighed by the luck of the runner that ran it, and none by its CPU
+    # model (the fallback for a report without one).
     speed = table["runner_speed"]
     assert speed["property"] == _sharding.COLLECT_SECONDS_PROPERTY, speed
-    assert speed["reference_seconds"] > 0 and speed["exponent"] > 0, speed
+    assert speed["reference_seconds"] > 0 and speed["exponent"] == _sharding.SPEED_EXPONENT, speed
     reports = sum(len(run["artifacts"]) for run in table["runs"])
-    assert (speed["reports_scaled"], speed["reports_as_measured"]) == (reports, 0), speed
+    assert (speed["reports_scaled"], speed["reports_by_cpu_model"], speed["reports_as_measured"]) \
+        == (reports, 0, 0), speed
+    assert speed["cpu_factors"] == {} and speed["cpu_reference"] is None, speed
 
 
 @pytest.mark.parametrize("table", [
@@ -325,21 +328,22 @@ def test_the_weights_generator_writes_a_table_the_split_reads(tmp_path):
         [sys.executable, str(REPO_ROOT / "scripts" / "slow_lane_weights.py"),
          "--run", f"11={tmp_path / 'r1'}", "--run", f"22={tmp_path / 'r2'}",
          "--commit", "11=abc1234", "--commit", "22=def5678", "--shards", "2",
-         "--write", "--output", str(out)],
+         "--aggregate", "last", "--write", "--output", str(out)],
         capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     table = json.loads(out.read_text(encoding="utf-8"))
     # a: its slower lane (61 s, two tests summed).  b: under the floor.  c: the
     # later run's 20 s on one lane, the first run's 90 s on the other.
     assert table["seconds"] == {real_a: 61, real_c: 90}
-    # No --lane: the slow lane's table, last run wins.
+    # No --lane: the slow lane's table; --aggregate last: the last run wins.
     assert "slow lane" in table["what"] and "the later" in table["measured"], table
     assert [(r["run"], r["commit"]) for r in table["runs"]] == [("11", "abc1234"), ("22", "def5678")]
     assert table["runs"][1]["artifacts"] == ["slow-durations-py3.12-jax0.10.2-shard2of2"]
     assert "not a file in the tree, left out: tests/test_gone.py" in proc.stdout
-    # Reports written before the runner's speed was recorded are taken as measured, and said to be.
+    # Reports written before the runner's fields were recorded are taken as measured, and said to be.
     assert table["runner_speed"]["reports_as_measured"] == 5, table["runner_speed"]
-    assert f"no report carries {_sharding.COLLECT_SECONDS_PROPERTY}" in proc.stdout, proc.stdout
+    assert (f"5 reports taken as measured (no {_sharding.COLLECT_SECONDS_PROPERTY} and no "
+            f"{_sharding.CPU_PROPERTY} in the report)") in proc.stdout, proc.stdout
     assert _sharding.load_weights(out) == table["seconds"]
     # The prediction, per lane: c (90) opens shard 1, a (61) shard 2; b is
     # unlisted and goes by hash.
@@ -355,7 +359,9 @@ def test_the_weights_generator_scales_each_shard_to_a_runner_of_median_speed(tmp
     One run, one lane, three shards on runners that collected in 20, 40 and
     80 s (the median 40).  The same 100 s file weighs 100 s from the median
     runner, 100 * (40 / 80) ** 1.5 from the slow one and 100 * (40 / 20) **
-    1.5 from the fast one; with ``--speed-exponent 0`` all three weigh 100.
+    1.5 from the fast one; with ``--no-normalise`` all three weigh 100.  The
+    reports name a CPU too, and it changes nothing: a report with a
+    collection time is scaled by that alone, never also by its CPU model.
     On 2026-10-11 the heaviest file was weighed on the two fastest runners
     of sixty, at 30 minutes against 47 on a median one, and its shard ran
     95 to 108 minutes against 68 predicted.
@@ -385,16 +391,19 @@ def test_the_weights_generator_scales_each_shard_to_a_runner_of_median_speed(tmp
     table, out = generate()
     assert table["seconds"] == {real_a: round(100 * 2 ** 1.5), real_b: 100, real_c: round(100 * 0.5 ** 1.5)}
     assert table["runner_speed"] == {"property": _sharding.COLLECT_SECONDS_PROPERTY, "reference_seconds": 40.0,
-                                     "exponent": 1.5, "reports_scaled": 3, "reports_as_measured": 0}
+                                     "exponent": 1.5, "reports_scaled": 3, "reports_by_cpu_model": 0,
+                                     "cpu_reference": None, "cpu_factors": {}, "reports_as_measured": 0}
     assert "3 reports scaled to a runner that collects in 40.0 s" in out, out
-    table, out = generate("--speed-exponent", "0")
+    assert "scaled to a runner of median speed by the time it took to collect" in table["measured"], table
+    assert "CPU model" not in table["measured"] and "CPU model" not in out, out
+    table, out = generate("--no-normalise")
     assert table["seconds"] == {real_a: 100, real_b: 100, real_c: 100}
     assert table["runner_speed"]["reports_as_measured"] == 3, table["runner_speed"]
-    assert "runner speed: times as measured" in out, out
+    assert "every report taken as measured (--no-normalise)" in out, out
 
 
 def test_the_per_push_lane_table_is_the_median_of_the_runs_it_names(tmp_path):
-    """``--lane per-push --aggregate median``: one slow runner in three does not set a file's weight.
+    """``--lane per-push`` (median by default): one slow runner in three does not set a file's weight.
 
     Three cold runs measured a on one JAX lane at 60, 600 and 70 s -- the
     middle one is 70 -- and b at 100 s on every run; c was added after the
@@ -418,8 +427,11 @@ def test_the_per_push_lane_table_is_the_median_of_the_runs_it_names(tmp_path):
     assert "per-push lane" in table["what"], table
     # The lane's own shard count is the default prediction.
     assert f"weighted, {_sharding.PER_PUSH_SHARDS} shards" in proc.stdout
-    # The default stays the last run's, which is what the slow lane's table is.
+    # The median is the default now, for both lanes; the last run's is --aggregate last.
     proc = subprocess.run(command, capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert json.loads(out.read_text(encoding="utf-8"))["seconds"] == {real_a: 70, real_b: 100, real_c: 40}
+    proc = subprocess.run([*command, "--aggregate", "last"], capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert json.loads(out.read_text(encoding="utf-8"))["seconds"] == {real_a: 70, real_b: 100, real_c: 50}
 

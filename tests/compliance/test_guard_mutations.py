@@ -67,6 +67,10 @@ _DURATIONS = "tests/compliance/test_report_test_durations.py"
 _COLLECTS = f"{_DURATIONS}::test_every_shipped_allowlist_entry_is_a_node_id_pytest_collects"
 _REASONS = f"{_DURATIONS}::test_the_shipped_allowlist_names_real_tests_with_reasons"
 _SHARDING = "tests/compliance/test_ci_sharding.py"
+_HEALTH = "tests/compliance/test_ci_runner_health.py"
+_RERUN = "tests/compliance/test_rerun_degraded.py"
+_NORMALISE = "tests/compliance/test_weights_cpu_normalisation.py"
+_VARIANCE = "tests/compliance/test_ci_variance_report.py"
 _DEPS = "tests/compliance/test_ci_dependency_jobs.py"
 _WORKFLOWS = "tests/compliance/test_ci_workflows.py"
 _PRUNE = "tests/compliance/test_prune_jax_cache.py"
@@ -78,6 +82,10 @@ _SLOW_RULE = "tests/compliance/test_slow_only_rule.py"
 #: mutants need it.
 DUR = (_DURATIONS, "--deselect", _COLLECTS)
 SHARD = (_SHARDING,)
+HEALTH = (_HEALTH,)
+RERUN = (_RERUN,)
+NORMALISE = (_NORMALISE,)
+VARIANCE = (_VARIANCE,)
 DEPS = (_DEPS,)
 _HYGIENE = "tests/compliance/test_slow_lane_hygiene.py"
 HYGIENE = (_HYGIENE,)
@@ -133,7 +141,7 @@ GUARD_FILES = (_DURATIONS, _SHARDING, _WORKFLOWS, _DEPS, _PRUNE, _COMPILE_CACHE,
                _HUNTS)
 
 
-GUARD_FILES = GUARD_FILES + (_HYGIENE,)
+GUARD_FILES = GUARD_FILES + (_HYGIENE, _HEALTH, _RERUN, _NORMALISE, _VARIANCE)
 
 
 @dataclass(frozen=True)
@@ -166,6 +174,7 @@ CONS = "ci/constraints.txt"
 SC = ".github/workflows/scheduled-checks.yml"
 SLD = "scripts/slow_lane_drift.py"
 SLW = "scripts/slow_lane_weights.py"
+RR_WF = ".github/workflows/rerun-degraded.yml"
 PP = "pyproject.toml"
 AL = "tests/duration_allowlist.txt"
 TC = "tests/core/test_compile_cache.py"
@@ -384,7 +393,7 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("G5", SLW, "        merged[lane] = {path: statistics.median(times) for path, times in files.items()}",
        "        merged[lane] = {path: max(times) for path, times in files.items()}", SHARD,
        "one slow runner in three sets a file's weight"),
-    _M("G6", SLW, "for run in reports], args.aggregate)", "for run in reports])", SHARD,
+    _M("G6", SLW, "    lanes = merge(runs, args.aggregate)", "    lanes = merge(runs)", SHARD,
        "--aggregate median is parsed and ignored"),
     _M("G7", SLW, '    ap.add_argument("--lane", choices=sorted(LANES), default="slow",',
        '    ap.add_argument("--lane", choices=sorted(LANES), default="per-push",', SHARD,
@@ -392,12 +401,12 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("G4", SLW, "            files[path] += float(case.get(\"time\") or 0.0)",
        "            files[path] = float(case.get(\"time\") or 0.0)", SHARD,
        "a file weighs what its last test took"),
-    _M("G8", SLW, "        scale = 1.0 if seconds is None or reference is None else (reference / seconds) ** exponent",
-       "        scale = 1.0", SHARD,
+    _M("G8", SLW,
+       "    scales = [_sharding.runner_scale(u.collect, reference, exponent) if u.collect else 1.0 for u in units]",
+       "    scales = [1.0 for u in units]", SHARD,
        "every shard's times taken as measured: a file weighed on a fast runner is under-weighed and its "
        "shard runs long (shard 4, 2026-10-12 and 13: 95 to 108 minutes against 68 predicted)"),
-    _M("G9", SLW, "        scale = 1.0 if seconds is None or reference is None else (reference / seconds) ** exponent",
-       "        scale = 1.0 if seconds is None or reference is None else (seconds / reference) ** exponent",
+    _M("G9", SH, "    return (reference_seconds / seconds) ** exponent", "    return (seconds / reference_seconds) ** exponent",
        SHARD, "a slow runner's times scaled up and a fast one's down: the runner's luck doubled, not removed"),
     # --- D: the dependency jobs and the constraints file ------------------------
     _M("D1", GEN, "        if differing:\n", "        if False:\n", DEPS,
@@ -623,7 +632,8 @@ MUTANTS: tuple[Mutant, ...] = (
        "the warning waits for the shard to take twice the margin past its prediction"),
     _M("Z21", SLD, "            \"expected\": predicted * speed}", "            \"expected\": predicted}", HYGIENE,
        "the runner's speed is read and ignored: a slow runner's shard is called a stale table"),
-    _M("Z22", SLD, "    factor = (seconds / reference) ** exponent", "    factor = (reference / seconds) ** exponent",
+    _M("Z22", SLD, "    factor = 1.0 / _sharding.runner_scale(seconds, reference, exponent)",
+       "    factor = _sharding.runner_scale(seconds, reference, exponent)",
        HYGIENE, "a slow runner's prediction scaled down: the runner's luck doubled, not removed"),
     _M("Z19", SLD, "                        key=lambda kv: (-kv[1], kv[0]))\n    grown", "                        key=lambda kv: (kv[1], kv[0]))\n    grown", HYGIENE,
        "the files the table has not measured are named lightest first, the heavy one cut off the list"),
@@ -1080,6 +1090,82 @@ MUTANTS: tuple[Mutant, ...] = (
         "test_a_pair_stalled_on_a_narrowing_transform_has_no_flag_on_a_bound_under_the_distance",),
        "the step's own analysis not handed the group's edges: the report's floor counts the "
        "delivered dtype and the spectral analysis inside the step rounds at the fields' finer one"),
+    # --- RH: runner health, the degraded-runner canary and its wiring (P0.3b) ------
+    _M("RH1", "scripts/ci_runner_health.py", "    elif canary_s is not None and canary_s > canary_limit:",
+       "    elif canary_s is not None and canary_s >= canary_limit:", HEALTH,
+       "a canary at exactly its limit fails the job"),
+    _M("RH2", "scripts/ci_runner_health.py", "    return DEGRADED_EXIT\n", "    return 1\n", HEALTH,
+       "a degraded runner exits 1, the status of any failing step: the re-run cannot tell it apart"),
+    _M("RH3", "scripts/ci_runner_health.py", '            return {"total": sum(fields[:8]), "steal": fields[7]}',
+       '            return {"total": sum(fields[:8]), "steal": fields[6]}', HEALTH,
+       "the steal time logged is softirq time"),
+    _M("RH4", "scripts/ci_runner_health.py", "CANARY_LIMIT_S = 8.5\n", "CANARY_LIMIT_S = 1e9\n", HEALTH,
+       "the canary can never trip: a degraded runner burns the job's hours"),
+    _M("RH5", "scripts/ci_runner_health.py", "INSTALL_LIMIT_S = 204.0\n", "INSTALL_LIMIT_S = 20.0\n", HEALTH,
+       "a healthy install trips the canary: every job fails"),
+    _M("RH6", CI, "          name: degraded-runner-${{ job.check_run_id }}\n",
+       "          name: degraded-runner-${{ github.job }}\n", HEALTH + RERUN,
+       "the marker artifact is not named by the job: the re-run finds no marker and never re-runs"),
+    _M("RH7", SL, "        id: canary\n", "", HEALTH,
+       "the slow lane's canary has no id: steps.canary.* is empty, so no later step knows it tripped"),
+    _M("RH8", CI, "        if: ${{ !cancelled() && steps.canary.outcome != 'failure' }}\n        uses: actions/upload-artifact@v4",
+       "        if: ${{ !cancelled() }}\n        uses: actions/upload-artifact@v4", HEALTH,
+       "the durations artifact uploaded after a tripped canary: the re-run of the job cannot upload that name again"),
+    _M("RH9", CI, "      - name: Runner health (before the tests)\n        id: health-before\n        run: python scripts/ci_runner_health.py before-tests\n\n",
+       "", HEALTH, "no memory or steal baseline for the test step: the after-step logs nothing"),
+    _M("RH10", CI, "    needs: changes\n    if: needs.changes.outputs.code == 'true'\n    runs-on: ubuntu-24.04\n    strategy:",
+       "    needs: changes\n    if: needs.changes.outputs.code == 'true'\n    runs-on: ubuntu-latest\n    strategy:", HEALTH,
+       "the test lane on ubuntu-latest again: the image changes to 26.04 mid-cycle"),
+    _M("RH11", SL, "jobs:\n  slow:\n    runs-on: ubuntu-24.04\n", "jobs:\n  slow:\n    runs-on: ubuntu-latest\n", HEALTH,
+       "the slow lane on ubuntu-latest again"),
+    # --- RR: the re-run of degraded runners (P0.3b) -------------------------------
+    _M("RR1", RR_WF, '              if int(run.get("run_attempt") or 0) != 1:', "              if False:", RERUN,
+       "a run is re-run on every attempt: two degraded runners in a row loop"),
+    _M("RR2", RR_WF, '                  if not (job.get("conclusion") == "failure" and canary_failed and marked):',
+       "                  if not marked:", RERUN,
+       "a planted artifact marks a job that failed in its tests: a real failure is re-run"),
+    _M("RR3", RR_WF, '              markers = {a["name"] for a in artifacts if not a.get("expired")}',
+       '              markers = {a["name"] for a in artifacts}', RERUN, "an expired artifact still marks a job"),
+    _M("RR4", RR_WF, "permissions:\n  actions: write\n\nconcurrency", "permissions:\n  actions: write\n  contents: read\n\nconcurrency",
+       RERUN, "the re-run workflow's token can read the repository"),
+    _M("RR5", RR_WF, '          NOT_FAILED = {"success", "skipped", "neutral"}', '          NOT_FAILED = {"success", "skipped", "neutral", "cancelled"}',
+       RERUN, "a cancelled job beside a degraded one is ignored: the run is re-run over a cancellation"),
+    _M("RR6", RR_WF, '["gh", "run", "rerun", run_id, "--failed"]', '["gh", "run", "rerun", run_id]', RERUN,
+       "every job is re-run, passing ones too"),
+    _M("RR7", RR_WF, "    steps:\n      - name: Re-run the failed jobs if every one drew a degraded runner",
+       "    steps:\n      - uses: actions/checkout@v4\n      - name: Re-run the failed jobs if every one drew a degraded runner",
+       RERUN, "the re-run workflow checks out the run's code"),
+    _M("RR8", RR_WF, '                     and not str(j.get("name", "")).startswith(DEPENDENTS)]',
+       "                     ]", RERUN,
+       "a lane whose six shards all drew degraded runners is never re-run: its summary job fails too and counts"),
+    # --- GN: the weights generator's CPU normalisation (P0.3b) --------------------
+    _M("GN1", SLW, "    return [Unit(u.lane, u.artifact, u.cpu, {p: s * k for p, s in u.files.items()}, u.cache, u.run, u.collect)",
+       "    return [Unit(u.lane, u.artifact, u.cpu, {p: s for p, s in u.files.items()}, u.cache, u.run, u.collect)",
+       NORMALISE, "no report is scaled, whatever its runner: the unlucky draw sets the table"),
+    _M("GN2", SLW, "            factors[cpu] = statistics.median(ratios)", "            factors[cpu] = statistics.mean(ratios)",
+       NORMALISE, "one file's outlier ratio sets a model's factor"),
+    _M("GN3", SLW, '            units = [u for u in units if u.cache != "warm"]', "            units = units", NORMALISE,
+       "a warm per-push shard's times are taken for a cold table's"),
+    _M("GN4", SLW, "                if base >= min_seconds:", "                if True:", NORMALISE,
+       "a file of a second or two, all noise, sets the speed factor"),
+    _M("GN5", SLW, "else max(sorted(count), key=lambda c: count[c])", "else min(sorted(count), key=lambda c: count[c])",
+       NORMALISE, "the reference is the model with the fewest shards"),
+    _M("GN6", SLW, "        if len(ratios) >= MIN_FILES_FOR_FACTOR:", "        if len(ratios) >= 1:", NORMALISE,
+       "a factor from one file's ratio"),
+    _M("GN7", SLW, "    fallback = [i for i, u in enumerate(units) if not u.collect and u.cpu != UNKNOWN_CPU]",
+       "    fallback = [i for i, u in enumerate(units) if u.cpu != UNKNOWN_CPU]", NORMALISE,
+       "a report scaled by its collection time is divided by its CPU model's factor too: corrected twice"),
+    _M("GN8", SLW, "speed_factors(pool, MEDIAN_RUNNER if timed else None)", "speed_factors(pool, None)", NORMALISE,
+       "the CPU fallback is estimated against the commonest model, not the scaled reports: a table on two "
+       "references at once"),
+    # --- VR: the variance report ---------------------------------------------------
+    _M("VR1", "scripts/ci_variance_report.py",
+       "        others = [o for o in records if o is not r and o.lane == r.lane and o.shard == r.shard]",
+       "        others = [o for o in records if o.lane == r.lane and o.shard == r.shard]", VARIANCE,
+       "a degraded job is judged against a median it pulled up itself"),
+    _M("VR2", "scripts/ci_variance_report.py", "            limit, basis = flag_ratio * CPU_SPREAD,",
+       "            limit, basis = flag_ratio,", VARIANCE,
+       "the generation spread is flagged as degradation whenever a CPU has few peers"),
 )
 
 

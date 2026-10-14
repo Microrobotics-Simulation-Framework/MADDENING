@@ -24,10 +24,11 @@ shard's own, on one runner, and runners differ by a factor of up to 1.9
 over the same files.  The table's weights are for a runner of median speed
 (its ``runner_speed``), and the report says how fast this one was (its
 ``runner_collect_seconds``, ``tests/_sharding.py``): the prediction is
-scaled by the same rule before it is compared, and the summary says by how
-much.  A report or a table without them is compared as it stands.  The
-margin of half stays for what the collection time does not explain, so a
-warning is a prompt to look at the named files, not a verdict on the runner.
+divided by ``_sharding.runner_scale``, the rule the table was scaled by,
+before it is compared, and the summary says by how much.  A report or a
+table without a collection time is compared as it stands.  The margin of
+half stays for what the collection time does not explain, so a warning is
+a prompt to look at the named files, not a verdict on the runner.
 
 It reports and exits 0.  Exit 2: the report or the table cannot be read.
 
@@ -78,14 +79,15 @@ def runner_speed(report: Path, table: dict) -> tuple[float, str]:
     speed = table.get("runner_speed") or {}
     reference, exponent = speed.get("reference_seconds"), speed.get("exponent") or 0
     try:
-        props = {p.get("name"): p.get("value") for p in ET.parse(report).getroot().iter("property")}
-        seconds = float(props.get(_sharding.COLLECT_SECONDS_PROPERTY, ""))
-    except (OSError, ET.ParseError, ValueError):
+        root = ET.parse(report).getroot()
+    except (OSError, ET.ParseError):
         return 1.0, ""
-    if not reference or not exponent or seconds <= 0:
+    seconds = _sharding.collect_seconds(root)
+    if not reference or not exponent or seconds is None:
         return 1.0, ""
-    factor = (seconds / reference) ** exponent
-    return factor, (f"this runner ({props.get('runner_cpu', 'CPU unknown')}) collected the suite in "
+    factor = 1.0 / _sharding.runner_scale(seconds, reference, exponent)
+    cpu = _sharding.runner_fields(root).get(_sharding.CPU_PROPERTY, "CPU unknown")
+    return factor, (f"this runner ({cpu}) collected the suite in "
                     f"{seconds:.1f} s against the table's {reference:.1f} s, so x{factor:.2f}")
 
 

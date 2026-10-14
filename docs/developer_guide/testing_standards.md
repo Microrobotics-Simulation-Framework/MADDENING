@@ -590,15 +590,27 @@ alone, after the files before it on the shard, and after a whole CI-like
 collection. So each shard's JUnit report records how fast its runner was
 (`tests/_sharding.py`): `runner_collect_seconds`, the time pytest took to
 collect the suite (the same work on every shard, before any test), with
-`runner_cpu` and `runner_cpus`. `scripts/slow_lane_weights.py` scales each
-shard's times by (median collection time / its own) to the power 1.5
-before it weighs them; the exponent is fitted on the sixty runners of
+`runner_cpu` and `runner_cpus`. The report is the one place these fields
+are written and read; the durations artifact carries nothing else about
+the runner. The collection time is the speed measure:
+`scripts/slow_lane_weights.py` scales each shard's times by (median
+collection time / its own) to the power 1.5 before it weighs them
+(`_sharding.runner_scale`); the exponent is fitted on the sixty runners of
 those runs, where the collection time and each runner's speed over its
-files agree with r = 0.86. `scripts/slow_lane_drift.py` scales the
-prediction it compares a shard against by the same rule and says by how
-much, so a slow runner is not reported as a stale table. Expect a shard
-to run up to about a quarter over the prediction on a slow runner, and
-up to two fifths under it on a fast one.
+files agree with r = 0.86. It tracks the runner, not its model: a slow
+instance of a fast CPU collects slowly too. `scripts/slow_lane_drift.py`
+divides the prediction it compares a shard against by the same function
+and says by how much, so a slow runner is not reported as a stale table.
+The CPU model is recorded and used only for a report that has no
+collection time: the weights script divides such a report by its model's
+speed factor, estimated from the files it shares with the scaled reports.
+A report from before the property existed can be given its collection
+time from the job log (pytest's "test session starts" line to its
+"collected N items" line, which agree with the property to a few
+milliseconds); the table's runs of 2026-10-11 to 13 were, and the times
+are in `benchmarks/results/050_p0_3c_shard4/ci_collect_seconds.json`.
+Expect a shard to run up to about a quarter over the prediction on a slow
+runner, and up to two fifths under it on a fast one.
 
 The table deals by time, not memory. Each shard runs in one process, and
 JAX keeps every program it compiles; a file that keeps graphs in a
@@ -635,15 +647,21 @@ To rebalance, regenerate `tests/per_push_weights.json` from the artifacts of
 cold push runs (the `test-durations-*` artifacts are kept 90 days):
 
 ```bash
+python scripts/slow_lane_weights.py --lane per-push --latest 5 --write
+# or from runs you chose (their ids from `gh run list --workflow ci.yml --event push`):
 for id in <run id> <run id> <run id>; do
   gh run download $id --dir /tmp/push/$id --pattern 'test-durations-*'
 done
-python scripts/slow_lane_weights.py --lane per-push --aggregate median --write \
+python scripts/slow_lane_weights.py --lane per-push --write \
     --run <run id>=/tmp/push/<run id> --run <run id>=/tmp/push/<run id> ...
 ```
 
-Take only runs whose shards all ran cold (a push to `main` or `release/**`): a
-warm run's compile times are the cache's. Changing the job count re-deals every
+The median across runs is the default (`--aggregate last` takes the last run's),
+and each shard's seconds are scaled to a runner of median speed by its
+collection time before the median is taken, as for the slow lane (below).
+Take only runs whose shards all ran cold (a push to `main` or `release/**`):
+a warm run's compile times are the cache's (`--latest` reads pushes only, and
+either way a shard whose `cache-mode` file says warm is left out). Changing the job count re-deals every
 file, and the count is written in several places that must move together:
 
 - in `ci.yml`: `shard:` and `MADDENING_TEST_SHARD` in the `test` job, the
@@ -673,13 +691,18 @@ The script prints the heaviest files and the minutes it predicts per shard,
 before and after, on each JAX lane:
 
 ```bash
+python scripts/slow_lane_weights.py --latest --write          # the last three runs that left artifacts
+# or from runs you chose:
 gh run download <run id> --dir /tmp/slow --pattern 'slow-durations-*'
 python scripts/slow_lane_weights.py --run <run id>=/tmp/slow --commit <run id>=<sha> --write
 ```
 
-A shard that timed out wrote no report, so its files have no measurement in
-that run: give an earlier run first (`--run` repeats, and the later
-measurement of a file wins). `test_ci_sharding.py` fails if the table lists
+The table is the median over the runs given (three by default for
+`--latest`, or as many as exist), on a runner of median speed. A shard that
+timed out wrote no report, so its files have no measurement in that run;
+the median is over the runs that did measure them (`--aggregate last`, with
+`--run` repeated, is the older "later measurement wins").
+`test_ci_sharding.py` fails if the table lists
 a file that no longer exists, or predicts more than 100 minutes on the
 heaviest shard; then raise `SLOW_LANE_SHARDS`, or split the heaviest file.
 
@@ -720,6 +743,72 @@ push>`. The tests that were already over 5 s when the budget arrived
 summary lists entries that may now be removable: ones no longer in the lane,
 or that passed under 5 s (a skipped or failed test says nothing about its
 cost, so it is never listed).
+
+### Runner variance and degraded runners
+
+Every job runs on `ubuntu-24.04`, never `ubuntu-latest` (which becomes Ubuntu
+26.04 on 2026-10-19 and would move the image under a release cycle). Moving to
+26.04 is a pull request of its own: change every `runs-on`, regenerate the SOUP
+tables (`scripts/generate_soup_tables.py`) and re-measure the limits below.
+`test_ci_runner_health.py` holds every `runs-on` to the pin.
+
+The hosted runners are a pool of several CPU generations; the same files take
+about 1.5 times as long on the slowest (AMD EPYC 7763: a median 30 minutes for
+a per-push job) as on the fastest (EPYC 9V45: 19.6). To read the spread from
+runs already made:
+
+```bash
+python scripts/ci_variance_report.py --last-push 6 --last-slow 3
+python scripts/ci_variance_report.py --run <run id> --flag-ratio 1.3
+```
+
+It tabulates the test-step minutes by lane and CPU model (the CPU comes from
+the job log), by shard (every run's minutes with its CPU, and the max/min
+ratio), and lists the jobs far outside their distribution: over
+`--flag-ratio` (1.5) times the median of the *other* jobs of the same shard
+on the same CPU model when there are three of them, otherwise over 1.5 times
+that times 1.5 of the shard's median on any CPU. It also lists the install
+and canary seconds by CPU model, which is the data the limits below came from.
+
+Each test job of both lanes logs, from `scripts/ci_runner_health.py`:
+
+```text
+runner: cpu 'AMD EPYC 7763 64-Core Processor', 4 vCPU, memory 15.6 GiB total, 13.9 GiB available
+runner: canary numpy matmul 0.95 s + jit compile 1.96 s = 2.91 s (limit 8.5 s), import 0.72 s; install 65 s (limit 204 s)
+runner: before the tests, memory 14.4 GiB available of 15.6 GiB
+runner: after the tests, memory 14.6 GiB available of 15.6 GiB; cpu steal 0.0 s of 5526 cpu-s over the 23.1 min test step (0.00%)
+```
+(shard 3 of the per-push lane, run 38505341499)
+
+and the same lines in the step summary. `ci_variance_report.py` reads the CPU
+and the canary from the log. The weights tooling does not: it reads a shard's
+runner from its JUnit report (`runner_collect_seconds`, `runner_cpu`), the one
+carrier of those fields, and scales by the collection time, not the CPU model
+(see the weighted split, above). The slow lane never logged its CPU before this.
+
+Rarely a job draws a degraded machine: on 2026-10-13 one per-push job ran the
+same tests 3.8 times slower than its sibling, and a slow-lane runner took 9
+minutes to `pip install` (about 1 normally) and every test about ten times
+slower. Right after the install, the *Runner canary (degraded runner check)*
+step times a fixed micro-benchmark (a NumPy matmul and a small `jax.jit`
+compile) and reads the install's duration, and stops the job at once when
+either is more than three times the slowest CPU model's median: 8.5 seconds for
+the canary (the slowest model's median is 2.83), 204 for the install (68).
+The data is `benchmarks/results/050_p0_3b_ci/thresholds.md`. A trip prints
+`::error title=Degraded runner::`, adds a line to the step summary, uploads the
+artifact `degraded-runner-<job id>` and exits 75. (A `pytest --collect-only`
+check was measured, 34 to 45 seconds a job, and left out.)
+
+`.github/workflows/rerun-degraded.yml` then re-runs the failed jobs, once, when
+*every* failed job of a `CI` or `Slow tests` run stopped at the canary and left
+its artifact. A first attempt only; any other failure, even beside a degraded
+job, leaves the run red for a person. It never checks out the run's code, and
+its token is `actions: write`. **GitHub triggers a `workflow_run` workflow from
+the default branch's copy only, so the automatic re-run does nothing until this
+is on `main`; the fail-fast stop works from the branch it is on.** To test a
+change to the canary, set `MADDENING_FORCE_DEGRADED=canary` (or `install`) in a
+test step's `env:` on a throwaway branch (never anywhere that merges): the job
+exits 75 with the annotation and the artifact.
 
 ### The dependencies CI installs
 

@@ -58,15 +58,40 @@ silently loosened there would verify less on the one machine whose result
 is cited.  ``tests/compliance/test_gate_scripts.py`` holds the headings to
 the ``v*`` tags wherever the tags are present.
 
+* **Across release lines** (:func:`cross_line_versions`): on a development
+  tree of line X.Y, a bound may also name the next patch of each older line
+  in ``scripts/fragments.py``'s ``RELEASE_LINES`` -- 0.4.2 while the newest
+  dated 0.4 heading is 0.4.1 -- and its ``.dev0``.  A fix that lands on the
+  0.4 line first reaches the 0.5 line by a forward merge before 0.4.2 is
+  tagged; without this the 0.5 gate failed on it.  The allowance is off at a
+  release version.
+
 An empty or missing range, an unparseable one, a missing or non-PEP 440
 ``maddening_version``, a registry with no anomalies and an unimportable
-``packaging`` all fail: this check fails closed.  ``packaging`` is not a
+``packaging`` all fail: this check fails closed.
+
+Fragments: the merged view
+--------------------------
+A pull request adds its registry entries in ``docs/fragments/anomalies/
+<stem>.yaml``, labelled ``MADD-ANO-NEW-<stem>-<n>``, until ``scripts/
+fragments.py assemble`` numbers them.  When the registry checked is the
+repository's own (``docs/validation/known_anomalies.yaml`` under
+``--repo-root``), or ``--fragments-root`` names a tree, this gate reads the
+merged view: the registry's entries plus every fragment entry of every line.
+Every rule runs over all of it -- the schema (the validator reads each
+fragment's entries in a temporary file under the registry's header, without
+the fragment-only keys, and its messages name the fragment), references,
+evidence, residual risk, safety relevance, ranges and the id-line spelling.
+Contiguity and retirement cover numbered entries only.  A number in a
+fragment, a label in the registry, and at a release version any fragment
+entry at all, are refused.  ``packaging`` is not a
 runtime dependency of MADDENING; it is present wherever this gate runs
 because pytest (``packaging>=22``) and matplotlib depend on it.
 """
 
 import argparse
 import ast
+import gc
 import os
 import re
 import sys
@@ -77,8 +102,14 @@ _REPO_ROOT = os.path.dirname(_HERE)
 # Add src to path so this works without installation
 sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
 
-from maddening.compliance._validate import validate_anomaly_registry
+from maddening.compliance._validate import (
+    _validate_registry_document, parse_cache, validate_anomaly_registry)
 from maddening.core.compliance.anomaly import SafetyRelevance
+
+# The fragments' shared definitions: the release lines, the label spelling and
+# the reader of docs/fragments/ (scripts/fragments.py, standard library only).
+sys.path.insert(0, _HERE)
+import fragments as _fragments  # noqa: E402
 
 
 #: Reference fields whose entries this gate resolves.  Both count towards
@@ -162,13 +193,16 @@ def released_versions(changelog=CHANGELOG):
     return found, None
 
 
-def _range_errors_for(aid, status, text, current, resolved_in, sp, released):
+def _range_errors_for(aid, status, text, current, resolved_in, sp, released,
+                      also=frozenset()):
     """Every way one entry's ``affected_versions`` breaks the convention.
 
     ``sp`` is ``(SpecifierSet, InvalidSpecifier, Version, InvalidVersion)``
     from ``packaging``, passed in so the import happens -- and fails
     closed -- in exactly one place.  ``released`` is the set of released
-    :class:`~packaging.version.Version` objects (:func:`released_versions`).
+    :class:`~packaging.version.Version` objects (:func:`released_versions`);
+    ``also`` the releases another open line is building towards
+    (:func:`cross_line_versions`), allowed as if released.
     """
     SpecifierSet, InvalidSpecifier, Version, InvalidVersion = sp
 
@@ -177,7 +211,7 @@ def _range_errors_for(aid, status, text, current, resolved_in, sp, released):
     # any of them -- a defect introduced during a cycle starts at X.Y.Z.dev0,
     # and keeps that spelling after X.Y.Z ships.
     cycle = Version(current.base_version)
-    fix_ok = frozenset(released) | {cycle}
+    fix_ok = frozenset(released) | {cycle} | frozenset(also)
     first_ok = fix_ok | {Version(f"{v.base_version}.dev0") for v in fix_ok}
     listed = ", ".join(str(v) for v in sorted(released))
 
@@ -368,6 +402,7 @@ def version_range_errors(registry, released=None):
         return [f"maddening_version {declared!r} is not a PEP 440 version, so "
                 f"no affected_versions range can be compared with it"]
 
+    also = cross_line_versions(current, released_set, Version)
     errors = []
     for a in anomalies:
         aid = str(a.get("anomaly_id", "<missing>"))
@@ -382,9 +417,40 @@ def version_range_errors(registry, released=None):
             continue
         errors += _range_errors_for(
             aid, a.get("resolution_status"), raw.strip(), current,
-            a.get("resolution_version"), sp, released_set,
+            a.get("resolution_version"), sp, released_set, also,
         )
     return errors
+
+
+def cross_line_versions(current, released, Version, lines=None):
+    """The next patch of each older open release line, on a development tree.
+
+    ``current`` is the registry's version, ``released`` the released
+    versions (``packaging`` objects) and ``lines`` the open release lines,
+    oldest first (``scripts/fragments.py``'s ``RELEASE_LINES`` by default).
+    On a ``.dev`` tree of line X.Y, each line older than X.Y with a dated
+    release contributes the patch after its newest one: ``0.4.2`` on
+    ``0.5.0.dev0`` while 0.4.1 is the newest 0.4 release.  A line that is not
+    open contributes nothing (``0.3.2`` stays refused), and neither does any
+    line at a release version: the allowance exists for the forward merge of
+    a fix whose release is not tagged yet, and a release names only
+    versions somebody can install.
+    """
+    if not current.is_devrelease:
+        return frozenset()
+    lines = _fragments.RELEASE_LINES if lines is None else lines
+    here = (current.major, current.minor)
+    also = set()
+    for name in lines:
+        key = tuple(int(x) for x in name.split("."))
+        if key >= here:
+            continue
+        patches = [v for v in released
+                   if (v.major, v.minor) == key and not v.is_prerelease]
+        if patches:
+            newest = max(patches)
+            also.add(Version(f"{key[0]}.{key[1]}.{newest.micro + 1}"))
+    return frozenset(also)
 
 
 #: Where a retired ID is recorded -- the file the gap error below names.
@@ -777,7 +843,7 @@ def safety_relevance_errors(anomalies):
     return errors
 
 
-def _evidence_errors(anomalies, retired=frozenset()):
+def _evidence_errors(anomalies, retired=frozenset(), contiguous=True):
     """Registry-level rules the schema validator does not enforce.
 
     Both fail closed, and both were found missing by the release audit of
@@ -809,6 +875,9 @@ def _evidence_errors(anomalies, retired=frozenset()):
     edited along with the deletion.  That pin is ``_HIGHEST_ANOMALY_ID``
     in ``tests/compliance/test_soup_evidence.py``, and this gate does not
     duplicate it.
+
+    ``contiguous=False`` runs rule 1 alone: fragment entries carry labels,
+    not numbers, and the numbering rule is the registry's.
     """
     import re
 
@@ -841,7 +910,7 @@ def _evidence_errors(anomalies, retired=frozenset()):
                     f"for it: state it, or set the status to 'open' or "
                     f"'resolved'."
                 )
-        m = re.fullmatch(r"(.*?)(\d+)", aid)
+        m = re.fullmatch(r"(.*?)(\d+)", aid) if contiguous else None
         if m:
             by_prefix.setdefault(m.group(1), {})[int(m.group(2))] = aid
     present = {aid for numbers in by_prefix.values() for aid in numbers.values()}
@@ -1195,20 +1264,22 @@ def _parameters(func):
     return [a.arg for a in args.posonlyargs + args.args + args.kwonlyargs]
 
 
-def _test_function_kinds(func, classes, tree, aliases):
+def _test_function_kinds(func, classes, tree, aliases, memo=None):
     """Imperative skips / xfails a test function reaches when it runs.
 
     Its own body (:func:`_imperative_kinds`), and the body of every fixture
     it requests by parameter name, the fixtures those request, and the
     ``autouse`` fixtures in scope -- defined in the same module or in a
     class enclosing the test.  A fixture that calls ``pytest.skip()``
-    stops the test before its first line.
+    stops the test before its first line.  ``memo`` is the run's
+    :class:`_ModuleMemo`, or ``None`` for a fresh one.
     """
-    helpers = _module_functions(tree)
+    memo = _ModuleMemo() if memo is None else memo
+    helpers = memo.module_functions(tree)
     kinds = _imperative_kinds(func.body, aliases, helpers)
-    fixtures, autouse = _fixture_defs(tree.body, aliases)
+    fixtures, autouse = memo.fixture_defs(tree.body, aliases)
     for cls in classes:
-        inner, inner_autouse = _fixture_defs(cls.body, aliases)
+        inner, inner_autouse = memo.fixture_defs(cls.body, aliases)
         fixtures.update(inner)
         autouse += inner_autouse
     todo = [fixtures[n] for n in _parameters(func) if n in fixtures] + autouse
@@ -1242,6 +1313,50 @@ def _module_marks(tree, aliases=None):
     return kinds
 
 
+class _ModuleMemo:
+    """What the reference rules derive from each parsed test module, per run.
+
+    A test file cited a hundred times had its aliases, module marks,
+    functions and fixtures recomputed a hundred times.  Within one run the
+    parse cache (:func:`maddening.compliance._validate.parse_cache`) hands
+    every citation of an unchanged file the same tree object, so each value
+    is computed once per tree and held with the objects it came from: a key
+    is the identity of its inputs, and a hit is checked to be those very
+    objects, so a re-parsed (edited) file never meets an old value.  Values
+    are returned as fresh containers, because callers extend them.
+
+    One instance lives for one run (:func:`main` makes it); never
+    module-global.
+    """
+
+    def __init__(self):
+        self._held = {}
+
+    def _get(self, kind, inputs, compute):
+        key = (kind,) + tuple(id(x) for x in inputs)
+        hit = self._held.get(key)
+        if hit is None or any(a is not b for a, b in zip(hit[0], inputs)):
+            hit = (inputs, compute())
+            self._held[key] = hit
+        return hit[1]
+
+    def aliases(self, tree):
+        return self._get("aliases", (tree,), lambda: _pytest_aliases(tree))
+
+    def module_functions(self, tree):
+        return self._get("functions", (tree,),
+                         lambda: _module_functions(tree))
+
+    def module_marks(self, tree, aliases):
+        return list(self._get("marks", (tree, aliases),
+                              lambda: _module_marks(tree, aliases)))
+
+    def fixture_defs(self, body, aliases):
+        found, autouse = self._get("fixtures", (body, aliases),
+                                   lambda: _fixture_defs(body, aliases))
+        return dict(found), list(autouse)
+
+
 def _holds_a_test(body):
     """Does this module or class body hold a test pytest would collect?"""
     import ast
@@ -1257,7 +1372,7 @@ def _holds_a_test(body):
     return False
 
 
-def _reference_findings(aid, status, ref, repo_root):
+def _reference_findings(aid, status, ref, repo_root, memo=None):
     """``(errors, conditional)`` for one ``verification`` entry.
 
     The validator has already said whether the entry *resolves*; this says
@@ -1289,8 +1404,14 @@ def _reference_findings(aid, status, ref, repo_root):
     ``usefixtures`` mark, a collection hook, and a condition that is
     always true on CI without being fixed in the source.  Those are the
     runtime's to decide; the gate reads source.
+
+    ``memo`` is the run's :class:`_ModuleMemo` (``None``: a fresh one).
+    Inside :func:`maddening.compliance._validate.parse_cache` the file is
+    parsed once per run rather than once per reference.
     """
     from maddening.compliance._validate import _defined_in, _member, _parse
+
+    memo = _ModuleMemo() if memo is None else memo
 
     parts = str(ref).split("::")
     rel = parts[0]
@@ -1318,8 +1439,8 @@ def _reference_findings(aid, status, ref, repo_root):
         return [], []
 
     module = _defined_in(tree.body)
-    aliases = _pytest_aliases(tree)
-    kinds = _module_marks(tree, aliases)
+    aliases = memo.aliases(tree)
+    kinds = memo.module_marks(tree, aliases)
     node = None
     classes = []
     for name in parts[1:]:
@@ -1355,7 +1476,7 @@ def _reference_findings(aid, status, ref, repo_root):
         if not _holds_a_test(body):
             return [f"{where}: holds no test pytest collects"], []
     else:
-        kinds += _test_function_kinds(node, classes, tree, aliases)
+        kinds += _test_function_kinds(node, classes, tree, aliases, memo)
 
     errors, conditional = [], []
     if "skip" in kinds:
@@ -1377,7 +1498,7 @@ def _reference_findings(aid, status, ref, repo_root):
     return errors, conditional
 
 
-def _reference_errors(anomalies, repo_root, resolve=True):
+def _reference_errors(anomalies, repo_root, resolve=True, memo=None):
     """``(errors, conditional)`` over every entry's references.
 
     A reference listed twice in one entry is refused whether or not
@@ -1386,8 +1507,9 @@ def _reference_errors(anomalies, repo_root, resolve=True):
     when the audit duplicated one ``verification`` and one
     ``affected_components`` entry, against a CHANGELOG saying the counts
     had stopped inflating).  The rest needs the files, so it runs only
-    when references are resolved.
+    when references are resolved.  ``memo``: see :func:`_reference_findings`.
     """
+    memo = _ModuleMemo() if memo is None else memo
     errors, conditional = [], []
     for a in anomalies:
         aid = str(a.get("anomaly_id", "<missing>"))
@@ -1409,24 +1531,38 @@ def _reference_errors(anomalies, repo_root, resolve=True):
             refs = [refs]
         for ref in dict.fromkeys(str(r) for r in refs):
             errs, cond = _reference_findings(
-                aid, a.get("resolution_status"), ref, repo_root)
+                aid, a.get("resolution_status"), ref, repo_root, memo)
             errors += errs
             conditional += cond
     return errors, conditional
 
 
-def _census(path):
+def _load_registry(path):
+    """The registry at ``path``, loaded exactly as the validator loads it.
+
+    ``yaml.safe_load``, the pure-Python loader, and never libyaml's: the two
+    disagree on some input (a tab after a colon, a block scalar's header
+    followed by a comment without a space), and a registry or fragment this
+    gate accepted must load wherever else it is read.  The gate loads the
+    file once and hands the document to the validator and to every rule.
+    """
+    import yaml
+
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+def _census(path, data=None):
     """``(anomalies, declared references)`` in the registry, without resolving.
 
     Counting is separate from resolving so that the zero-scope guards below
     can run unconditionally -- including under ``--no-resolve``, where
     nothing is resolved but an empty registry is still an empty registry.
     The parsed document is returned too, for the rules that read the header.
+    ``data`` is the document :func:`_load_registry` gave for ``path``
+    (``None``: load it here).
     """
-    import yaml
-
-    with open(path) as f:
-        data = yaml.safe_load(f) or {}
+    data = (_load_registry(path) if data is None else data) or {}
     if not isinstance(data, dict):
         data = {}
     anomalies = [a for a in (data.get("anomalies") or []) if isinstance(a, dict)]
@@ -1440,7 +1576,106 @@ def _census(path):
     return len(anomalies), declared, anomalies, data
 
 
+def _as_list(value):
+    if not value:
+        return []
+    return [value] if isinstance(value, str) else list(value)
+
+
+def _labels_in_registry(path, anomalies):
+    """A label is a fragment's: it reaches the registry numbered, or not at all."""
+    return [f"{path}: {a.get('anomaly_id')} is a provisional label in the "
+            f"registry.  A new entry goes in docs/fragments/anomalies/<stem>.yaml "
+            f"and scripts/fragments.py assemble numbers it"
+            for a in anomalies
+            if _fragments.ATTEMPT_RE.match(str(a.get("anomaly_id", "")))]
+
+
+def _fragment_view(root, data, args, repo_root, notes):
+    """``(entries, errors)``: every fragment entry, checked as registry entries.
+
+    The entries come back without the fragment-only keys, for the rules the
+    caller runs over the merged view.  Here: each fragment parses, every id
+    is a label (a number in a fragment is refused), the src validator reads
+    each fragment's entries under the registry's header (its findings and
+    notes name the fragment), and each fragment's id lines are spelled the
+    registry's way.  At a release version a fragment entry is itself an
+    error: a release is assembled before it is tagged.
+    """
+    import tempfile
+
+    import yaml
+
+    if root is None:
+        return [], []
+    entries, errors = [], []
+    header = {k: data.get(k) for k in ("schema_version", "maddening_version",
+                                        "generated_date")}
+    version = str(data.get("maddening_version", ""))
+    release = bool(version) and not _fragments.is_dev(version)
+    for frag in _fragments.read_fragments(root, ("anomalies",)):
+        if frag.error:
+            errors.append(frag.error)
+            continue
+        if not isinstance(frag.data, dict) or not isinstance(
+                frag.data.get("anomalies"), list):
+            errors.append(f"{frag.rel}: not an anomalies fragment (a mapping with "
+                          f"an 'anomalies:' list)")
+            continue
+        clean = []
+        for entry in frag.entries:
+            aid = str(entry.get("anomaly_id", "<missing>"))
+            if not _fragments.LABEL_RE.fullmatch(aid):
+                errors.append(f"{frag.rel}: anomaly_id {aid!r} is not a label "
+                              f"MADD-ANO-NEW-{frag.stem}-<n>; a fragment entry is "
+                              f"numbered by scripts/fragments.py assemble, never "
+                              f"by hand")
+            if release:
+                errors.append(f"{frag.rel}: {aid} is still a fragment entry at "
+                              f"release version {version}; run the release assembly "
+                              f"(scripts/fragments.py assemble --release), or, once "
+                              f"v{_fragments.base_of(version)} is tagged, move the tree "
+                              f"to the next .dev0 version, where the entry belongs")
+            clean.append(_fragments.strip_extra(entry))
+        found_notes: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "fragment.yaml")
+            with open(path, "w", encoding="utf-8") as fh:
+                yaml.safe_dump({**header, "anomalies": clean}, fh, sort_keys=False)
+            found = validate_anomaly_registry(
+                path, prefix=args.prefix, repo_root=repo_root or _REPO_ROOT,
+                resolve_references=not args.no_resolve, notes=found_notes,
+                version_field="maddening_version")
+        errors += [f"{frag.rel}: {e}" for e in found]
+        notes += [f"{frag.rel}: {n}" for n in found_notes]
+        errors += anomaly_id_spelling_errors(os.path.join(root, frag.rel),
+                                             frag.entries)
+        entries += clean
+    return entries, errors
+
+
 def main(argv=None):
+    """Run the gate; 0 when the registry passes, 1 otherwise.
+
+    One run holds one parse cache (:func:`maddening.compliance._validate.
+    parse_cache`), shared by the validator and the reference rules, so each
+    cited test file is parsed once however often it is cited; the cache
+    compares the file's bytes on every lookup, and is dropped when the run
+    ends.  The garbage collector is paused for the run and restored after:
+    the run allocates millions of AST nodes and frees nothing until it
+    ends, so every collection in between would walk them all for nothing.
+    """
+    collecting = gc.isenabled()
+    gc.disable()
+    try:
+        with parse_cache():
+            return _main(argv)
+    finally:
+        if collecting:
+            gc.enable()
+
+
+def _main(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "path",
@@ -1465,15 +1700,37 @@ def main(argv=None):
         help="Schema check only: do not resolve affected_components symbols "
              "or verification test paths",
     )
+    parser.add_argument(
+        "--fragments-root",
+        default=None,
+        help="Read the anomalies fragments of this tree's docs/fragments/ into "
+             "the merged view (default: --repo-root's, when the registry "
+             "checked is that tree's own docs/validation/known_anomalies.yaml)",
+    )
     args = parser.parse_args(argv)
 
     repo_root = args.repo_root
     if repo_root is None and os.path.abspath(args.path).startswith(_REPO_ROOT):
         repo_root = _REPO_ROOT
+    fragments_root = args.fragments_root
+    if fragments_root is None and repo_root is not None and (
+            os.path.realpath(args.path) == os.path.realpath(
+                os.path.join(repo_root, _fragments.REGISTRY))):
+        fragments_root = repo_root
+
+    import yaml
+
+    try:
+        document = _load_registry(args.path)
+    except yaml.YAMLError as exc:
+        print(f"ERROR: {args.path} does not parse as YAML: {exc}",
+              file=sys.stderr)
+        return 1
 
     notes: list[str] = []
-    errors = validate_anomaly_registry(
+    errors = _validate_registry_document(
         args.path,
+        document,
         prefix=args.prefix,
         repo_root=repo_root,
         resolve_references=not args.no_resolve,
@@ -1482,7 +1739,13 @@ def main(argv=None):
         # header must carry that field and no other project's.
         version_field="maddening_version",
     )
-    n_anomalies, declared, anomalies, data = _census(args.path)
+    n_anomalies, declared, anomalies, data = _census(args.path, document)
+    frag_entries, frag_errors = _fragment_view(
+        fragments_root, data, args, repo_root, notes)
+    errors = list(errors) + frag_errors + _labels_in_registry(args.path, anomalies)
+    merged = anomalies + frag_entries
+    declared += sum(len(_as_list(a.get(f))) for a in frag_entries
+                    for f in _REFERENCE_FIELDS)
     # Evidence rules run whether or not the schema passed and whether or
     # not references are resolved: a stripped verification list and a
     # deleted entry are both structural, and ``--no-resolve`` must not
@@ -1492,17 +1755,18 @@ def main(argv=None):
     # for the SOUP generator's sake).
     retired, retired_error = retired_anomaly_ids(repo_root or _REPO_ROOT)
     errors = list(errors) + _evidence_errors(anomalies, retired)
+    errors += _evidence_errors(frag_entries, contiguous=False)
     if retired_error:
         errors.append(retired_error)
     errors += retirement_errors(
         retired, args.path,
         present={str(a.get("anomaly_id")) for a in anomalies})
     errors += anomaly_id_spelling_errors(args.path, anomalies)
-    errors += safety_relevance_errors(anomalies)
+    errors += safety_relevance_errors(merged)
     if n_anomalies:
-        errors += version_range_errors(data)
+        errors += version_range_errors({**data, "anomalies": merged})
     ref_errors, conditional = _reference_errors(
-        anomalies, repo_root, resolve=not args.no_resolve)
+        merged, repo_root, resolve=not args.no_resolve, memo=_ModuleMemo())
     errors += ref_errors
 
     # A symbol in an optional subpackage this environment cannot import is
@@ -1549,6 +1813,8 @@ def main(argv=None):
         )
         return 1
 
+    in_fragments = (f" and {len(frag_entries)} in fragments"
+                    if fragments_root is not None else "")
     if not args.no_resolve:
         # Every declared reference either resolved or was noted as
         # unavailable, because anything else is already an error above.
@@ -1562,12 +1828,12 @@ def main(argv=None):
                 file=sys.stderr,
             )
             return 1
-        scope = (f"{n_anomalies} anomal(ies), {verified} reference(s) "
-                 f"verified, {len(notes)} not checked; {len(conditional)} "
-                 f"verification test(s) skip conditionally")
+        scope = (f"{n_anomalies} anomal(ies){in_fragments}, {verified} "
+                 f"reference(s) verified, {len(notes)} not checked; "
+                 f"{len(conditional)} verification test(s) skip conditionally")
     else:
-        scope = (f"{n_anomalies} anomal(ies), {declared} reference(s) "
-                 f"declared and NOT resolved (--no-resolve)")
+        scope = (f"{n_anomalies} anomal(ies){in_fragments}, {declared} "
+                 f"reference(s) declared and NOT resolved (--no-resolve)")
 
     # Verified and declined are reported separately: a single headline count
     # that folds in the references the gate declined to check is how "50
@@ -1577,4 +1843,9 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    status = main()
+    # The process ends here.  Whatever is still alive (the imported package
+    # and every module the references made it import) need not be walked by
+    # the collector on the way out; freezing it saves about a second.
+    gc.freeze()
+    sys.exit(status)

@@ -49,8 +49,12 @@ been weighed on the two fastest runners of sixty).  So each shard
 records how fast its runner was, as properties of its JUnit report
 (:data:`RUNNER_PROPERTIES`): the seconds pytest took to collect the
 suite, which is the same work on every shard and comes before any test,
-and the runner's CPU.  ``scripts/slow_lane_weights.py`` scales each
-shard's times to a runner of median speed by it.
+and the runner's CPU.  The report is the one place these are written and
+read.  The collection time is the speed measure: ``scripts/slow_lane_weights.py``
+scales each shard's times to a runner of median speed by
+:func:`runner_scale`, and ``scripts/slow_lane_drift.py`` scales its
+prediction by the same function.  The CPU model is recorded; the weights
+script uses it only for a report that has no collection time.
 """
 
 from __future__ import annotations
@@ -99,8 +103,48 @@ TABLES = {WEIGHTED: WEIGHTS_FILE, WEIGHTED_PUSH: PER_PUSH_WEIGHTS_FILE}
 #: on every shard (every test module of the suite is imported; the other
 #: shards' tests are only deselected).
 COLLECT_SECONDS_PROPERTY = "runner_collect_seconds"
+#: ... the runner's CPU model (metadata; see :func:`runner_scale`).
+CPU_PROPERTY = "runner_cpu"
 #: Every property :class:`Plugin` adds to the report (``testsuite`` level).
-RUNNER_PROPERTIES = (COLLECT_SECONDS_PROPERTY, "runner_cpu", "runner_cpus")
+RUNNER_PROPERTIES = (COLLECT_SECONDS_PROPERTY, CPU_PROPERTY, "runner_cpus")
+#: How a runner's collection time scales its test time: a test file's
+#: seconds go as the collection seconds to this power.  Fitted on the
+#: sixty runners of the slow-lane runs 38182068116, 38206585198 and
+#: 38332673699 (2026-10-11 to 13): the collection time and each runner's
+#: speed over the files it ran agree with r = 0.86, slope 1.54 in logs, and
+#: scaling by it halves the spread of one file's time between runners (the
+#: standard deviation of the log, over 146 files, from 0.17 to 0.09).
+SPEED_EXPONENT = 1.5
+
+def runner_fields(report) -> dict[str, str]:
+    """The :data:`RUNNER_PROPERTIES` of a parsed JUnit report (an ``Element``), those it has."""
+    suites = [report] if report.tag == "testsuite" else list(report.iter("testsuite"))
+    found: dict[str, str] = {}
+    for suite in suites:
+        for prop in suite.findall("properties/property"):
+            if prop.get("name") in RUNNER_PROPERTIES and prop.get("value"):
+                found.setdefault(prop.get("name"), prop.get("value"))
+    return found
+
+
+def collect_seconds(report) -> float | None:
+    """A parsed report's :data:`COLLECT_SECONDS_PROPERTY` in seconds, or None without a usable one."""
+    try:
+        seconds = float(runner_fields(report).get(COLLECT_SECONDS_PROPERTY, ""))
+    except ValueError:
+        return None
+    return seconds if seconds > 0 else None
+
+
+def runner_scale(seconds: float, reference_seconds: float, exponent: float = SPEED_EXPONENT) -> float:
+    """What one second on a runner that collected in ``seconds`` is on one that collected in ``reference_seconds``.
+
+    ``(reference_seconds / seconds) ** exponent``: below 1 for a runner slower
+    than the reference, above 1 for a faster one.  The one rule both the
+    weights table (each report times this) and the drift check (its
+    prediction divided by this) use.
+    """
+    return (reference_seconds / seconds) ** exponent
 
 
 def cpu_model() -> str:

@@ -55,9 +55,9 @@ Follow-ups, not handled yet:
 - The release assembly regenerates the SOUP table only when it numbers an
   entry; after a version bump alone, run scripts/generate_soup_tables.py.
 - A .0 release's notes list each entry's title as written, not in code spans.
-- Some test helpers and the anomaly gate's reader of old registry versions
-  use libyaml's loader; every gate reads the files themselves with
-  yaml.safe_load first.
+- Some test helpers use libyaml's loader; every gate reads the files
+  themselves, and the anomaly gate its old registry versions, with
+  yaml.safe_load.
 
 This file is plain text on purpose: the documentation build reads every .md
 file under docs/, and a page here would be an orphan.  The whole procedure is

@@ -140,23 +140,23 @@ mentioned in the CHANGELOG.
 ## Recording it in the CHANGELOG
 
 `CHANGELOG.md` follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-A deprecation is announced under `### Deprecated` in `## [Unreleased]`, and
-the eventual removal under `### Removed`. Add exactly one contiguous block at
-the top of the subsection; create the subsection directly after the
-`## [Unreleased]` heading if it is missing, and never reorder existing lines
-(parallel branches merge into this file).
+A deprecation is announced under `Deprecated`, and the eventual removal under
+`Removed`. A pull request does not edit `CHANGELOG.md`: it writes the bullet
+in its changes fragment, `docs/fragments/changes/<branch>.yaml`, and the
+release assembly puts it in the release's section ("Recording a change" in
+[the documentation standards](documentation_standards.md)).
 
 Each entry names three things — the surface, the replacement, and the release
 that removes it:
 
-```markdown
-### Deprecated
-- `CouplingGroup.solver="fori"` emits `DeprecationWarning`; removed in the next
-  minor release.
+```yaml
+changelog:
+  Deprecated:
+    - "`CouplingGroup.solver=\"fori\"` emits `DeprecationWarning`; removed in the next minor release."
 ```
 
 If the deprecation lands together with the replacement, the replacement goes
-under `### Added` as usual; do not fold it into the `### Deprecated` bullet.
+under `Added` as usual; do not fold it into the `Deprecated` bullet.
 
 ## The CI guard
 
@@ -236,6 +236,6 @@ For a commit that changes a public surface — the long form of section 9 of
       `DEPRECATED` retag, and a test asserting the warning.
 - [ ] If the change is breaking and the surface is `evolving`: one minor
       release of notice, same mechanics.
-- [ ] CHANGELOG entry under the right subsection, naming the replacement and
-      the removal release.
+- [ ] A changelog bullet in the changes fragment, under the right section,
+      naming the replacement and the removal release.
 - [ ] `python scripts/generate_stability_report.py` re-run if any tag changed.

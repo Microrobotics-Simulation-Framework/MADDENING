@@ -79,24 +79,48 @@ Use the correct prefix based on the nature of the change:
 
 The commit message body should be concise (1-2 sentences) and focus on **why** the change was made, not what was changed (the diff shows what).
 
-### 4. CHANGELOG.md Updated
+### 4. Change Recorded in a Fragment
 
-Check if the changes affect user-visible functionality. If yes, update `CHANGELOG.md` under `## [Unreleased]` in the appropriate section:
+A pull request never edits `CHANGELOG.md`, `docs/release_notes/`,
+`docs/validation/known_anomalies.yaml`, `_HIGHEST_ANOMALY_ID`,
+`docs/validation/soup_package.md` or the development record's anomaly index.
+If the change affects user-visible functionality, record it in this branch's
+changes fragment, `docs/fragments/changes/<branch>.yaml` (`<branch>`
+lower-cased, `/ _ .` turned into `-`).  `python scripts/fragments.py new
+--changes` writes one from a template:
 
-- **Added** — new features, new nodes, new capabilities
-- **Changed** — changes to existing features or behavior
-- **Deprecated** — features marked for future removal
-- **Removed** — features removed in this change
-- **Fixed** — bug fixes
-- **Verification** — changes to V&V status, new benchmarks, benchmark results changes
-- **Security** — security-relevant changes (required by MDCG 2019-16)
-- **Known Anomalies** — changes to `known_anomalies.yaml` (required for IEC 62304 SOUP)
+```yaml
+line: "0.4"
+changelog:
+  Fixed:
+    - "**What changed.** What a user has to do about it."
+release_notes:
+  Fixed: |
+    - The longer text for the release notes.
+```
 
-**How to write the entry**: add exactly **one contiguous block, at most three lines**, at the **top** of the relevant subsection. Never edit or reorder existing lines — branches merge in parallel and appending at the top of a subsection is what keeps the conflicts trivial.
+- **Changelog sections**: `Added`, `Changed`, `Deprecated`, `Removed`,
+  `Fixed`, `Security` (required by MDCG 2019-16), `Verification`,
+  `Known Anomalies` (required for IEC 62304 SOUP).
+- **Release-notes headings**: `Summary`, `What is new`, `What changes for
+  existing code`, `Security`, `Fixed`, `Known anomalies`, `API stability`,
+  `Upgrade checklist`, `For contributors`.  Any other is refused.
 
-Say only what changed and what a user has to do about it. Measurements, file inventories, rationale, test counts and "why" paragraphs belong in the pull request description and in the release notes under `docs/release_notes/`, not in the changelog. If three lines are not enough, the extra detail is release-notes material.
+**How to write the bullet**: say only what changed and what a user has to do
+about it, in at most three lines.  Measurements, file inventories, rationale,
+test counts and "why" paragraphs belong in the pull request description and
+in the release-notes text.
 
-**When to skip**: Pure internal refactors, CI config changes, and developer tooling changes that don't affect the package's external behavior don't need changelog entries. Internal test infrastructure (fuzz harnesses, Hypothesis profiles, property-test packages, CI gating) is contributor-facing, not user-facing: put it in the release notes' engineering section, or give it a single line here at most.
+**When to skip**: Pure internal refactors, CI config changes, and developer
+tooling changes that don't affect the package's external behavior need no
+changelog bullet.  Internal test infrastructure (fuzz harnesses, Hypothesis
+profiles, property-test packages, CI gating) is contributor-facing: it goes
+under the notes' `For contributors` heading, or one changelog line at most.
+
+The release assembly (`scripts/fragments.py assemble --release`) writes the
+changelog section and the notes before each release; `## [Unreleased]` stays
+empty.  `scripts/check_fragments.py` (one of the gates in section 2) checks
+the fragment.
 
 ### 5. New Node Checks (if applicable)
 
@@ -116,11 +140,19 @@ If the commit adds or modifies a `SimulationNode` subclass, verify:
 
 If the commit introduces or discovers a known limitation:
 
-- [ ] Entry added to `docs/validation/known_anomalies.yaml` with all required fields
-- [ ] `anomaly_id` uses `MADD-ANO-XXX` format
-- [ ] `safety_relevance_rationale` is filled in (not empty)
-- [ ] Changelog updated under `### Known Anomalies`
-- [ ] `python scripts/check_anomalies.py` passes
+- [ ] Not registered already: `python scripts/anom.py list --similar "a few words"`
+- [ ] Entry added to this branch's anomalies fragment,
+      `docs/fragments/anomalies/<branch>.yaml` (`python scripts/fragments.py
+      new --anomaly`), with all required fields, never to the registry itself
+- [ ] `anomaly_id` is the label `MADD-ANO-NEW-<branch>-<n>`: no number is
+      picked by hand (the assembler numbers it and rewrites the label in
+      every file); tests and other files name the entry by its label
+- [ ] `safety_relevance_rationale` is filled in (not empty), and a reachable
+      entry has a `release_note`
+- [ ] `python scripts/check_anomalies.py --prefix MADD-ANO-` and
+      `python scripts/check_fragments.py` pass
+- [ ] Resolving a numbered entry: the registry edit, plus a changes-fragment
+      text under the notes' `Known anomalies` heading
 
 ### 7. Bibliography/Citation Checks (if applicable)
 
@@ -190,6 +222,9 @@ git push
 4. **Verify CI**: After pushing, note that CI will run tests on Python 3.10/3.11/3.12 and the compliance job. If CI fails, fix and push again.
 
 ## Quick Reference: What Goes Where
+
+The CHANGELOG column is the section of the changes fragment; the Anomaly
+YAML column means the anomalies fragment.
 
 | Change Type | CHANGELOG | Anomaly YAML | Algorithm Guide | Bibliography |
 |-------------|-----------|-------------|-----------------|--------------|

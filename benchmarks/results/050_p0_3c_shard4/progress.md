@@ -28,7 +28,7 @@ seeded_cmp.py, lane_cmp.py, speed_model.py).
   time of the file: 46.9 min.
 - Other shard 4 files ran slower than their weights by the same factor.
 
-## Step 2: local reproduction (next)
+## Step 1b: a runner-speed proxy from the job logs
 - Independent runner-speed proxy: pytest's collection time (session start
   -> "collected" line in the job log; same work on every shard, before any
   test). r = 0.86 with the fitted runner factor over 60 jobs; log factor ~

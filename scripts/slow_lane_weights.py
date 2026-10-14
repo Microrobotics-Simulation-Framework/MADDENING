@@ -19,9 +19,23 @@ timed-out shard writes no report): for a file and a lane, the last run
 given that measured it is the one used.
 
 A file's weight is its slower lane's total (setup, call and teardown of
-every test in it), in whole seconds.  Files under ``--min-seconds`` in
-every lane are left out -- the split places those by the hash of their
-path -- and so is a measured file that no longer exists.
+every test in it), in whole seconds, on a runner of median speed: each
+shard's report carries the seconds pytest took to collect the suite on its
+runner (``runner_collect_seconds``, written by ``tests/_sharding.py``),
+the same work on every shard, and each shard's times are scaled by
+``(median / its own) ** SPEED_EXPONENT`` before anything else -- the
+median over every report given.  Runners differ by 1.6 to 1.9 times over
+the same files, and a table taken from one run as measured weighed a file
+by the luck of its runner: on 2026-10-11 the heaviest file was measured on
+the two fastest runners of sixty, at 30 minutes against 47 on a median
+one, and the shard it was dealt to ran 95 to 108 minutes against 68
+predicted.  A report without the property (one written before it existed)
+is taken as measured, and the script says how many were.
+``--speed-exponent 0`` turns the scaling off.
+
+Files under ``--min-seconds`` in every lane are left out -- the split
+places those by the hash of their path -- and so is a measured file that
+no longer exists.
 
 Without ``--write`` the table is printed nowhere and only the prediction
 is shown, which also answers "what would N shards give?" (``--shards``).
@@ -47,17 +61,62 @@ from tests import _sharding  # noqa: E402
 _SHARD_SUFFIX = re.compile(r"-shard\d+of\d+$")
 
 
-def read_run(directory: Path) -> dict[str, dict[str, float]]:
-    """``{lane: {test file: seconds}}`` from one downloaded run."""
-    lanes: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+#: How a runner's collection time scales its test time: a test file's time
+#: goes as the collection time to this power.  Fitted on the sixty runners
+#: of the slow-lane runs 38182068116, 38206585198 and 38332673699
+#: (2026-10-11 to 13): collection time and each runner's speed over the
+#: files it ran agree with r = 0.86, slope 1.54 in logs; scaling by it
+#: halves the spread of a file's times between runners (the standard
+#: deviation of the log, over 146 files, from 0.17 to 0.09).
+SPEED_EXPONENT = 1.5
+
+
+def collect_seconds(root: ET.Element) -> float | None:
+    """The report's ``runner_collect_seconds`` property, or None without one."""
+    for prop in root.iter("property"):
+        if prop.get("name") == _sharding.COLLECT_SECONDS_PROPERTY:
+            try:
+                seconds = float(prop.get("value", ""))
+            except ValueError:
+                return None
+            return seconds if seconds > 0 else None
+    return None
+
+
+def read_reports(directory: Path) -> list[tuple[str, float | None, dict[str, float]]]:
+    """``[(lane, collection seconds or None, {test file: seconds})]``, one per report."""
     reports = sorted(directory.glob("*/*.xml"))
     if not reports:
         raise SystemExit(f"{directory}: no <artifact>/<report>.xml below it")
+    out = []
     for report in reports:
         lane = _SHARD_SUFFIX.sub("", report.parent.name)
-        for case in ET.parse(report).getroot().iter("testcase"):
+        root = ET.parse(report).getroot()
+        files: dict[str, float] = defaultdict(float)
+        for case in root.iter("testcase"):
             path = case.get("file") or case.get("classname", "").replace(".", "/") + ".py"
-            lanes[lane][path] += float(case.get("time") or 0.0)
+            files[path] += float(case.get("time") or 0.0)
+        out.append((lane, collect_seconds(root), dict(files)))
+    return out
+
+
+def reference_seconds(runs: list[list[tuple[str, float | None, dict]]]) -> float | None:
+    """The median collection time over every report that has one."""
+    seen = sorted(c for run in runs for _lane, c, _files in run if c is not None)
+    if not seen:
+        return None
+    mid = len(seen) // 2
+    return seen[mid] if len(seen) % 2 else (seen[mid - 1] + seen[mid]) / 2
+
+
+def normalised(reports: list[tuple[str, float | None, dict[str, float]]], reference: float | None,
+               exponent: float) -> dict[str, dict[str, float]]:
+    """``{lane: {test file: seconds}}``, each report scaled to a runner that collects in ``reference``."""
+    lanes: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    for lane, seconds, files in reports:
+        scale = 1.0 if seconds is None or reference is None else (reference / seconds) ** exponent
+        for path, t in files.items():
+            lanes[lane][path] += t * scale
     return {lane: dict(files) for lane, files in lanes.items()}
 
 
@@ -101,6 +160,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="a run id and the directory `gh run download` filled; repeatable, later wins")
     ap.add_argument("--commit", action="append", default=[], metavar="ID=SHA",
                     help="the commit a run measured, recorded in the table")
+    ap.add_argument("--speed-exponent", type=float, default=SPEED_EXPONENT,
+                    help="scale each shard's times by (median collection time / its own) to this "
+                         f"power (default {SPEED_EXPONENT}; 0: as measured)")
     ap.add_argument("--min-seconds", type=int, default=10,
                     help="leave out files lighter than this on every lane (default 10)")
     ap.add_argument("--shards", type=int, default=_sharding.SLOW_LANE_SHARDS,
@@ -111,16 +173,30 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     commits = dict(c.split("=", 1) for c in args.commit)
-    runs, sources = [], []
+    reports, sources = [], []
     for spec in args.run:
         run_id, _, directory = spec.partition("=")
         if not directory:
             ap.error(f"--run {spec!r}: expected ID=DIR")
-        runs.append(read_run(Path(directory)))
+        reports.append(read_reports(Path(directory)))
         sources.append({
             "run": run_id, "commit": commits.get(run_id, "unknown"),
             "artifacts": sorted(p.name for p in Path(directory).iterdir() if any(p.glob("*.xml")))})
-    lanes = merge(runs)
+    reference = reference_seconds(reports) if args.speed_exponent else None
+    lanes = merge([normalised(run, reference, args.speed_exponent) for run in reports])
+    timed = [c for run in reports for _lane, c, _files in run if c is not None]
+    untimed = sum(len(run) for run in reports) - len(timed)
+    if reference is None:
+        print("runner speed: times as measured"
+              + ("" if args.speed_exponent == 0 else
+                 f" (no report carries {_sharding.COLLECT_SECONDS_PROPERTY})"))
+    else:
+        scales = [(reference / c) ** args.speed_exponent for c in timed]
+        print(f"runner speed: {len(timed)} reports scaled to a runner that collects in {reference:.1f} s "
+              f"(the median; theirs {min(timed):.1f} to {max(timed):.1f} s, so x{min(scales):.2f} to "
+              f"x{max(scales):.2f}, exponent {args.speed_exponent:g})"
+              + (f"; {untimed} without {_sharding.COLLECT_SECONDS_PROPERTY}, taken as measured"
+                 if untimed else ""))
     table, gone = weights(lanes, args.min_seconds)
     n = args.shards
     dealt = _sharding.deal(table, n)
@@ -147,8 +223,16 @@ def main(argv: list[str] | None = None) -> int:
             "what": "Seconds per test file on the slow lane, for the weighted split of tests/_sharding.py. "
                     "Written by scripts/slow_lane_weights.py; do not edit by hand.",
             "measured": "Each file's slower lane, setup + call + teardown of every test in it, on "
-                        "ubuntu-latest with no compilation cache. Where two runs measured a file, the later.",
+                        "ubuntu-latest with no compilation cache, scaled to a runner of median speed "
+                        "(runner_speed). Where two runs measured a file, the later.",
             "runs": sources,
+            "runner_speed": {
+                "property": _sharding.COLLECT_SECONDS_PROPERTY,
+                "reference_seconds": None if reference is None else round(reference, 2),
+                "exponent": args.speed_exponent if reference is not None else 0,
+                "reports_scaled": len(timed) if reference is not None else 0,
+                "reports_as_measured": untimed if reference is not None else len(timed) + untimed,
+            },
             "min_seconds": args.min_seconds,
             "seconds": table,
         }

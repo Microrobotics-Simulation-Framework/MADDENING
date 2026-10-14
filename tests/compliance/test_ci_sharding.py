@@ -193,6 +193,14 @@ def test_the_weights_table_says_where_its_numbers_came_from():
     light = {p: s for p, s in table["seconds"].items() if s < floor}
     assert not light, f"entries under the table's own {floor} s floor: {light}"
     assert list(table["seconds"]) == sorted(table["seconds"]), "the table is written sorted by path"
+    # Its weights are for a runner of median speed: every report it was
+    # taken from carried its runner's collection time, so none is weighed
+    # by the luck of the runner that ran it.
+    speed = table["runner_speed"]
+    assert speed["property"] == _sharding.COLLECT_SECONDS_PROPERTY, speed
+    assert speed["reference_seconds"] > 0 and speed["exponent"] > 0, speed
+    reports = sum(len(run["artifacts"]) for run in table["runs"])
+    assert (speed["reports_scaled"], speed["reports_as_measured"]) == (reports, 0), speed
 
 
 @pytest.mark.parametrize("table", [
@@ -335,6 +343,9 @@ def test_the_weights_generator_writes_a_table_the_split_reads(tmp_path):
     assert [(r["run"], r["commit"]) for r in table["runs"]] == [("11", "abc1234"), ("22", "def5678")]
     assert table["runs"][1]["artifacts"] == ["slow-durations-py3.12-jax0.10.2-shard2of2"]
     assert "not a file in the tree, left out: tests/test_gone.py" in proc.stdout
+    # Reports written before the runner's speed was recorded are taken as measured, and said to be.
+    assert table["runner_speed"]["reports_as_measured"] == 5, table["runner_speed"]
+    assert f"no report carries {_sharding.COLLECT_SECONDS_PROPERTY}" in proc.stdout, proc.stdout
     assert _sharding.load_weights(out) == table["seconds"]
     # The prediction, per lane: c (90) opens shard 1, a (61) shard 2; b is
     # unlisted and goes by hash.
@@ -344,9 +355,53 @@ def test_the_weights_generator_writes_a_table_the_split_reads(tmp_path):
     assert f"{'weighted, 2 shards':<34}{lane[0] / 60:6.1f} {lane[1] / 60:6.1f}" in proc.stdout, proc.stdout
 
 
+def test_the_weights_generator_scales_each_shard_to_a_runner_of_median_speed(tmp_path):
+    """A shard's times are scaled by its runner's collection time before they are weighed.
+
+    One run, one lane, three shards on runners that collected in 20, 40 and
+    80 s (the median 40).  The same 100 s file weighs 100 s from the median
+    runner, 100 * (40 / 80) ** 1.5 from the slow one and 100 * (40 / 20) **
+    1.5 from the fast one; with ``--speed-exponent 0`` all three weigh 100.
+    On 2026-10-11 the heaviest file was weighed on the two fastest runners
+    of sixty, at 30 minutes against 47 on a median one, and its shard ran
+    95 to 108 minutes against 68 predicted.
+    """
+    real_a, real_b, real_c = _tree_test_files()[:3]
+    run = tmp_path / "r1"
+    for shard, (path, collect) in enumerate([(real_a, 20.0), (real_b, 40.0), (real_c, 80.0)], 1):
+        directory = run / f"slow-durations-py3.12-jax0.10.2-shard{shard}of3"
+        directory.mkdir(parents=True)
+        (directory / "report.xml").write_text(
+            '<testsuites><testsuite name="pytest"><properties>'
+            f'<property name="{_sharding.COLLECT_SECONDS_PROPERTY}" value="{collect}"/>'
+            '<property name="runner_cpu" value="a CPU"/></properties>'
+            f'<testcase classname="x" name="t" file="{path}" time="100.0"/>'
+            '</testsuite></testsuites>', encoding="utf-8")
+
+    def generate(*extra):
+        out = tmp_path / f"weights{len(extra)}.json"
+        proc = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts" / "slow_lane_weights.py"),
+             "--run", f"11={run}", "--commit", "11=abc1234", "--shards", "3",
+             "--write", "--output", str(out), *extra],
+            capture_output=True, text=True, timeout=120)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        return json.loads(out.read_text(encoding="utf-8")), proc.stdout
+
+    table, out = generate()
+    assert table["seconds"] == {real_a: round(100 * 2 ** 1.5), real_b: 100, real_c: round(100 * 0.5 ** 1.5)}
+    assert table["runner_speed"] == {"property": _sharding.COLLECT_SECONDS_PROPERTY, "reference_seconds": 40.0,
+                                     "exponent": 1.5, "reports_scaled": 3, "reports_as_measured": 0}
+    assert "3 reports scaled to a runner that collects in 40.0 s" in out, out
+    table, out = generate("--speed-exponent", "0")
+    assert table["seconds"] == {real_a: 100, real_b: 100, real_c: 100}
+    assert table["runner_speed"]["reports_as_measured"] == 3, table["runner_speed"]
+    assert "runner speed: times as measured" in out, out
+
+
 def test_the_shipped_weights_table_is_what_the_generator_writes():
     # "do not edit by hand": keys in the generator's order and nothing else.
-    assert list(_table()) == ["what", "measured", "runs", "min_seconds", "seconds"]
+    assert list(_table()) == ["what", "measured", "runs", "runner_speed", "min_seconds", "seconds"]
 
 
 #: Every way a workflow writes a lane's shard count besides the matrix: the
@@ -669,9 +724,10 @@ def shard_run(tmp_path_factory):
         [sys.executable, "-m", "pytest", "tests", "-p", "no:cacheprovider",
          "--junitxml=report.xml", "-o", "junit_family=xunit1"],
         cwd=root, env=env, capture_output=True, text=True, timeout=300)
-    cases = list(ET.parse(root / "report.xml").getroot().iter("testcase")) \
-        if (root / "report.xml").is_file() else []
-    return SimpleNamespace(proc=proc, cases=cases, kept=kept, dropped=dropped)
+    report = ET.parse(root / "report.xml").getroot() if (root / "report.xml").is_file() \
+        else ET.Element("testsuites")
+    cases = list(report.iter("testcase"))
+    return SimpleNamespace(proc=proc, cases=cases, kept=kept, dropped=dropped, report=report)
 
 
 def test_the_root_conftest_keeps_only_this_shards_files(shard_run):
@@ -704,6 +760,24 @@ def test_the_root_conftest_records_jax_timing_into_the_junit_report(shard_run):
     assert set(props) == set(_jax_timing.PROPERTIES), sorted(props)
     assert props["jax_trace_s"] > 0 and props["jax_compile_s"] > 0, props
     assert props["subprocesses"] == 0, props
+
+
+def test_a_shards_junit_report_records_how_fast_its_runner_was(shard_run):
+    """Each shard's report carries its runner's collection time and CPU.
+
+    ``scripts/slow_lane_weights.py`` scales each shard's times to a runner
+    of median speed by the collection time; without it the next table is
+    weighed by the luck of the runners its run drew (the same files take
+    1.6 to 1.9 times as long on one hosted runner as on another).
+    """
+    assert shard_run.proc.returncode == 0, shard_run.proc.stdout[-3000:]
+    (suite,) = shard_run.report.iter("testsuite")
+    props = {p.get("name"): p.get("value") for p in suite.findall("properties/property")}
+    assert set(props) == set(_sharding.RUNNER_PROPERTIES), props
+    # A number of seconds (the root conftest has imported JAX before the
+    # session starts, so two small files collect in milliseconds).
+    assert 0 <= float(props[_sharding.COLLECT_SECONDS_PROPERTY]) < 300, props
+    assert props["runner_cpu"] and int(props["runner_cpus"]) >= 1, props
 
 
 def test_a_shards_junit_time_includes_fixture_setup(shard_run):

@@ -20,9 +20,14 @@ predicts for that shard, and when the measured time exceeds it by more than
 
 so the refresh -- ``scripts/slow_lane_weights.py``, one command -- is
 prompted by the run and not noticed by the next timeout.  A run is the
-shard's own, on one runner: runners differ by a factor of up to 1.6 between
-runs (the reason for a margin of half), so a warning is a prompt to look
-at the named files, not a verdict on the runner.
+shard's own, on one runner, and runners differ by a factor of up to 1.9
+over the same files.  The table's weights are for a runner of median speed
+(its ``runner_speed``), and the report says how fast this one was (its
+``runner_collect_seconds``, ``tests/_sharding.py``): the prediction is
+scaled by the same rule before it is compared, and the summary says by how
+much.  A report or a table without them is compared as it stands.  The
+margin of half stays for what the collection time does not explain, so a
+warning is a prompt to look at the named files, not a verdict on the runner.
 
 It reports and exits 0.  Exit 2: the report or the table cannot be read.
 
@@ -68,9 +73,29 @@ def measured_per_file(report: Path) -> dict[str, float]:
     return dict(seconds)
 
 
+def runner_speed(report: Path, table: dict) -> tuple[float, str]:
+    """``(how many times the table's median runner this one took, why)``; ``(1.0, "")`` when unknown."""
+    speed = table.get("runner_speed") or {}
+    reference, exponent = speed.get("reference_seconds"), speed.get("exponent") or 0
+    try:
+        props = {p.get("name"): p.get("value") for p in ET.parse(report).getroot().iter("property")}
+        seconds = float(props.get(_sharding.COLLECT_SECONDS_PROPERTY, ""))
+    except (OSError, ET.ParseError, ValueError):
+        return 1.0, ""
+    if not reference or not exponent or seconds <= 0:
+        return 1.0, ""
+    factor = (seconds / reference) ** exponent
+    return factor, (f"this runner ({props.get('runner_cpu', 'CPU unknown')}) collected the suite in "
+                    f"{seconds:.1f} s against the table's {reference:.1f} s, so x{factor:.2f}")
+
+
 def assess(measured: dict[str, float], weights: dict[str, int], dealt: dict[str, int], shard: int,
-           min_seconds: int) -> dict:
-    """What the table predicted for ``shard`` against what ran; pure."""
+           min_seconds: int, speed: float = 1.0) -> dict:
+    """What the table predicted for ``shard`` against what ran; pure.
+
+    ``predicted`` is for the table's runner of median speed; ``expected``
+    is that times ``speed``, this runner's factor (:func:`runner_speed`).
+    """
     predicted = float(sum(w for path, w in weights.items() if dealt[path] == shard))
     total = sum(measured.values())
     unmeasured = sorted(((p, s) for p, s in measured.items() if p not in weights and s >= min_seconds),
@@ -78,24 +103,28 @@ def assess(measured: dict[str, float], weights: dict[str, int], dealt: dict[str,
     grown = sorted(((p, weights[p], s) for p, s in measured.items()
                     if p in weights and s > GROWN_FACTOR * weights[p] and s - weights[p] >= GROWN_SECONDS),
                    key=lambda t: (-(t[2] - t[1]), t[0]))
-    return {"predicted": predicted, "measured": total, "unmeasured": unmeasured, "grown": grown}
+    return {"predicted": predicted, "measured": total, "unmeasured": unmeasured, "grown": grown,
+            "expected": predicted * speed}
 
 
 def drifted(result: dict, margin: float, min_excess: float) -> bool:
-    return (result["measured"] > result["predicted"] * (1 + margin)
-            and result["measured"] - result["predicted"] >= min_excess)
+    expected = result.get("expected", result["predicted"])
+    return result["measured"] > expected * (1 + margin) and result["measured"] - expected >= min_excess
 
 
 def _minutes(seconds: float) -> str:
     return f"{seconds / 60:.1f} min"
 
 
-def render(result: dict, shard_spec: str, margin: float) -> tuple[str, str]:
-    """``(one-line summary, markdown)``."""
+def render(result: dict, shard_spec: str, margin: float, why: str = "") -> tuple[str, str]:
+    """``(one-line summary, markdown)``; ``why`` is :func:`runner_speed`'s reason, if any."""
     pred, meas = result["predicted"], result["measured"]
     line = (f"shard {shard_spec}: {_minutes(meas)} of test time against {_minutes(pred)} predicted "
             f"({(meas / pred - 1) * 100:+.0f}%)" if pred else
             f"shard {shard_spec}: {_minutes(meas)} of test time; the table predicts nothing for it")
+    if why and pred:
+        exp = result.get("expected", pred)
+        line += f"; {why}: {_minutes(exp)} expected ({(meas / exp - 1) * 100:+.0f}%)"
     md = [f"### Slow-lane weights against this run, shard {shard_spec}", "", line + ".", ""]
     if result["unmeasured"]:
         md += ["Not in the weights table (placed by the hash of their path), heaviest first:", "",
@@ -116,10 +145,10 @@ def render(result: dict, shard_spec: str, margin: float) -> tuple[str, str]:
 def warning(result: dict, shard_spec: str) -> str:
     named = [f"{p} ({s / 60:.1f} min, not in the table)" for p, s in result["unmeasured"][:NAMED]]
     named += [f"{p} ({s / 60:.1f} min against {w / 60:.1f})" for p, w, s in result["grown"][:NAMED]]
-    pred, meas = result["predicted"], result["measured"]
-    files = "; ".join(named) if named else "no file stands out: look at the runner (speeds differ by up to 1.6x)"
+    pred, meas = result.get("expected", result["predicted"]), result["measured"]
+    files = "; ".join(named) if named else "no file stands out: look at the runner (speeds differ by up to 1.9x)"
     return ("::warning title=Slow-lane weights are stale::" + (
-        f"shard {shard_spec} ran {meas / 60:.1f} min against {pred / 60:.1f} predicted. Files the "
+        f"shard {shard_spec} ran {meas / 60:.1f} min against {pred / 60:.1f} predicted for its runner. Files the "
         f"weights table has not measured, or has far too low: {files}. Refresh tests/slow_lane_weights.json "
         "with scripts/slow_lane_weights.py.").replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
 
@@ -151,9 +180,12 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(f"slow_lane_drift: {exc}", file=sys.stderr)
         return 2
-    min_seconds = json.loads(_sharding.WEIGHTS_FILE.read_text(encoding="utf-8")).get("min_seconds", 10)
-    result = assess(measured_per_file(args.report), weights, _sharding.deal(weights, count), shard, min_seconds)
-    line, md = render(result, args.shard, args.margin)
+    table = json.loads(_sharding.WEIGHTS_FILE.read_text(encoding="utf-8"))
+    min_seconds = table.get("min_seconds", 10)
+    measured = measured_per_file(args.report)
+    speed, why = runner_speed(args.report, table)
+    result = assess(measured, weights, _sharding.deal(weights, count), shard, min_seconds, speed)
+    line, md = render(result, args.shard, args.margin, why)
     print(line)
     if args.markdown:
         with open(args.markdown, "a", encoding="utf-8") as fh:

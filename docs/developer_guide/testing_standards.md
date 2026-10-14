@@ -562,6 +562,28 @@ of its path. The table of 2026-10-10 (243 files, 635 minutes) predicts 64
 minutes of test time on every shard (eight shards held 79 each); the
 heaviest file alone is 49.
 
+The table's seconds are for a runner of median speed. Hosted runners
+differ: over the same files one took 1.6 to 1.9 times as long as another
+on the runs of 2026-10-11 to 13. A table taken as measured weighs each
+file by the luck of the runner that ran it, and on 2026-10-12 and 13 shard
+4 ran 95 to 108 minutes against 68 predicted: its heaviest file,
+`tests/cloud/multigpu/test_run_pod_seeded_faults.py`, had been weighed on
+the two fastest runners of sixty, at 30 minutes against 47 on a median
+one. Nothing in the shard was slowing it: the file ran at the same speed
+alone, after the files before it on the shard, and after a whole CI-like
+collection. So each shard's JUnit report records how fast its runner was
+(`tests/_sharding.py`): `runner_collect_seconds`, the time pytest took to
+collect the suite (the same work on every shard, before any test), with
+`runner_cpu` and `runner_cpus`. `scripts/slow_lane_weights.py` scales each
+shard's times by (median collection time / its own) to the power 1.5
+before it weighs them; the exponent is fitted on the sixty runners of
+those runs, where the collection time and each runner's speed over its
+files agree with r = 0.86. `scripts/slow_lane_drift.py` scales the
+prediction it compares a shard against by the same rule and says by how
+much, so a slow runner is not reported as a stale table. Expect a shard
+to run up to about a quarter over the prediction on a slow runner, and
+up to two fifths under it on a fast one.
+
 The table deals by time, not memory. Each shard runs in one process, and
 JAX keeps every program it compiles; a file that keeps graphs in a
 module-level `functools.lru_cache` keeps them and their programs too. So

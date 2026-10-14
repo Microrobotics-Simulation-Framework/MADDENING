@@ -33,13 +33,26 @@ deals the files of ``slow_lane_weights.json`` (measured seconds per file),
 longest first, each onto the shard with the least time so far; a file the
 table does not list goes by the hash above.  It is still a function of the
 path and of committed data, and a file's tests still stay together.
+
+GitHub's runners differ in speed: on the slow lane of 2026-10-11 to 13
+one runner took 1.6 to 1.9 times as long as another over the same files.
+A table measured on fast runners under-weighs what they ran (shard 4
+ran 95 to 108 minutes against 68 predicted: its heaviest file had
+been weighed on the two fastest runners of sixty).  So each shard
+records how fast its runner was, as properties of its JUnit report
+(:data:`RUNNER_PROPERTIES`): the seconds pytest took to collect the
+suite, which is the same work on every shard and comes before any test,
+and the runner's CPU.  ``scripts/slow_lane_weights.py`` scales each
+shard's times to a runner of median speed by it.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import time
 from pathlib import Path
 
 import pytest
@@ -85,6 +98,51 @@ SLOW_LANE_SHARDS = 10
 #: module.  ``scripts/slow_lane_weights.py`` writes it from the JUnit
 #: artifacts of a slow-lane run and prints the minutes it predicts per shard.
 WEIGHTS_FILE = Path(__file__).with_name("slow_lane_weights.json")
+
+#: The JUnit report's property holding the seconds from the session's start
+#: to the end of collection: the runner's speed, measured on the same work
+#: on every shard (every test module of the suite is imported; the other
+#: shards' tests are only deselected).
+COLLECT_SECONDS_PROPERTY = "runner_collect_seconds"
+#: Every property :class:`Plugin` adds to the report (``testsuite`` level).
+RUNNER_PROPERTIES = (COLLECT_SECONDS_PROPERTY, "runner_cpu", "runner_cpus")
+
+
+def cpu_model() -> str:
+    """The CPU's model name from ``/proc/cpuinfo``, or ``"unknown"``."""
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8", errors="replace") as info:
+            for line in info:
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return "unknown"
+
+
+def usable_cpus() -> int:
+    """The CPUs this process may run on (its affinity), else the machine's count."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        return os.cpu_count() or 0
+
+
+def record_suite_property(config, name: str, value: str) -> bool:
+    """Add a ``testsuite`` property to the ``--junitxml`` report, if one is written.
+
+    The same call pytest's ``record_testsuite_property`` fixture makes; it
+    returns False when no report is being written.
+    """
+    try:
+        from _pytest.junitxml import xml_key
+    except ImportError:  # checked against a real report in tests/compliance/test_ci_sharding.py
+        return False
+    xml = config.stash.get(xml_key, None)
+    if xml is None:
+        return False
+    xml.add_global_property(name, value)
+    return True
 
 
 def parse(spec: str) -> tuple[int, int, bool]:
@@ -161,6 +219,20 @@ class Plugin:
         self.shard, self.of = shard, of
         self.weighted = weights is not None
         self._dealt = deal(weights, of) if weights is not None else {}
+        self._session_start: float | None = None
+
+    def pytest_sessionstart(self, session):
+        self._session_start = time.perf_counter()
+
+    @pytest.hookimpl(trylast=True)
+    def pytest_collection_finish(self, session):
+        # trylast: after every other plugin's work on the collected items.
+        if self._session_start is None:
+            return
+        seconds = time.perf_counter() - self._session_start
+        for name, value in zip(RUNNER_PROPERTIES,
+                               (f"{seconds:.3f}", cpu_model(), str(usable_cpus()))):
+            record_suite_property(session.config, name, value)
 
     def shard_of(self, path: str) -> int:
         if self.weighted:

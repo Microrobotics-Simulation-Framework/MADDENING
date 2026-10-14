@@ -630,6 +630,24 @@ jobs:
       - name: Validate anomaly registry
         run: python scripts/check_anomalies.py --prefix MADD-ANO-
 
+      # Changelog and registry fragments (scripts/fragments.py): every label
+      # live and spelled one way, every assembled entry recording its label,
+      # the release gate at a version without .dev, and the ratchet: a label
+      # the base's fragments held must survive here, in a fragment or as a
+      # label the registry records, so a merged fragment cannot be deleted
+      # unnoticed.  The base is the pull request's target branch, or the
+      # first parent on a push; fetch-depth 0 above provides both.
+      - name: Check changelog and registry fragments
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            python scripts/check_fragments.py --base "origin/$BASE_REF"
+          else
+            python scripts/check_fragments.py --base HEAD^1
+          fi
+
       - name: Check implementation mapping
         run: python scripts/check_impl_mapping.py
 

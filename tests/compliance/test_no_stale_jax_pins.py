@@ -28,8 +28,12 @@ _SCAN = ("src", "docker", "docs", "benchmarks/multigpu", "pyproject.toml", "READ
 #: them turns "we fixed this" into a failure, so they are excluded by path
 #: rather than by trying to tell prose from a dependency declaration.
 #: A release's development record (``docs/validation/development_record_v*.md``)
-#: holds the text moved out of that release's notes, old pins included.
-_HISTORY = ("docs/release_notes/", "CHANGELOG.md", "docs/validation/development_record_v")
+#: holds the text moved out of that release's notes, old pins included.  A
+#: changes fragment (``docs/fragments/changes/``) is changelog and notes text
+#: waiting for the release assembly to write it there.  An anomalies fragment
+#: is not: its entries are registry entries, and the registry is scanned.
+_HISTORY = ("docs/release_notes/", "CHANGELOG.md", "docs/validation/development_record_v",
+            "docs/fragments/changes/")
 
 
 def _is_history(rel: str) -> bool:
@@ -62,9 +66,11 @@ def test_no_stale_jax_pins_in_tree():
 def test_only_the_historical_records_are_skipped():
     """The exemption covers the records by path, and nothing beside them."""
     for rel in ("docs/release_notes/v0.4.0.md", "CHANGELOG.md",
-                "docs/validation/development_record_v0.4.0.md"):
+                "docs/validation/development_record_v0.4.0.md",
+                "docs/fragments/changes/fix-a-pin.yaml"):
         assert _is_history(rel), rel
     for rel in ("docs/validation/soup_package.md", "docs/validation/known_anomalies.yaml",
                 "docs/user_guide/installation.md", "docs/validation/development_notes.md",
+                "docs/fragments/anomalies/fix-a-pin.yaml", "docs/fragments/README.txt",
                 "README.md", "pyproject.toml"):
         assert not _is_history(rel), rel

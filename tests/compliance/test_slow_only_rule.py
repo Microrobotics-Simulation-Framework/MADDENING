@@ -139,8 +139,11 @@ TABLE_HEADING = "### What only the slow lane checks"
 REGISTRY = REPO_ROOT / "docs" / "validation" / "known_anomalies.yaml"
 ANOMALY_GATE = REPO_ROOT / "scripts" / "check_anomalies.py"
 
-#: A registry id as an xfail mark's ``reason=`` writes it.
-_ANOMALY_ID = re.compile(r"\bMADD-ANO-\d+\b")
+#: A registry id as an xfail mark's ``reason=`` writes it: a number, or the
+#: provisional label of an entry still in a fragment
+#: (``MADD-ANO-NEW-<stem>-<n>``, ``scripts/fragments.py``).
+_ANOMALY_ID = re.compile(
+    r"\bMADD-ANO-(?:\d+\b|NEW-[a-z0-9]+(?:-[a-z0-9]+)*-[0-9]+(?![A-Za-z0-9_-]))")
 
 #: The ``resolution_status`` values of a defect that is still in the tree:
 #: the only entries an xfail pin can stand for.  Anything else (``resolved``,
@@ -850,12 +853,17 @@ def body_outcomes(function: str) -> tuple[str, ...]:
 
 @cache
 def _registry_statuses() -> dict[str, str]:
-    """``{anomaly id: resolution_status}`` of the registry."""
-    import yaml  # noqa: PLC0415
+    """``{anomaly id or label: resolution_status}`` of the merged view.
 
-    loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
-    data = yaml.load(REGISTRY.read_text(encoding="utf-8"), Loader=loader)
-    return {str(a["anomaly_id"]): str(a.get("resolution_status", "")) for a in data["anomalies"]}
+    The registry's entries and every entry still in a fragment
+    (``docs/fragments/anomalies/``, read by ``scripts/fragments.py``), so a
+    pin written against a new entry's label is read before the entry is
+    numbered, instead of failing closed for the wrong reason.
+    """
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    import fragments  # noqa: PLC0415
+
+    return fragments.merged_statuses(REPO_ROOT)
 
 
 def registry_status(anomaly_id: str) -> str:
@@ -1797,6 +1805,45 @@ def test_the_registry_reader_tells_an_open_entry_from_a_resolved_one():
     assert len(statuses) > 200 and set(statuses.values()) >= {"open", "resolved"}, len(statuses)
     assert all(_ANOMALY_ID.fullmatch(i) for i in statuses), sorted(statuses)[:3]
     assert registry_status("MADD-ANO-001") == "resolved" and registry_status("MADD-ANO-0") == ""
+
+
+#: A label written in two pieces, so this file holds no label of its own
+#: (``scripts/check_fragments.py`` refuses a label no fragment defines).
+_NEW = "MADD-ANO-" "NEW-"
+
+
+def test_a_pin_of_an_entry_still_in_a_fragment_reads_its_status(tmp_path):
+    """An xfail written against a new entry's label, before the assembler
+    numbers it, is read like a number: the id pattern takes the label and
+    the status comes from the fragment (the merged view)."""
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    import fragments  # noqa: PLC0415
+
+    (tmp_path / "docs" / "validation").mkdir(parents=True)
+    (tmp_path / "docs" / "validation" / "known_anomalies.yaml").write_text(
+        'anomalies:\n  - anomaly_id: "MADD-ANO-001"\n    resolution_status: "resolved"\n')
+    frag = tmp_path / "docs" / "fragments" / "anomalies" / "fix-a-bound.yaml"
+    frag.parent.mkdir(parents=True)
+    frag.write_text(f'line: "0.4"\nanomalies:\n  - anomaly_id: "{_NEW}fix-a-bound-1"\n'
+                    f'    resolution_status: "open"\n'
+                    f'  - anomaly_id: "{_NEW}fix-a-bound-2"\n'
+                    f'    resolution_status: "resolved"\n')
+    statuses = fragments.merged_statuses(tmp_path)
+    assert statuses == {"MADD-ANO-001": "resolved", f"{_NEW}fix-a-bound-1": "open",
+                        f"{_NEW}fix-a-bound-2": "resolved"}
+    reason = f"{_NEW}fix-a-bound-1: the bound reads low"
+    assert _ANOMALY_ID.findall(reason) == [f"{_NEW}fix-a-bound-1"]
+    assert _ANOMALY_ID.findall(f"{_NEW}fix-a-bound-12x") == []
+    pin = [reason, True, "always"]
+    rows = [_row("tests/a.py::test_w", xfail=pin), _row("tests/b.py::test_s", slow=True, xfail=pin)]
+    c = partition(rows)
+    assert witness_problems("tests/b.py", [(1, "tests/a.py::test_w")], c, sorted(c.slow),
+                            outcomes=_reads_nothing, status=statuses.get) == []
+    closed = [f"{_NEW}fix-a-bound-2: fixed", True, "always"]
+    rows = [_row("tests/a.py::test_w", xfail=closed), _row("tests/b.py::test_s", slow=True, xfail=closed)]
+    c = partition(rows)
+    assert witness_problems("tests/b.py", [(1, "tests/a.py::test_w")], c, sorted(c.slow),
+                            outcomes=_reads_nothing, status=statuses.get)
 
 
 def test_the_framework_paths_are_the_ones_the_testing_standards_name():

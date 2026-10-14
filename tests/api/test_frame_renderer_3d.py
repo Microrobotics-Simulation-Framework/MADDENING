@@ -1,9 +1,17 @@
 """Tests for the PyVista/VTK 3D server-side frame renderer."""
 
+import os
+
 import numpy as np
 import pytest
 
-pv = pytest.importorskip("pyvista", reason="pyvista not installed")
+# `ci.yml`'s viz3d job installs PyVista and sets the switch: there a missing
+# PyVista fails the module instead of skipping its tests, which would run
+# nowhere (the sharded lanes install without the viz3d extra and skip it).
+if os.environ.get("MADDENING_REQUIRE_VIZ3D_TESTS") == "1":
+    import pyvista as pv  # noqa: F401
+else:
+    pv = pytest.importorskip("pyvista", reason="pyvista not installed")
 
 from maddening.api.frame_renderer_3d import (
     ServerFrameRenderer3D,

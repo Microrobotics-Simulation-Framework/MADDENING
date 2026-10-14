@@ -143,6 +143,13 @@ GUARD_FILES = (_DURATIONS, _SHARDING, _WORKFLOWS, _DEPS, _PRUNE, _COMPILE_CACHE,
 
 GUARD_FILES = GUARD_FILES + (_HYGIENE, _HEALTH, _RERUN, _NORMALISE, _VARIANCE)
 
+#: What the anomaly gate holds to the workflows: the paths it records as run by no job are
+#: derived from ``ci.yml``, the extras and the test files, and must equal its own list.
+_GATE_PATHS = ("tests/compliance/test_gate_scripts.py::TestAnomalyGateRefusesEvidenceCINeverRuns"
+               "::test_the_paths_the_gate_refuses_are_the_paths_no_ci_lane_runs")
+GATE_PATHS = (_GATE_PATHS,)
+GUARD_FILES = GUARD_FILES + GATE_PATHS
+
 
 @dataclass(frozen=True)
 class Mutant:
@@ -1148,6 +1155,28 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("VR2", "scripts/ci_variance_report.py", "            limit, basis = flag_ratio * CPU_SPREAD,",
        "            limit, basis = flag_ratio,", VARIANCE,
        "the generation spread is flagged as degradation whenever a CPU has few peers"),
+    # --- VZ: the viz3d job and the anomaly gate's record of what no job runs ------------
+    # `tests/api/test_frame_renderer_3d.py` ran in no job until the viz3d job; the gate's
+    # PATHS_CI_NEVER_RUNS is held equal to what the workflow, the extras and the test files give.
+    _M("VZ1", CI, '          pip install -e ".[ci,viz3d]"\n', '          pip install -e ".[ci]"\n', GATE_PATHS,
+       "the viz3d job installing no PyVista: the renderer's tests skip in it, and the gate's record "
+       "says the file runs in CI"),
+    _M("VZ2", CI, "--tb=short tests/api/test_frame_renderer_3d.py\n",
+       "--tb=short tests/api/test_bearer_auth.py\n", GATE_PATHS + WF,
+       "the viz3d job running some other file: nothing in CI runs the renderer's tests"),
+    _M("VZ3", "scripts/check_anomalies.py", 'PATHS_CI_NEVER_RUNS = ("tests/viz",)',
+       'PATHS_CI_NEVER_RUNS = ("tests/viz", "tests/api/test_frame_renderer_3d.py")', GATE_PATHS,
+       "the gate refusing a citation of the renderer's tests as evidence that never runs, "
+       "though the viz3d job runs them (and the verification page saying so)"),
+    _M("VZ4", "scripts/check_anomalies.py", "IMPORTS_NO_CI_JOB_INSTALLS: dict[str, tuple[str, ...]] = {}",
+       'IMPORTS_NO_CI_JOB_INSTALLS: dict[str, tuple[str, ...]] = {"tests/api/test_frame_renderer_3d.py": ("pyvista",)}',
+       GATE_PATHS, "the gate's record of what a skipped file waits for out of step with the derivation"),
+    _M("VZ5", CI, "        run: xvfb-run -a python -m pytest -v -rs", "        run: python -m pytest -v -rs", WF,
+       "the viz3d job running with no display: VTK cannot open a render window and every test errors "
+       "(or, with the switch off, skips)"),
+    _M("VZ6", CI, '          MADDENING_REQUIRE_VIZ3D_TESTS: "1"\n', '          MADDENING_REQUIRE_VIZ3D_TESTS: "0"\n', WF,
+       "a missing PyVista skipping the whole module in the viz3d job, which would stay green with "
+       "the tests running nowhere"),
 )
 
 

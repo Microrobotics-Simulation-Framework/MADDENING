@@ -3238,11 +3238,16 @@ class TestAnomalyGateRefusesEvidenceCINeverRuns:
         assert f"'{ref}': 'tests/viz/test_network.py' is under tests/viz/" in err
 
     @pytest.mark.parametrize("status", ["resolved", "open"])
-    def test_a_test_in_a_file_every_lane_skips_at_import_is_refused(self, status, tmp_path, capsys):
+    def test_a_test_in_a_file_every_lane_skips_at_import_is_refused(
+            self, status, tmp_path, capsys, monkeypatch):
         """The same refusal as for ``tests/viz``, whatever the entry's
-        status, and it says why the file never runs."""
+        status, and it says why the file never runs.  The shipped record
+        holds no such file since the ``viz3d`` job runs the 3D renderer's
+        tests, so the entry is seeded."""
         gate = _load("check_anomalies")
-        (rel, needs), = gate.IMPORTS_NO_CI_JOB_INSTALLS.items()
+        rel, needs = "tests/api/test_needs_a_package.py", ("pyvista",)
+        monkeypatch.setattr(gate, "PATHS_CI_NEVER_RUNS", (*gate.PATHS_CI_NEVER_RUNS, rel))
+        monkeypatch.setattr(gate, "IMPORTS_NO_CI_JOB_INSTALLS", {rel: needs})
         target = tmp_path / rel
         target.parent.mkdir(parents=True)
         target.write_text(

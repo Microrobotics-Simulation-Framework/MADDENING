@@ -67,6 +67,7 @@ _DURATIONS = "tests/compliance/test_report_test_durations.py"
 _COLLECTS = f"{_DURATIONS}::test_every_shipped_allowlist_entry_is_a_node_id_pytest_collects"
 _REASONS = f"{_DURATIONS}::test_the_shipped_allowlist_names_real_tests_with_reasons"
 _SHARDING = "tests/compliance/test_ci_sharding.py"
+_DEPS = "tests/compliance/test_ci_dependency_jobs.py"
 _WORKFLOWS = "tests/compliance/test_ci_workflows.py"
 _PRUNE = "tests/compliance/test_prune_jax_cache.py"
 _COMPILE_CACHE = "tests/core/test_compile_cache.py"
@@ -77,6 +78,7 @@ _SLOW_RULE = "tests/compliance/test_slow_only_rule.py"
 #: mutants need it.
 DUR = (_DURATIONS, "--deselect", _COLLECTS)
 SHARD = (_SHARDING,)
+DEPS = (_DEPS,)
 _HYGIENE = "tests/compliance/test_slow_lane_hygiene.py"
 HYGIENE = (_HYGIENE,)
 WF = (_WORKFLOWS,)
@@ -127,7 +129,7 @@ CI_ALL = DUR + SHARD + WF
 _HUNTS = "tests/property/test_targeted_search.py"
 
 #: Every guard file, run whole on the unmutated copy before any mutant.
-GUARD_FILES = (_DURATIONS, _SHARDING, _WORKFLOWS, _PRUNE, _COMPILE_CACHE, _SLOW_RULE, _PLAN_SCAN,
+GUARD_FILES = (_DURATIONS, _SHARDING, _WORKFLOWS, _DEPS, _PRUNE, _COMPILE_CACHE, _SLOW_RULE, _PLAN_SCAN,
                _HUNTS)
 
 
@@ -157,6 +159,11 @@ PR = "scripts/prune_jax_cache.py"
 CI = ".github/workflows/ci.yml"
 SL = ".github/workflows/slow-tests.yml"
 SWT = "tests/slow_lane_weights.json"
+PWT = "tests/per_push_weights.json"
+GEN = "scripts/generate_ci_constraints.py"
+DRIFT = "scripts/report_constraint_drift.py"
+CONS = "ci/constraints.txt"
+SC = ".github/workflows/scheduled-checks.yml"
 SLD = "scripts/slow_lane_drift.py"
 SLW = "scripts/slow_lane_weights.py"
 PP = "pyproject.toml"
@@ -285,26 +292,36 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("R27", RTD, '        "allow_fast": [t for t in ranked if t.nodeid in allow and t.seconds <= slow_over',
        '        "allow_fast": [t for t in ranked if t.nodeid in allow and t.seconds <= fail_over', DUR,
        "a kept test that passed at 6-20 s is offered as a removable allowlist entry"),
+    # --- R, continued: the outlier re-run ------------------------------------
+    _M("R28", RTD, "        if again is not None and again.outcome == \"passed\" and again.seconds <= fail_over:",
+       "        if again is not None and again.outcome == \"passed\":", DUR,
+       "a test that is over the hard line on its re-run too is forgiven"),
+    _M("R29", RTD, "        if again is not None and again.outcome == \"passed\" and again.seconds <= fail_over:",
+       "        if again is not None and again.seconds <= fail_over:", DUR,
+       "a test that fails on its re-run, fast, is forgiven"),
+    _M("R30", RTD, "        if again is not None and again.outcome == \"passed\" and again.seconds <= fail_over:",
+       "        if again is None or (again.outcome == \"passed\" and again.seconds <= fail_over):", DUR,
+       "a test the re-run never found (pytest could not start) is forgiven"),
+    _M("R31", RTD, '    env["JAX_COMPILATION_CACHE_DIR"] = str(cache_dir)\n', "", DUR,
+       "the re-run reads the cache the first run wrote: a real compile reads back as 1 s and passes"),
+    _M("R32", RTD, 'for k, v in os.environ.items() if k != "MADDENING_TEST_SHARD"}',
+       "for k, v in os.environ.items()}", DUR,
+       "the re-run names the shard of the job: with the root conftest it deselects the test it was asked to run"),
+    _M("R33", RTD, "        if len(verdict[\"failing\"]) > args.retry_max:", "        if False:", DUR,
+       "a lane full of tests over the line is re-run as if each were an outlier"),
+    _M("R34", RTD, '            verdict["failing"] = still\n', "", DUR,
+       "a forgiven test still fails the job"),
+    _M("R35", RTD, "    if args.retry_outliers and verdict[\"failing\"]:", "    if verdict[\"failing\"]:", DUR,
+       "every run retries, flag or not"),
     # --- S: the shard split, tests/_sharding.py ------------------------------
     _M("S1", SH, 'return int(hashlib.sha256(path.encode("utf-8")).hexdigest(), 16) % n + 1',
        'return int(hashlib.sha256(path.encode("utf-8")).hexdigest(), 16) % n', SHARD,
        "0-based shards: every file hashing to 0 runs nowhere"),
-    _M("S2", SH, "    if n == PINS_FOR and path in PINS:", "    if False:", SHARD, "pins ignored"),
-    _M("S3", SH, "    if n == PINS_FOR and path in PINS:", "    if path in PINS:", SHARD,
-       "pins leak into other job counts"),
     _M("S4", SH, "(keep if self.shard_of(path) == self.shard else drop).append(item)", "keep.append(item)",
        SHARD, "every shard runs the whole suite"),
     _M("S5", SH, 'path = item.nodeid.split("::", 1)[0]', "path = item.nodeid", SHARD,
        "a file's tests split across shards (hashed by node id)"),
-    _M("S6", SH, "        if not 1 <= pinned <= PINS_FOR:", "        if False:", SHARD,
-       "a pin to a shard that does not exist is accepted at registration",
-       equivalent="defence in depth: test_every_pin_names_a_real_file_and_a_real_shard checks every "
-                  "shipped pin directly, so an out-of-range pin is still caught (mutant S8)"),
     _M("S7", SH, "    if not 1 <= i <= n:", "    if not 0 <= i <= n:", SHARD, "MADDENING_TEST_SHARD=0/4 accepted"),
-    _M("S8", SH, '"tests/property/test_differential_coupling_topologies.py": 3,',
-       '"tests/property/test_differential_coupling_topologies.py": 7,', SHARD, "a file pinned to shard 7 of 6 runs nowhere"),
-    _M("S9", SH, '"tests/property/test_differential_coupling_topologies.py": 3,',
-       '"tests/property/test_differential_coupling_topologies_renamed.py": 3,', SHARD, "a pin naming a renamed file"),
     _M("S10", SH, 'return int(hashlib.sha256(path.encode("utf-8")).hexdigest(), 16) % n + 1',
        'return int(hashlib.md5(path.encode("utf-8")).hexdigest(), 16) % n + 1', SHARD,
        "every file re-dealt (every saved base cache is for the wrong files)"),
@@ -316,20 +333,23 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("S13", SH, "    return dealt[path] if path in dealt else _by_hash(path, n)", "    return _by_hash(path, n)",
        SHARD, "the weighted split ignores its table: the slow lane is back on the hash split, one shard at "
               "its timeout"),
-    _M("S14", SH, "    return dealt[path] if path in dealt else _by_hash(path, n)",
-       "    return dealt[path] if path in dealt else shard_of(path, n)", SHARD,
-       "the per-push pins leak into the weighted split"),
     _M("S15", SH, "        lightest = min(range(n), key=lambda k: (load[k], k))", "        lightest = 0", SHARD,
        "every measured file dealt to shard 1"),
     _M("S16", SH, "sorted(weights.items(), key=lambda kv: (-kv[1], kv[0])):",
        "sorted(weights.items(), key=lambda kv: (kv[1], kv[0])):", SHARD,
        "shortest first: the 48-minute file lands last, on top of a full shard"),
-    _M("S17", SH, "    return i, n, bool(colon)", "    return i, n, False", SHARD,
+    _M("S17", SH, "    return i, n, plan if colon else None", "    return i, n, None", SHARD,
        "the ':weighted' suffix is parsed and ignored"),
-    _M("S18", SH, "    if colon and plan != WEIGHTED:", "    if False:", SHARD,
-       "any suffix is taken for ':weighted', a misspelt one included"),
-    _M("S19", SH, "    weights = load_weights() if weighted else None", "    weights = None", SHARD,
+    _M("S18", SH, "    if colon and plan not in TABLES:", "    if False:", SHARD,
+       "any suffix is taken for a weighted split, a misspelt one included"),
+    _M("S19", SH, "    weights = load_weights(TABLES[plan]) if plan else None", "    weights = None", SHARD,
        "a weighted spec registers the hash split"),
+    _M("S24", SH, "    weights = load_weights(TABLES[plan]) if plan else None",
+       "    weights = load_weights() if plan else None", SHARD,
+       "the per-push suffix deals the slow lane's table: every shard's cache was built from other files"),
+    _M("S25", SH, "TABLES = {WEIGHTED: WEIGHTS_FILE, WEIGHTED_PUSH: PER_PUSH_WEIGHTS_FILE}",
+       "TABLES = {WEIGHTED: WEIGHTS_FILE, WEIGHTED_PUSH: WEIGHTS_FILE}", SHARD,
+       "both suffixes read the slow lane's table"),
     _M("S20", SH, "        if self.weighted:\n            return weighted_shard_of(path, self.of, self._dealt)\n",
        "", SHARD, "the plugin holds the dealt table and never reads it"),
     _M("S21", SH, "if type(v) is not int or v <= 0}", "if type(v) is not int or v < 0}", SHARD,
@@ -338,7 +358,7 @@ MUTANTS: tuple[Mutant, ...] = (
        SHARD, "an empty table accepted: a weighted run that is a hash split"),
     _M("S23", SH, '    if not re.fullmatch(r"[0-9]+/[0-9]+", counts):', '    if not re.fullmatch(r".+/.+", counts):',
        SHARD, "a malformed spec dies in int() with a traceback instead of a usage error, or (' 1/4') is accepted"),
-    _M("S24", SH, "            record_suite_property(session.config, name, value)", "            pass", SHARD,
+    _M("S26", SH, "            record_suite_property(session.config, name, value)", "            pass", SHARD,
        "no shard records how fast its runner was: the next table is weighed by the luck of its runners"),
     # --- SW: the slow lane's table, tests/slow_lane_weights.json ----------------
     _M("SW1", SWT, '  "tests/property/test_sysid_truth_recovery.py": ',
@@ -347,6 +367,13 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("SW2", SWT, ' "min_seconds": ', ' "min_seconds": 1000', SHARD,
        "the table claims a floor its entries are under"),
     _M("SW3", SWT, ' "runs": [', ' "runs": [], "earlier": [', SHARD, "weights with no CI run to trace them to"),
+    # --- PW: the per-push lane's table, tests/per_push_weights.json --------------
+    _M("PW1", PWT, '  "tests/compliance/test_gate_scripts.py": ',
+       '  "tests/compliance/test_gate_script.py": ', SHARD,
+       "the table's heaviest entry names a file that does not exist: its shard is five minutes lighter than dealt"),
+    _M("PW2", PWT, ' "min_seconds": ', ' "min_seconds": 1000', SHARD,
+       "the table claims a floor its entries are under"),
+    _M("PW3", PWT, ' "runs": [', ' "runs": [], "earlier": [', SHARD, "weights with no CI run to trace them to"),
     # --- G: the table's generator, scripts/slow_lane_weights.py ----------------
     _M("G1", SLW, "            slowest[path] = max(slowest[path], seconds)",
        "            slowest[path] = seconds", SHARD, "a file's weight is whichever lane was read last"),
@@ -354,16 +381,60 @@ MUTANTS: tuple[Mutant, ...] = (
        SHARD, "the first run's measurement wins over a later one"),
     _M("G3", SLW, "             if round(s) >= min_seconds and p not in gone}",
        "             if round(s) >= min_seconds}", SHARD, "a measured file that no longer exists stays in the table"),
+    _M("G5", SLW, "        merged[lane] = {path: statistics.median(times) for path, times in files.items()}",
+       "        merged[lane] = {path: max(times) for path, times in files.items()}", SHARD,
+       "one slow runner in three sets a file's weight"),
+    _M("G6", SLW, "for run in reports], args.aggregate)", "for run in reports])", SHARD,
+       "--aggregate median is parsed and ignored"),
+    _M("G7", SLW, '    ap.add_argument("--lane", choices=sorted(LANES), default="slow",',
+       '    ap.add_argument("--lane", choices=sorted(LANES), default="per-push",', SHARD,
+       "the generator writes the per-push table when asked for the slow lane's"),
     _M("G4", SLW, "            files[path] += float(case.get(\"time\") or 0.0)",
        "            files[path] = float(case.get(\"time\") or 0.0)", SHARD,
        "a file weighs what its last test took"),
-    _M("G5", SLW, "        scale = 1.0 if seconds is None or reference is None else (reference / seconds) ** exponent",
+    _M("G8", SLW, "        scale = 1.0 if seconds is None or reference is None else (reference / seconds) ** exponent",
        "        scale = 1.0", SHARD,
        "every shard's times taken as measured: a file weighed on a fast runner is under-weighed and its "
        "shard runs long (shard 4, 2026-10-12 and 13: 95 to 108 minutes against 68 predicted)"),
-    _M("G6", SLW, "        scale = 1.0 if seconds is None or reference is None else (reference / seconds) ** exponent",
+    _M("G9", SLW, "        scale = 1.0 if seconds is None or reference is None else (reference / seconds) ** exponent",
        "        scale = 1.0 if seconds is None or reference is None else (seconds / reference) ** exponent",
        SHARD, "a slow runner's times scaled up and a fast one's down: the runner's luck doubled, not removed"),
+    # --- D: the dependency jobs and the constraints file ------------------------
+    _M("D1", GEN, "        if differing:\n", "        if False:\n", DEPS,
+       "one constraints file written for two JAX versions that resolved to different numpy: one lane installs a pin it was not resolved with"),
+    _M("D2", GEN, '[*requirement_strings(pyproject), "jax-versions: " + ",".join(JAX_VERSIONS)]',
+       "requirement_strings(pyproject)", DEPS, "a new JAX version in the matrix does not make the file stale"),
+    _M("D3", GEN, '    for extra in EXTRAS:\n        out += [', '    for extra in EXTRAS[:1]:\n        out += [', DEPS,
+       "an edit to the usd requirements does not make the file stale"),
+    _M("D4", CONS, "hypothesis==6.169.0\n", "hypothesis==7.0.0\n", DEPS, "a pin outside the range pyproject declares"),
+    _M("D5", CONS, "\nlineax==0.1.1\n", "\n", DEPS, "a requirement CI installs that the file does not pin"),
+    _M("D6", PP, '    "lineax>=0.0.7",\n', '    "lineax>=0.0.8",\n', DEPS,
+       "a range edited and the constraints file, and the floor job, not regenerated"),
+    _M("D7", CI, '          pip install "jax==${{ matrix.jax-version }}" "jaxlib==${{ matrix.jax-version }}" "lineax==0.0.7"',
+       '          pip install "jax==${{ matrix.jax-version }}" "jaxlib==${{ matrix.jax-version }}" "lineax==0.0.8"', DEPS,
+       "the floor job installs something above the floor"),
+    _M("D8", CI, "            tests/core/test_solver_ift_lineax_is_core.py \\\n", "", DEPS,
+       "a test that names lineax is not run at its floor"),
+    _M("D11", CI, "      - name: Install dependencies\n        env:\n          # The versions CI installs against (ci/constraints.txt, written by\n"
+                  "          # scripts/generate_ci_constraints.py): a run is reproducible, and a\n"
+                  "          # new release of a dependency is taken on purpose.  The weekly\n"
+                  "          # scheduled-checks.yml installs without it.\n"
+                  "          PIP_CONSTRAINT: ci/constraints.txt\n        run: |\n          python -m pip install --upgrade pip\n"
+                  "          # Exact JAX pin per lane",
+       "      - name: Install dependencies\n        run: |\n          python -m pip install --upgrade pip\n          # Exact JAX pin per lane", DEPS,
+       "the test lanes install the newest versions again, whatever the constraints file says"),
+    _M("D12", SC, "      - name: Install the newest versions the ranges allow\n        # No PIP_CONSTRAINT and no jax pin, on purpose (see the header).\n",
+       "      - name: Install the newest versions the ranges allow\n        env:\n          PIP_CONSTRAINT: ci/constraints.txt\n", DEPS,
+       "the weekly newest-versions check installs the pinned versions: it can never find a break"),
+    _M("D13", SC, "          MADDENING_SEARCH_ENTROPY: fresh\n", "          MADDENING_SEARCH_ENTROPY: \"0\"\n", DEPS,
+       "the exploring job reads a fixed entropy: the same draws every week"),
+    _M("D14", SC, "          - tests/property/test_sysid_targeted_search.py\n", "", DEPS,
+       "a file that hunts under a seed is not explored"),
+    _M("D15", SC, "          python -m pytest ${{ matrix.file }} -m slow -v -rfEP --tb=short \\\n",
+       "          python -m pytest ${{ matrix.file }} -m slow -v -rfEP --tb=short -p no:cacheprovider --maxfail=0 || true \\\n", DEPS,
+       "the exploring job is green whatever it finds"),
+    _M("D16", DRIFT, "    have = {k: v for k, v in have.items() if k != \"maddening\" and k not in LANE_PINNED}",
+       "    have = dict(have)", DEPS, "the drift report lists jax, which every lane pins itself, and the project, as new"),
     # --- C: the root conftest -------------------------------------------------
     _M("C1", CF, "    if spec:\n        from tests import _sharding", "    if False:\n        from tests import _sharding",
        CI_ALL, "MADDENING_TEST_SHARD ignored: every shard runs everything"),
@@ -389,8 +460,8 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("P6", PR, "    if len(payload) <= TIME_BYTES:\n", "    if len(payload) < TIME_BYTES:\n", PRUNE,
        "an entry holding only the compile-time header is kept"),
     # --- Y: the default lanes, .github/workflows/ci.yml -----------------------
-    _M("Y1", CI, '          MADDENING_TEST_SHARD: "${{ matrix.shard }}/6"\n        run: |',
-       '          MADDENING_TEST_SHARD: "${{ matrix.shard }}/6"\n'
+    _M("Y1", CI, '          MADDENING_TEST_SHARD: "${{ matrix.shard }}/6:weighted-push"\n        run: |',
+       '          MADDENING_TEST_SHARD: "${{ matrix.shard }}/6:weighted-push"\n'
        '          PYTEST_ADDOPTS: "--deselect tests/core"\n        run: |', CI_ALL,
        "every shard silently drops tests/core (selection moved into the step's env)"),
     _M("Y2", CI, "        if: ${{ !cancelled() && github.event_name == 'push' && steps.tests.outcome == 'success' "
@@ -402,6 +473,17 @@ MUTANTS: tuple[Mutant, ...] = (
        'case "$msg" in *"[cold-ci-off]"*) mode=cold ;; esac', CI_ALL, "a [cold-ci] request is ignored"),
     _M("Y4", CI, '-shard${{ matrix.shard }}of6" >> "$GITHUB_OUTPUT"', '" >> "$GITHUB_OUTPUT"', CI_ALL,
        "one compilation cache shared by all shards"),
+    _M("Y41", CI, "tests/_sharding\\.py|tests/per_push_weights\\.json", "tests/_sharding\\.py", CI_ALL,
+       "re-dealing the per-push shards (a new weights table) no longer forces a cold run"),
+    _M("Y42", CI, 'MADDENING_TEST_SHARD: "${{ matrix.shard }}/6:weighted-push"',
+       'MADDENING_TEST_SHARD: "${{ matrix.shard }}/6"', CI_ALL,
+       "the per-push lane splits by hash again: every shard's compile cache is for other files"),
+    _M("Y43", CI, " \\\n            --retry-outliers\n", "\n", CI_ALL,
+       "the budget step no longer re-runs an outlier: one runner's stall fails a pull request again"),
+    _M("Y44", CI, '          JAX_PLATFORMS: cpu\n          XLA_FLAGS: "--xla_gpu_autotune_level=0"\n'
+                  '          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"\n        run: |\n          # What this shard',
+       '          JAX_PLATFORMS: cpu\n        run: |\n          # What this shard', CI_ALL,
+       "the re-run is a pytest without the test step's environment (plugins autoload, XLA flags)"),
     _M("Y5", CI, "mark\\.slow|^-", "mark\\.slowXX|^-", CI_ALL, "a slow-mark edit no longer forces a cold run"),
     _M("Y7", CI, '--pytest-arg=--tb=short \\\n            --pytest-arg=-m "--pytest-arg=slow or not slow"',
        "--pytest-arg=--tb=short", CI_ALL, "verify-hypothesis drops the slow-marked properties"),
@@ -421,17 +503,17 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("Y18", CI, "python -m pytest tests/ -v -rs --tb=short --ignore=tests/viz \\",
        "python -m pytest tests/ -v -rs --tb=short --ignore=tests/viz -k 'not property' \\", CI_ALL,
        "the default lane deselects tests by keyword"),
-    _M("Y19", CI, "--allowlist tests/duration_allowlist.txt --markdown /dev/null\n",
-       "--allowlist tests/duration_allowlist.txt --markdown /dev/null --fail-over 0\n", CI_ALL,
+    _M("Y19", CI, "--markdown /dev/null \\\n            --retry-outliers\n",
+       "--markdown /dev/null \\\n            --retry-outliers --fail-over 0\n", CI_ALL,
        "the budget step switches its hard line off"),
     _M("Y20", CI, "      - name: Test time budget\n",
        "      - name: Test time budget\n        continue-on-error: true\n", CI_ALL,
        "the budget step can no longer fail the job"),
-    _M("Y21", CI, "--allowlist tests/duration_allowlist.txt --markdown /dev/null\n",
-       "--allowlist tests/duration_allowlist.txt --markdown /dev/null || true\n", CI_ALL,
+    _M("Y21", CI, "--markdown /dev/null \\\n            --retry-outliers\n",
+       "--markdown /dev/null \\\n            --retry-outliers || true\n", CI_ALL,
        "the budget step swallows the gate's exit code with `|| true`"),
-    _M("Y22", CI, "--allowlist tests/duration_allowlist.txt --markdown /dev/null\n",
-       "--allowlist tests/duration_allowlist.txt --markdown /dev/null; true\n", CI_ALL,
+    _M("Y22", CI, "--markdown /dev/null \\\n            --retry-outliers\n",
+       "--markdown /dev/null \\\n            --retry-outliers; true\n", CI_ALL,
        "the budget step swallows the gate's exit code with `; true`"),
     _M("Y23", CI, '          if [ "${{ github.event_name }}" != "pull_request" ]; then\n            mode=cold',
        '          if [ "${{ github.event_name }}" != "pull_request" ]; then\n            mode=warm', CI_ALL,
@@ -442,7 +524,7 @@ MUTANTS: tuple[Mutant, ...] = (
                   "&& steps.prune-cache.outcome == 'success' }}",
        "if: ${{ !cancelled() && github.event_name == 'push' && steps.prune-cache.outcome == 'success' }}", CI_ALL,
        "the cache is saved even when the test step failed"),
-    _M("Y26", CI, "key=jaxcc-v1-${{ runner.os }}-$cpu-py", "key=jaxcc-v1-${{ runner.os }}-py", CI_ALL,
+    _M("Y26", CI, "key=jaxcc-v2-${{ runner.os }}-$cpu-py", "key=jaxcc-v2-${{ runner.os }}-py", CI_ALL,
        "the CPU model is dropped from the compilation-cache key",
        equivalent="the CPU model only raises the hit rate: JAX's own cache key includes the CPU's "
                   "features, so a cache from another model is never used wrongly, only missed"),
@@ -846,9 +928,19 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("K26", _USD_SPEC, f"\n\ndef {_USD_GONE}():", f"\n\n@pytest.mark.skip(reason='x')\ndef {_USD_GONE}():",
        CLAIMS, "a cited tests/usd test skip-marked: it is collected and never runs"),
     _M("K27", CI, "      # running them locally relies on.\n      - name: Install dependencies\n"
+       "        env:\n          # The versions CI installs against (ci/constraints.txt, written by\n"
+       "          # scripts/generate_ci_constraints.py): a run is reproducible, and a\n"
+       "          # new release of a dependency is taken on purpose.  The weekly\n"
+       "          # scheduled-checks.yml installs without it.\n"
+       "          PIP_CONSTRAINT: ci/constraints.txt\n"
        "        run: |\n          python -m pip install --upgrade pip\n"
        '          pip install "jax==0.10.2" "jaxlib==0.10.2"\n          pip install -e ".[ci,usd]"\n',
        "      # running them locally relies on.\n      - name: Install dependencies\n"
+       "        env:\n          # The versions CI installs against (ci/constraints.txt, written by\n"
+       "          # scripts/generate_ci_constraints.py): a run is reproducible, and a\n"
+       "          # new release of a dependency is taken on purpose.  The weekly\n"
+       "          # scheduled-checks.yml installs without it.\n"
+       "          PIP_CONSTRAINT: ci/constraints.txt\n"
        "        run: |\n          python -m pip install --upgrade pip\n"
        '          pip install "jax==0.10.2" "jaxlib==0.10.2"\n          pip install -e ".[ci]"\n',
        CLAIMS, "the compliance job without usd-core: no per-push job compares the claims "

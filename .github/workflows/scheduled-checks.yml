@@ -1,0 +1,188 @@
+name: Scheduled checks
+
+# Two checks that look for what per-push CI cannot see, and gate no merge:
+# they run on a schedule and on demand, never on a push or a pull request.
+#
+#   * newest-dependencies (Mondays): per-push CI installs against
+#     ci/constraints.txt, so its runs are reproducible and a new release of
+#     a dependency changes nothing there until the file is regenerated.
+#     This job installs the same extras WITHOUT the file, at the newest
+#     versions their ranges allow, and runs the per-push suite in the same
+#     six weighted shards.  It is how a release of a dependency that breaks
+#     the tree is found before a contributor's install finds it (lineax
+#     0.1.1 was found by CI in 0.4.0, the day it came out).  A red run
+#     says which version is newer than the file's in its step summary
+#     ("Installed versions against ci/constraints.txt"); the answer is a
+#     bound in pyproject.toml, or a fix, and then a regeneration of the file.
+#
+#   * explore-searches (Thursdays): the slow lane's targeted searches run
+#     under fixed seeds, so the release gate gives the same verdict twice.
+#     Here each search file runs once with MADDENING_SEARCH_ENTROPY=fresh
+#     (tests/property/targeted_search.py), one file per process: every hunt
+#     draws examples no earlier run drew.  A red job is a find.  Its step
+#     summary names the entropy the run drew and the command that replays
+#     it; the log is kept as an artifact.  A find goes into the module's
+#     table of pinned cases (docs/developer_guide/testing_standards.md,
+#     "A hunt is seeded; exploring is a switch") and is registered like any
+#     other defect.
+#
+# GitHub runs a scheduled workflow on the default branch only; to run
+# either on a branch, dispatch it there (Actions tab, or
+# `gh workflow run scheduled-checks.yml --ref <branch> -f check=explore-searches`).
+# GitHub emails the author of a scheduled workflow when a run fails.
+
+on:
+  schedule:
+    # Mondays 04:23 UTC: the newest dependencies.
+    - cron: '23 4 * * 1'
+    # Thursdays 04:41 UTC: the exploring searches.
+    - cron: '41 4 * * 4'
+  workflow_dispatch:
+    inputs:
+      check:
+        description: Which check to run
+        type: choice
+        options: [both, newest-dependencies, explore-searches]
+        default: both
+
+permissions:
+  contents: read
+
+jobs:
+  newest-dependencies:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.check != 'explore-searches' || github.event.schedule == '23 4 * * 1' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # The same six weighted shards as ci.yml's test job, on the newest
+        # JAX the declared range allows: no pin below, so pip takes it.
+        shard: [1, 2, 3, 4, 5, 6]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the newest versions the ranges allow
+        # No PIP_CONSTRAINT and no jax pin, on purpose (see the header).
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[ci]"
+          pip list --format=freeze > installed-versions.txt
+
+      - name: Say what is newer than the constraints file
+        run: python scripts/report_constraint_drift.py ci/constraints.txt
+
+      - name: Install C toolchain for the FMU wrapper tests
+        # As in ci.yml; a mirror that stops answering must cost minutes.
+        timeout-minutes: 10
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind clang
+
+      - name: Run tests
+        env:
+          JAX_PLATFORMS: cpu
+          XLA_FLAGS: "--xla_gpu_autotune_level=0"
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          MADDENING_REQUIRE_PACKAGING_TESTS: "1"
+          MADDENING_TEST_SHARD: "${{ matrix.shard }}/6:weighted-push"
+        run: |
+          python -m pytest tests/ -v -rs --tb=short --ignore=tests/viz \
+            --junitxml=test-results-shard${{ matrix.shard }}.xml -o junit_family=xunit1
+
+      - name: Upload the installed versions
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: newest-dependencies-shard${{ matrix.shard }}of6
+          path: |
+            installed-versions.txt
+            test-results-shard${{ matrix.shard }}.xml
+          retention-days: 30
+          if-no-files-found: warn
+
+  explore-searches:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.check != 'newest-dependencies' || github.event.schedule == '41 4 * * 4' }}
+    runs-on: ubuntu-latest
+    # The longest search takes about 25 minutes on a runner.
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # One file per process: the entropy is drawn once per process and
+        # mixed into every hunt of the file.  Every file that runs a hunt
+        # under a seed of its own (tests/compliance/test_ci_dependency_jobs.py
+        # holds this list against the tree).
+        file:
+          - tests/property/test_coupling_targeted_search.py
+          - tests/property/test_coupling_nonlinear_search.py
+          - tests/property/test_coupling_geometry_search.py
+          - tests/property/test_coupling_geometry_search_under_the_interface_norm.py
+          - tests/property/test_sysid_targeted_search.py
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        env:
+          PIP_CONSTRAINT: ci/constraints.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install "jax==0.10.2" "jaxlib==0.10.2"
+          pip install -e ".[ci]"
+
+      - name: Explore
+        # `-m slow` selects the hunts; the entropy switch is the only
+        # difference from the slow lane's run of the same file.  pipefail:
+        # the step is red when pytest is, and the steps below still run.
+        env:
+          JAX_PLATFORMS: cpu
+          XLA_FLAGS: "--xla_gpu_autotune_level=0"
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          MADDENING_SEARCH_ENTROPY: fresh
+        run: |
+          set -o pipefail
+          python -m pytest ${{ matrix.file }} -m slow -v -rfEP --tb=short \
+            2>&1 | tee explore.log
+
+      - name: Report the find and how to replay it
+        if: ${{ !cancelled() }}
+        run: |
+          {
+            echo "### Exploring search: \`${{ matrix.file }}\`"
+            echo
+            entropy="$(sed -n 's/.*exploring under MADDENING_SEARCH_ENTROPY=\([0-9][0-9]*\).*/\1/p' explore.log | sort -u | head -1)"
+            if [ -z "$entropy" ]; then
+              echo "No hunt reported the entropy it drew: the run did not reach a hunt (see the log)."
+            else
+              echo "Entropy drawn for this run: \`$entropy\`.  To replay every hunt of it:"
+              echo
+              echo '```'
+              echo "MADDENING_SEARCH_ENTROPY=$entropy python -m pytest ${{ matrix.file }} -m slow -rP"
+              echo '```'
+            fi
+            echo
+            echo "Failures:"
+            echo
+            echo '```'
+            grep -E '^(FAILED|ERROR) ' explore.log | cut -c1-300 || echo "none"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the log
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: explore-${{ strategy.job-index }}
+          path: explore.log
+          retention-days: 30
+          if-no-files-found: warn

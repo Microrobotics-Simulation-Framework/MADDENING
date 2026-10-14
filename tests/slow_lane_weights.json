@@ -1,6 +1,6 @@
 {
  "what": "Seconds per test file on the slow lane, for the weighted split of tests/_sharding.py. Written by scripts/slow_lane_weights.py; do not edit by hand.",
- "measured": "Each file's slower lane, setup + call + teardown of every test in it, on ubuntu-latest with no compilation cache, scaled to a runner of median speed (runner_speed). Where two runs measured a file, the later.",
+ "measured": "Each file's slower lane, setup + call + teardown of every test in it, on ubuntu-latest with no compilation cache. Scaled to a runner of median speed (runner_speed). Where two runs measured a file, the later.",
  "runs": [
   {
    "run": "38182068116",

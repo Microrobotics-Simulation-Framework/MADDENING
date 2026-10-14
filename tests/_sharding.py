@@ -20,19 +20,26 @@ Duration-balanced splitters (``pytest-split``) do not have that property:
 they cut the suite into chunks by measured time, so one new test shifts
 every boundary after it, and they split files across shards.
 
-``PINS`` places a file on a shard explicitly, overriding the hash, to fix
-an imbalance the hash leaves.  Pinning moves that file and nothing else.
-Pins apply only when the job count equals ``PINS_FOR``; changing the job
-count is a deliberate rebalance that re-deals every file anyway.
+Both lanes ask for a weighted split, by a suffix on the spec, because a
+hash leaves the shards far from equal: one file takes 48 minutes on the
+slow lane, and by hash a single shard held nearly half of it.  A weighted
+split deals the files of a table of measured seconds per file, longest
+first, each onto the shard with the least time so far; a file the table
+does not list goes by the hash above.  It is still a function of the path
+and of committed data, and a file's tests still stay together.
 
-The slow lane (``slow-tests.yml``) asks for ``i/N:weighted`` instead.  It
-restores no compilation cache, so nothing there depends on a file staying
-on its shard, and its files are far from equal: one takes 48 minutes, and
-by hash a single shard held nearly half of the lane.  A weighted split
-deals the files of ``slow_lane_weights.json`` (measured seconds per file),
-longest first, each onto the shard with the least time so far; a file the
-table does not list goes by the hash above.  It is still a function of the
-path and of committed data, and a file's tests still stay together.
+* ``i/N:weighted`` deals ``slow_lane_weights.json`` (``slow-tests.yml``).
+  That lane restores no compilation cache, so nothing there depends on a
+  file staying on its shard.
+* ``i/N:weighted-push`` deals ``per_push_weights.json`` (``ci.yml``).  The
+  per-push lane does restore a cache per shard, saved by the base branch's
+  run of the same shard, so a pull request must see the same deal as its
+  base.  It does: the deal is a function of the committed table alone, never
+  of the test list, so a change to the table is the one thing that moves a
+  file, and ``ci.yml``'s ``changes`` job runs a pull request cold when its
+  diff touches the table.
+
+A plain ``i/N`` is the hash split alone.
 
 GitHub's runners differ in speed: on the slow lane of 2026-10-11 to 13
 one runner took 1.6 to 1.9 times as long as another over the same files.
@@ -59,32 +66,17 @@ import pytest
 
 ENV_VAR = "MADDENING_TEST_SHARD"
 
-#: ``{test file path relative to the repository root: shard}``.
-#:
-#: The six pins that level the six shards, from the per-file times of three
-#: cold push runs on the release branch (38089224978, 38093868119, 38096508004;
-#: 2026-10-10 and 11).  By hash alone the slowest of six jobs is predicted
-#: at 33 to 37 minutes on those runs; with these, at 28 to 30 against a
-#: mean of 24 to 30 (four shards ran 43 to 48).  Each was chosen as the one
-#: file whose move off the slowest shard lowers the slowest shard most, over
-#: the runs and both JAX lanes; every other file stays where its hash puts
-#: it.  The minutes are the slower JAX lane's, the mean of the runs.
-#: Recompute from the "Test durations" lane summaries of several runs when
-#: a shard runs persistently long (one run carries its runners' speeds, a
-#: factor of up to 1.6); moving a pin moves only that file.
-PINS: dict[str, int] = {
-    "tests/property/test_differential_coupling_topologies.py": 3,               # 5.1 min
-    "tests/nodes/adaptive/test_wavelet_node.py": 3,                             # 2.4 min
-    "tests/core/test_coupling_claims_in_every_domain.py": 6,                    # 2.4 min
-    "tests/core/test_coupling_claims_graphs.py": 2,                             # 2.2 min
-    "tests/test_examples_smoke.py": 6,                                          # 1.6 min
-    "tests/verification/test_verify_node_harness.py": 1,                        # 1.2 min
-}
-#: The job count the pins were balanced for.
-PINS_FOR = 6
+#: The job count ``ci.yml`` runs per JAX version.  Six, from the per-file
+#: times of the cold push runs of 2026-10-11 to 13 (``tests/per_push_weights.json``):
+#: the weighted split predicts 27.6 minutes of test time on the slowest of six
+#: shards, 23.4 of seven and 20.8 of eight.  Six keeps a push at 19 jobs, so
+#: three runs at once fit the organisation's 60.
+PER_PUSH_SHARDS = 6
 
-#: The suffix of a shard spec that asks for the weighted split.
+#: The suffix of a shard spec that asks for the slow lane's weighted split.
 WEIGHTED = "weighted"
+#: ... and for the per-push lane's.
+WEIGHTED_PUSH = "weighted-push"
 #: The job count ``slow-tests.yml`` runs per JAX version.  Ten, not the
 #: six of the per-push lane: the measured lane is 635 minutes of tests
 #: (each file's slower JAX version, 2026-10-10; 477 three days earlier),
@@ -94,10 +86,13 @@ WEIGHTED = "weighted"
 #: lane's 24): they are the next step.  The heaviest file alone is 49
 #: minutes, so past twelve the step is to split that file.
 SLOW_LANE_SHARDS = 10
-#: Measured seconds per test file for the weighted split, next to this
-#: module.  ``scripts/slow_lane_weights.py`` writes it from the JUnit
-#: artifacts of a slow-lane run and prints the minutes it predicts per shard.
+#: Measured seconds per test file for each weighted split, next to this
+#: module.  ``scripts/slow_lane_weights.py`` writes them from the JUnit
+#: artifacts of a run and prints the minutes it predicts per shard.
 WEIGHTS_FILE = Path(__file__).with_name("slow_lane_weights.json")
+PER_PUSH_WEIGHTS_FILE = Path(__file__).with_name("per_push_weights.json")
+#: ``{suffix of a shard spec: its table}``.
+TABLES = {WEIGHTED: WEIGHTS_FILE, WEIGHTED_PUSH: PER_PUSH_WEIGHTS_FILE}
 
 #: The JUnit report's property holding the seconds from the session's start
 #: to the end of collection: the runner's speed, measured on the same work
@@ -145,22 +140,23 @@ def record_suite_property(config, name: str, value: str) -> bool:
     return True
 
 
-def parse(spec: str) -> tuple[int, int, bool]:
-    """``"i/N"`` or ``"i/N:weighted"`` -> ``(i, N, weighted)``, 1 <= i <= N.
+def parse(spec: str) -> tuple[int, int, str | None]:
+    """``"i/N"`` or ``"i/N:<table>"`` -> ``(i, N, table suffix or None)``, 1 <= i <= N.
 
-    Anything else is an error, an unknown suffix included: a misspelt
-    ``:weighted`` must not fall back to the hash split unnoticed.
+    The suffix is one of ``TABLES``.  Anything else is an error, an unknown
+    suffix included: a misspelt ``:weighted`` must not fall back to the hash
+    split unnoticed.
     """
     counts, colon, plan = spec.partition(":")
-    if colon and plan != WEIGHTED:
-        raise pytest.UsageError(f"{ENV_VAR}={spec!r}: the only suffix is ':{WEIGHTED}'")
+    if colon and plan not in TABLES:
+        raise pytest.UsageError(f"{ENV_VAR}={spec!r}: the suffixes are {', '.join(':' + t for t in TABLES)}")
     # Digits only: int() would also take " 6", "+6" and "1_0".
     if not re.fullmatch(r"[0-9]+/[0-9]+", counts):
         raise pytest.UsageError(f"{ENV_VAR}={spec!r}: expected 'i/N' or 'i/N:{WEIGHTED}', e.g. '2/4'")
     i, n = (int(x) for x in counts.split("/"))
     if not 1 <= i <= n:
         raise pytest.UsageError(f"{ENV_VAR}={spec!r}: need 1 <= i <= N")
-    return i, n, bool(colon)
+    return i, n, plan if colon else None
 
 
 def _by_hash(path: str, n: int) -> int:
@@ -169,9 +165,7 @@ def _by_hash(path: str, n: int) -> int:
 
 
 def shard_of(path: str, n: int) -> int:
-    """The 1-based shard of a test file, out of ``n`` (the per-push split)."""
-    if n == PINS_FOR and path in PINS:
-        return PINS[path]
+    """The 1-based shard of a test file, out of ``n``, by the hash of its path alone."""
     return _by_hash(path, n)
 
 
@@ -209,7 +203,7 @@ def weighted_shard_of(path: str, n: int, dealt: dict[str, int]) -> int:
 
     ``dealt`` is ``deal(weights, n)``.  A file it does not list -- a new
     one, or one too light to be in the table -- goes by the hash of its
-    path, never by a pin: the pins balance the per-push lane.
+    path.
     """
     return dealt[path] if path in dealt else _by_hash(path, n)
 
@@ -256,9 +250,6 @@ class Plugin:
 
 
 def register(config, spec: str):
-    shard, of, weighted = parse(spec)
-    for path, pinned in PINS.items():
-        if not 1 <= pinned <= PINS_FOR:
-            raise pytest.UsageError(f"tests/_sharding.py pins {path} to shard {pinned} of {PINS_FOR}")
-    weights = load_weights() if weighted else None
+    shard, of, plan = parse(spec)
+    weights = load_weights(TABLES[plan]) if plan else None
     config.pluginmanager.register(Plugin(shard, of, weights), "maddening-test-shard")

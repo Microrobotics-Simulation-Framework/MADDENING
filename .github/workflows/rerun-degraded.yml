@@ -71,6 +71,11 @@ jobs:
           MARKER_PREFIX = "degraded-runner-"
           #: A job in one of these states did not fail.
           NOT_FAILED = {"success", "skipped", "neutral"}
+          #: Report-only jobs of ci.yml that depend on the test jobs and fail only when a whole lane
+          #: left no report ("Test durations (<jax>)").  When every shard of a lane stopped at the
+          #: canary they fail too, and `gh run rerun --failed` re-runs them with their dependencies;
+          #: their failure does not count as a reason not to.  On their own they never cause a re-run.
+          DEPENDENTS = ("Test durations",)
 
 
           def decide(run, jobs, artifacts):
@@ -80,7 +85,8 @@ jobs:
               if int(run.get("run_attempt") or 0) != 1:
                   return False, f"this is attempt {run.get('run_attempt')}: a run is re-run once"
               markers = {a["name"] for a in artifacts if not a.get("expired")}
-              bad = [j for j in jobs if j.get("conclusion") not in NOT_FAILED]
+              bad = [j for j in jobs if j.get("conclusion") not in NOT_FAILED
+                     and not str(j.get("name", "")).startswith(DEPENDENTS)]
               if not bad:
                   return False, "no job failed"
               unmarked = []

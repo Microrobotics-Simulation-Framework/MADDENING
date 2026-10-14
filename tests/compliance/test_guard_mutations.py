@@ -1123,6 +1123,9 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("RR7", RR_WF, "    steps:\n      - name: Re-run the failed jobs if every one drew a degraded runner",
        "    steps:\n      - uses: actions/checkout@v4\n      - name: Re-run the failed jobs if every one drew a degraded runner",
        RERUN, "the re-run workflow checks out the run's code"),
+    _M("RR8", RR_WF, '                     and not str(j.get("name", "")).startswith(DEPENDENTS)]',
+       "                     ]", RERUN,
+       "a lane whose six shards all drew degraded runners is never re-run: its summary job fails too and counts"),
     # --- GN: the weights generator's CPU normalisation (P0.3b) --------------------
     _M("GN1", SLW, "                 {p: s / factors.get(u.cpu, 1.0) for p, s in u.files.items()}, u.cache, u.run)",
        "                 {p: s for p, s in u.files.items()}, u.cache, u.run)", NORMALISE,

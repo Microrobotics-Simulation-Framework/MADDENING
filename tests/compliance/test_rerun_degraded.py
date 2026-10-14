@@ -143,6 +143,19 @@ def test_a_failed_run_with_no_failed_job_is_not_rerun(script):
     assert script.decide(RUN, [GOOD], [])[0] is False
 
 
+def test_the_lane_summary_failing_because_every_shard_was_degraded_does_not_block_the_rerun(script):
+    # When all six shards of a lane stop at the canary, "Test durations (<jax>)" finds no report and
+    # fails: a consequence of the degraded jobs, re-run with them.  A test job that failed for real
+    # beside them still blocks, and the summary alone never causes a re-run.
+    summary = {"id": 30, "name": "Test durations (0.10.2)", "conclusion": "failure", "steps": []}
+    degraded = [_job(i, f"test (3.12, 0.10.2, {i})") for i in range(1, 4)]
+    markers = [_marker(i) for i in range(1, 4)]
+    assert script.decide(RUN, [*degraded, summary], markers)[0] is True
+    real = _job(13, "test (3.12, 0.11.2, 5)", "failure", "success")
+    assert script.decide(RUN, [*degraded, summary, real], markers)[0] is False
+    assert script.decide(RUN, [GOOD, summary], [])[0] is False
+
+
 def test_a_marker_for_another_job_does_not_mark_this_one(script):
     assert script.decide(RUN, [_job(12, "t")], [_marker(21)])[0] is False
 

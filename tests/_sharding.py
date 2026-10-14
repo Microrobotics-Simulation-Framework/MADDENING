@@ -262,9 +262,8 @@ def deal(weights: dict[str, int], n: int,
     shards = {}
     for path, seconds in sorted(weights.items(), key=lambda kv: (-kv[1], kv[0])):
         held = taken.setdefault(group[path], set()) if path in group else set()
-        lightest = min((k for k in range(n) if k not in held), key=lambda k: (load[k], k), default=None)
-        if lightest is None:
-            lightest = min(range(n), key=lambda k: (load[k], k))
+        free = [k for k in range(n) if k not in held] or list(range(n))
+        lightest = min(free, key=lambda k: (load[k], k))
         shards[path] = lightest + 1
         load[lightest] += seconds
         held.add(lightest)

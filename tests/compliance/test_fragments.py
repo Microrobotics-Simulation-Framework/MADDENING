@@ -699,9 +699,10 @@ class TestTheRatchet:
         root, base = self._merged(tmp_path)
         (root / _anomaly_file("fix-b")).unlink()
         _commit(root, "drop it")
-        found = check_fragments.findings(root, base)
-        assert any(f"{L('fix-b', 1)} is in {base}'s fragments" in f for f in found), found
-        assert check_fragments.findings(root) == []           # nothing else sees it
+        for line in (base, None):                     # the base's history, or HEAD's
+            found = check_fragments.findings(root, line)
+            assert any(f"{L('fix-b', 1)} came into the line in {base[:10]}" in f
+                       for f in found), found
 
     def test_deleting_one_entry_of_a_merged_fragment_fails(self, tmp_path):
         root, base = self._merged(tmp_path)
@@ -724,7 +725,8 @@ class TestTheRatchet:
     def test_an_unreadable_base_fails_closed(self, tmp_path):
         root, _ = self._merged(tmp_path)
         found = check_fragments.findings(root, "no-such-ref")
-        assert any("the ratchet cannot read no-such-ref" in f for f in found), found
+        assert any("the ratchet cannot check" in f and "no-such-ref" in f
+                   for f in found), found
 
 
 class TestTheReleaseGate:
@@ -810,7 +812,7 @@ class TestSeededFaults:
         base = _git(root, "rev-parse", "HEAD").strip()
         (root / _anomaly_file("fix-b")).unlink()
         _commit(root, "drop")
-        assert any("a merged fragment was deleted" in f
+        assert any("a merged fragment, or an entry of one, was deleted" in f
                    for f in check_fragments.findings(root, base))
 
     def test_a_duplicated_entry(self, assembled, gate, capsys):
@@ -979,7 +981,7 @@ def test_the_compliance_job_runs_the_ratchet_against_the_right_base(tmp_path):
     fake.chmod(0o755)
     for event, base, want in (
             ("pull_request", "release/0.4.2", "scripts/check_fragments.py --base origin/release/0.4.2"),
-            ("push", "", "scripts/check_fragments.py --base HEAD^1")):
+            ("push", "", "scripts/check_fragments.py")):
         out = tmp_path / f"{event}.txt"
         env = {"PATH": f"{fake.parent}:{os.environ['PATH']}", "OUT": str(out),
                "EVENT": event, "BASE_REF": base}

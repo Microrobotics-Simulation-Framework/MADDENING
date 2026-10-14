@@ -632,11 +632,14 @@ jobs:
 
       # Changelog and registry fragments (scripts/fragments.py): every label
       # live and spelled one way, every assembled entry recording its label,
-      # the release gate at a version without .dev, and the ratchet: a label
-      # the base's fragments held must survive here, in a fragment or as a
-      # label the registry records, so a merged fragment cannot be deleted
-      # unnoticed.  The base is the pull request's target branch, or the
-      # first parent on a push; fetch-depth 0 above provides both.
+      # the release gate at a version without .dev, and the ratchet over the
+      # line's whole first-parent history: every label and changes fragment
+      # the line ever merged survives here, in a fragment, as a label the
+      # registry records, or as text the release assembly wrote.  So a merged
+      # fragment cannot be deleted unnoticed, however many commits a push
+      # holds.  The line is the pull request's target branch (so the branch's
+      # own commits before it merges are not read), or HEAD on a push;
+      # fetch-depth 0 above provides the whole history.
       - name: Check changelog and registry fragments
         env:
           EVENT: ${{ github.event_name }}
@@ -645,7 +648,7 @@ jobs:
           if [ "$EVENT" = "pull_request" ]; then
             python scripts/check_fragments.py --base "origin/$BASE_REF"
           else
-            python scripts/check_fragments.py --base HEAD^1
+            python scripts/check_fragments.py
           fi
 
       - name: Check implementation mapping

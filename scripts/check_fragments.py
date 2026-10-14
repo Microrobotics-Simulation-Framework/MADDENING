@@ -32,13 +32,23 @@ the fragments to the scheme, on every push:
   recorded twice.  So a hand-numbered new entry fails.
 * **The release gate.**  At a version without ``.dev`` (``rc`` included): no
   file under ``docs/fragments/`` but the README, no label anywhere, an empty
-  ``## [Unreleased]``, and a ``docs/release_notes/vX.Y.Z.md``.
-* **The ratchet** (``--base REF``): every label in REF's fragments is still in
-  a fragment here, or recorded by the registry.  Deleting a merged fragment
-  turned nothing red otherwise: the SOUP table never listed it and the
-  high-water mark never counted it.  A wrong entry is closed (``duplicate``,
-  ``resolved``), never deleted.  CI passes the pull request's base, or
-  ``HEAD^1`` on a push.
+  Unreleased section (``## [Unreleased]``, ``## Unreleased``, in any case),
+  and a ``docs/release_notes/vX.Y.Z.md``.  At any version, ``CHANGELOG.md``
+  has one ``## [X.Y.Z]`` section per version.
+* **The ratchet, over the line's whole history.**  Every label ever added
+  under ``docs/fragments/anomalies/`` in the line's first-parent history is
+  still in a fragment here, or recorded by the registry; every changes
+  fragment ever added there is still here, or each of its changelog bullets
+  is in ``CHANGELOG.md`` and each release-notes block in a notes file (as the
+  release assembly writes them).  Deleting a merged fragment turned nothing
+  red otherwise: the SOUP table never listed it and the high-water mark never
+  counted it.  A wrong entry is closed (``duplicate``, ``resolved``), never
+  deleted.  The line is ``HEAD`` (a push), or ``--base REF`` (a pull request:
+  its base, so that the branch's own unmerged history is not read).  How many
+  commits a push holds does not matter: every commit of the line is read.
+* **A recorded label has a history.**  A registry ``# label:`` comment names
+  a label some fragment in this tree's history held (any parent), so a
+  hand-written comment does not pass as an assembled one.
 
 Entry fields themselves (the schema, references, evidence, ranges) are
 ``scripts/check_anomalies.py``'s: it reads the registry and the fragments as
@@ -50,6 +60,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -229,8 +240,13 @@ def label_findings(root: Path, live: set, recorded: dict, registry_text: str) ->
     return out
 
 
-def label_record_findings(registry_text: str) -> list[str]:
-    """Invariant 5.4: each entry from FRAGMENTS_FROM on records exactly one label."""
+def label_record_findings(registry_text: str, held=None) -> list[str]:
+    """Invariant 5.4: each entry from FRAGMENTS_FROM on records exactly one label.
+
+    ``held`` is every label a fragment in the tree's history held
+    (:func:`history`); when given, a recorded label outside it is refused: the
+    comment was written by hand, not by the assembler.
+    """
     out = []
     lines = registry_text.splitlines()
     starts = [(i, int(m.group(1))) for i, ln in enumerate(lines)
@@ -258,84 +274,237 @@ def label_record_findings(registry_text: str) -> list[str]:
     for lab, ids in F.recorded_labels(registry_text).items():
         if len(ids) > 1:
             out.append(f"{F.REGISTRY}: {lab} is recorded {len(ids)} times ({ids})")
+        if held is not None and lab not in held:
+            out.append(f"{F.REGISTRY}: {', '.join(ids)} records {lab}, which no fragment "
+                       f"in this tree's history ever held.  The '# label:' comment is "
+                       f"written by scripts/fragments.py assemble when it numbers a "
+                       f"fragment's entry; do not number an entry or write the comment "
+                       f"by hand")
     return out
 
 
-def release_findings(root: Path, version: str, live: set) -> list[str]:
+#: Every spelling of the Unreleased heading the release gate reads: with or
+#: without brackets, in any case.
+UNRELEASED_RE = re.compile(r"^##[ \t]+\[?unreleased\]?[ \t]*$", re.M | re.I)
+#: A version's changelog heading, ``## [X.Y.Z]`` with or without a date.
+VERSION_HEADING_RE = re.compile(r"^## \[(\d[^\]\s]*)\]", re.M)
+
+
+def is_tagged(root: Path, version: str) -> bool:
+    """Is ``v<version>`` a tag here (the release is out)?"""
+    return bool(F.git(root, "rev-parse", "-q", "--verify", f"refs/tags/v{version}^{{commit}}",
+                      check=False).strip())
+
+
+def changelog_findings(root: Path) -> list[str]:
+    """One ``## [X.Y.Z]`` section per version, at any version of the tree."""
+    changelog = (root / F.CHANGELOG).read_text(encoding="utf-8")
+    seen: dict[str, int] = {}
+    for m in VERSION_HEADING_RE.finditer(changelog):
+        if m.group(1).lower() != "unreleased":
+            seen[m.group(1)] = seen.get(m.group(1), 0) + 1
+    return [f"{F.CHANGELOG} has {n} '## [{v}]' sections; a version has one (a second "
+            f"release assembly adds to the first)" for v, n in seen.items() if n > 1]
+
+
+def release_findings(root: Path, version: str, live: set, leftover_why: str | None = None) -> list[str]:
+    """The release gate, at a version without ``.dev``.  ``leftover_why`` replaces
+    the reason given for a fragment still here (the assembler says it deferred it)."""
     if F.is_dev(version):
         return []
     out = []
-    for path in F.fragment_paths(root):
-        rel = path.relative_to(root).as_posix()
-        if rel != F.README:
-            out.append(f"{rel}: {version} is a release version and this fragment was "
-                       f"never assembled (scripts/fragments.py assemble --release)")
+    base = F.base_of(version)
+    changelog = (root / F.CHANGELOG).read_text(encoding="utf-8")
+    leftovers = [p.relative_to(root).as_posix() for p in F.fragment_paths(root)
+                 if p.relative_to(root).as_posix() != F.README]
+    if leftover_why is not None:
+        why = leftover_why
+    elif leftovers and is_tagged(root, base):
+        why = (f"v{base} is tagged, so {base} is out and this fragment belongs to the "
+               f"next version: bump the tree to the next .dev0 version, and the fragment "
+               f"waits for that release's assembly")
+    elif leftovers and re.search(rf"^## \[{re.escape(base)}\]", changelog, re.M):
+        why = (f"{version} is a release version and this fragment arrived after its "
+               f"release assembly: run scripts/fragments.py assemble --release {base} "
+               f"again, which adds it to the existing '## [{base}]' section")
+    else:
+        why = (f"{version} is a release version and this fragment was never assembled "
+               f"(scripts/fragments.py assemble --release {base})")
+    out += [f"{rel}: {why}" for rel in leftovers]
     for path, line_no, _ in F.tracked_label_hits(root):
         out.append(f"{path}:{line_no}: a provisional label at release version {version}")
-    changelog = (root / F.CHANGELOG).read_text(encoding="utf-8")
-    m = re.search(r"^## \[Unreleased\][ \t]*\n", changelog, re.M)
-    if m:
-        nxt = re.search(r"^## \[", changelog[m.end():], re.M)
+    for m in UNRELEASED_RE.finditer(changelog):
+        nxt = re.search(r"^## ", changelog[m.end():], re.M)
         body = changelog[m.end():m.end() + nxt.start()] if nxt else changelog[m.end():]
         if body.strip():
-            out.append(f"{F.CHANGELOG}: '## [Unreleased]' is not empty at release "
+            out.append(f"{F.CHANGELOG}: '{m.group(0).strip()}' is not empty at release "
                        f"version {version}; the release assembly writes the section")
-    notes = root / F.NOTES_DIR / f"v{F.base_of(version)}.md"
+    notes = root / F.NOTES_DIR / f"v{base}.md"
     if not notes.is_file():
         out.append(f"{notes.relative_to(root).as_posix()} is missing at release "
                    f"version {version}")
     return out
 
 
-def _labels_at(root: Path, ref: str) -> tuple[set, str | None]:
-    """The labels REF's anomalies fragments define (read from their id lines)."""
+# ---------------------------------------------------------------------------
+# The history: what the line ever merged
+# ---------------------------------------------------------------------------
+
+_ADDED_ID_LINE = re.compile(r'^\+[ \t]*-[ \t]*anomaly_id:[ \t]*["\']?(MADD-ANO-NEW-[A-Za-z0-9-]+)')
+
+
+class History:
+    """What a line's history added under ``docs/fragments/``.
+
+    ``labels``: every label an anomalies fragment of the line ever held, read
+    from the first-parent history (each merge as its diff against the line,
+    so a branch's own commits before it merged are never read), with the
+    commit that brought it.  ``held``: every label any fragment held in any
+    commit reachable from ``HEAD``, every parent (``# label:`` comments must
+    name one).  ``changes``: every changes fragment the line ever added, with
+    the commit that added it.  ``error``: why the history could not be read
+    (the ratchet then fails closed).
+    """
+
+    def __init__(self):
+        self.labels: dict[str, str] = {}
+        self.held: set[str] = set()
+        self.changes: dict[str, str] = {}
+        self.error: str | None = None
+
+
+def _added_labels(log: str) -> dict[str, str]:
+    """``{label: commit}`` for every label an id line adds in ``log``
+    (``git log -p --format=%x00%H``), the oldest commit first."""
+    found: dict[str, str] = {}
+    for chunk in log.split("\0")[1:]:
+        sha, _, patch = chunk.partition("\n")
+        for line in patch.splitlines():
+            if line.startswith("+++"):
+                continue
+            m = _ADDED_ID_LINE.match(line)
+            if m and F.LABEL_RE.fullmatch(m.group(1)):
+                found.setdefault(m.group(1), sha.strip())
+    return found
+
+
+def history(root: Path, line: str = "HEAD") -> History:
+    """The :class:`History` of ``line`` (a ref), and of ``HEAD`` for ``held``."""
+    h = History()
     try:
-        listing = F.git(root, "ls-tree", "-r", "--name-only", ref, "--", F.ANOMALIES)
+        if F.git(root, "rev-parse", "--is-shallow-repository").strip() != "false":
+            h.error = ("this is a shallow clone, and the ratchet reads the whole history "
+                       "(CI: fetch-depth 0; here: git fetch --unshallow)")
+            return h
+        first_parent = ("log", "--first-parent", "--diff-merges=first-parent", "--no-renames",
+                        "--reverse", "--format=%x00%H")
+        h.labels = _added_labels(F.git(root, *first_parent, "-p", line, "--", F.ANOMALIES))
+        h.held = set(_added_labels(F.git(root, "log", "-m", "--no-renames", "-p",
+                                         "--format=%x00%H", "HEAD", "--", F.ANOMALIES)))
+        log = F.git(root, *first_parent, "--diff-filter=A", "--name-only", line, "--",
+                    F.CHANGES)
+        for chunk in log.split("\0")[1:]:
+            sha, _, names = chunk.partition("\n")
+            for rel in names.splitlines():
+                if rel.strip().endswith(".yaml"):
+                    h.changes.setdefault(rel.strip(), sha.strip())
     except RuntimeError as exc:
-        return set(), f"--base {ref}: {exc}"
-    found = set()
-    for rel in listing.splitlines():
-        if not rel.endswith(".yaml"):
+        h.error = f"the history of {line} cannot be read: {exc}"
+    return h
+
+
+def _last_text(root: Path, line: str, rel: str) -> str | None:
+    """``rel`` as the line last held it: at ``line``, or just before the
+    first-parent commit that deleted it."""
+    here = F.git(root, "show", f"{line}:{rel}", check=False)
+    if here:
+        return here
+    gone = F.git(root, "log", "--first-parent", "--diff-merges=first-parent", "--no-renames",
+                 "--diff-filter=D", "--format=%H", "-1", line, "--", rel, check=False).strip()
+    if not gone:
+        return None
+    return F.git(root, "show", f"{gone}^1:{rel}", check=False) or None
+
+
+def _not_merged_hint(root: Path, sha: str) -> str:
+    """A hint when ``sha`` (from the base's history) is not in this branch yet."""
+    done = subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor", sha,
+                           "HEAD"], capture_output=True)
+    return "" if done.returncode == 0 else (
+        "  (This branch does not hold that commit yet: merge the base in.)")
+
+
+def ratchet_findings(root: Path, hist: History, live: set, recorded: dict,
+                     line: str = "HEAD") -> list[str]:
+    """Nothing the line ever merged under ``docs/fragments/`` was dropped."""
+    if hist.error:
+        return [f"the ratchet cannot check that no merged fragment was deleted: "
+                f"{hist.error}"]
+    out = []
+    for lab, sha in sorted(hist.labels.items()):
+        if lab not in live and lab not in recorded:
+            out.append(f"{lab} came into the line in {sha[:10]} and is in no fragment "
+                       f"here, nor recorded by the registry: a merged fragment, or an "
+                       f"entry of one, was deleted or renamed.  A wrong entry is closed "
+                       f"(resolution_status duplicate or resolved), never deleted"
+                       + _not_merged_hint(root, sha))
+    changelog = (root / F.CHANGELOG).read_text(encoding="utf-8")
+    notes = "\n".join(p.read_text(encoding="utf-8")
+                      for p in sorted((root / F.NOTES_DIR).glob("v*.md")))
+    mapping = {lab: ids[0] for lab, ids in recorded.items() if len(ids) == 1}
+    for rel, sha in sorted(hist.changes.items()):
+        if (root / rel).is_file():
             continue
-        text = F.git(root, "show", f"{ref}:{rel}")
-        for aid, _ in F.entry_blocks(text):
-            if F.LABEL_RE.fullmatch(aid):
-                found.add(aid)
-        found |= {m.group(1) for m in re.finditer(
-            r'^\s*-\s*anomaly_id:\s*["\']?(MADD-ANO-NEW-[a-z0-9-]+)', text, re.M)
-            if F.LABEL_RE.fullmatch(m.group(1))}
-    return found, None
-
-
-def ratchet_findings(root: Path, base: str, live: set, recorded: dict) -> list[str]:
-    before, problem = _labels_at(root, base)
-    if problem:
-        return [f"the ratchet cannot read {base}'s fragments, so nothing it held can "
-                f"be shown to survive: {problem}"]
-    return [f"{lab} is in {base}'s fragments and in no fragment here, nor recorded "
-            f"by the registry: a merged fragment was deleted.  A wrong entry is closed "
-            f"(resolution_status duplicate or resolved), never deleted"
-            for lab in sorted(before - live - set(recorded))]
+        text = _last_text(root, line, rel)
+        try:
+            data = F.load_yaml(text) if text else None
+        except Exception:   # yaml.YAMLError: a fragment the gate refused, merged anyway
+            data = None
+        if not isinstance(data, dict):
+            out.append(f"{rel} came into the line in {sha[:10]} and is gone, and its last "
+                       f"text cannot be read to show it was assembled")
+            continue
+        for sec, items in (data.get("changelog") or {}).items():
+            for item in items if isinstance(items, list) else []:
+                bullet = F.render_bullet(F.rewrite_labels(str(item), mapping)[0])
+                if bullet not in changelog:
+                    out.append(f"{rel} came into the line in {sha[:10]} and is gone, but "
+                               f"its {sec} bullet is not in {F.CHANGELOG}: "
+                               f"{' '.join(str(item).split())[:70]!r}.  A merged changes "
+                               f"fragment leaves only by a release assembly"
+                               + _not_merged_hint(root, sha))
+        for heading, block in (data.get("release_notes") or {}).items():
+            text = F.rewrite_labels(str(block), mapping)[0].strip()
+            if text and text not in notes:
+                out.append(f"{rel} came into the line in {sha[:10]} and is gone, but its "
+                           f"{heading!r} release-notes text is in no notes file: "
+                           f"{' '.join(text.split())[:70]!r}.  A merged changes fragment "
+                           f"leaves only by a release assembly"
+                           + _not_merged_hint(root, sha))
+    return out
 
 
 def findings(root, base: str | None = None, release_gate: bool = True) -> list[str]:
     """Every finding of the gate; ``release_gate=False`` leaves out the release
     gate alone (the assembler's preflight: a release assembly is what clears
-    it)."""
+    it).  ``base`` is the line whose history the ratchet reads (default
+    ``HEAD``)."""
     root = Path(root)
     version = F.tree_version(root)
     tree_line = F.line_of(version)
     registry_text = (root / F.REGISTRY).read_text(encoding="utf-8")
     recorded = F.recorded_labels(registry_text)
+    line = base or "HEAD"
+    hist = history(root, line)
     out = layout_findings(root)
     fmt, live = format_findings(root, tree_line, recorded)
     out += fmt
     out += label_findings(root, live, recorded, registry_text)
-    out += label_record_findings(registry_text)
+    out += label_record_findings(registry_text, None if hist.error else hist.held)
+    out += changelog_findings(root)
     if release_gate:
         out += release_findings(root, version, live)
-    if base:
-        out += ratchet_findings(root, base, live, recorded)
+    out += ratchet_findings(root, hist, live, recorded, line)
     return out
 
 
@@ -343,8 +512,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--base", metavar="REF",
-                    help="also refuse any label REF's fragments hold that this tree "
-                         "neither keeps in a fragment nor records in the registry")
+                    help="the line whose history the ratchet reads: a pull request's "
+                         "base (default: HEAD, the checked-out line)")
     ap.add_argument("--root", type=Path, default=F.REPO_ROOT,
                     help="the repository to check (default: the one holding this script)")
     args = ap.parse_args(argv)
@@ -355,8 +524,11 @@ def main(argv=None) -> int:
     if problems:
         return 1
     n = len([p for p in F.fragment_paths(root) if p.relative_to(root).as_posix() != F.README])
-    print(f"OK: {n} fragment(s), every label live, every assembled entry records its "
-          f"label" + (f", nothing {args.base} held was dropped" if args.base else ""))
+    print(f"OK: {n} fragment(s); every label live and spelled one way; every assembled "
+          f"entry records its label, and every recorded label was a fragment's; of what "
+          f"fragments brought into the history of {args.base or 'HEAD'}, nothing was "
+          f"dropped (each label live or recorded, each changelog bullet and notes text "
+          f"live or assembled)")
     return 0
 
 

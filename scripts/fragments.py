@@ -79,9 +79,14 @@ SOUP_GENERATOR = "scripts/generate_soup_tables.py"
 STEM = r"[a-z0-9]+(?:-[a-z0-9]+)*"
 STEM_RE = re.compile(STEM)
 
+#: ``<n>`` of a label: 1, 2, ... with no leading zero, so that one number has
+#: one spelling (``-01`` and ``-1`` would otherwise be two labels the
+#: registry records as one).
+N = r"[1-9][0-9]*"
+
 #: The one spelling of a provisional label.
 LABEL_RE = re.compile(
-    rf"(?<![A-Za-z0-9_])MADD-ANO-NEW-({STEM})-([0-9]+)(?![A-Za-z0-9_-])")
+    rf"(?<![A-Za-z0-9_])MADD-ANO-NEW-({STEM})-({N})(?![A-Za-z0-9_-])")
 
 #: Anything that sets out to be a label: ``MADD``, ``ANO`` and ``NEW`` in any
 #: case, joined by ``-``, ``_``, a space or nothing, then a separator and a
@@ -92,7 +97,7 @@ ATTEMPT_RE = re.compile(
     r"(?<![A-Za-z0-9_])MADD[-_ ]?ANO[-_ ]?NEW[-_ ](?=[A-Za-z0-9])", re.I)
 
 #: The comment the assembler writes right after an assembled entry's id line.
-LABEL_COMMENT_RE = re.compile(rf"^    # label: NEW-({STEM})-([0-9]+)[ \t]*$", re.M)
+LABEL_COMMENT_RE = re.compile(rf"^    # label: NEW-({STEM})-({N})[ \t]*$", re.M)
 #: Any comment line that claims to record a label, whatever its layout.
 ANY_LABEL_COMMENT_RE = re.compile(r"^[ \t]*#[ \t]*label[ \t]*:", re.M | re.I)
 #: A canonical registry id line, as ``check_anomalies.py`` requires it.
@@ -143,10 +148,16 @@ def numbered(n: int) -> str:
 
 
 def load_yaml(text: str):
+    """``yaml.safe_load``: the loader every reader of these files uses.
+
+    Never libyaml's: it reads some text the pure-Python loader refuses (a tab
+    after a colon, a block scalar's header followed by a comment without a
+    space), so a fragment the gates read with it could fail its assembly,
+    whose SOUP generator and validator use ``yaml.safe_load``.
+    """
     import yaml
 
-    loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
-    return yaml.load(text, Loader=loader)
+    return yaml.safe_load(text)
 
 
 def git(root, *args, check=True, binary=False):
@@ -309,15 +320,39 @@ def retired_numbers(root) -> set[int]:
 
 def tracked_label_hits(root) -> list[tuple[str, int, str]]:
     """``(path, line, text)`` for every attempted label in a tracked file."""
-    out = git(root, "grep", "-n", "-I", "-i", "-E",
+    # -z: a path is followed by NUL, never quoted or split on a space or a
+    # colon.
+    out = git(root, "grep", "-n", "-z", "-I", "-i", "-E",
               r"MADD[-_ ]?ANO[-_ ]?NEW[-_ ][A-Za-z0-9]", check=False)
     hits = []
     for row in out.splitlines():
-        path, _, rest = row.partition(":")
-        number, _, text = rest.partition(":")
-        if number.isdigit():
-            hits.append((path, int(number), text))
+        parts = row.split("\0", 2)
+        if len(parts) == 3 and parts[1].isdigit():
+            hits.append((parts[0], int(parts[1]), parts[2]))
     return hits
+
+
+def git_paths(root, *args) -> list[str]:
+    """The paths a ``git`` command lists with ``-z``, split on NUL.
+
+    A path with a space, a colon or a non-ASCII character comes back whole
+    and unquoted, which a split on whitespace or lines does not give.
+    """
+    return [p for p in git(root, *args, check=False).split("\0") if p]
+
+
+def files_naming(root, needle: str) -> list[str]:
+    """Every tracked text file that holds ``needle``, as a fixed string."""
+    return git_paths(root, "grep", "-l", "-z", "-I", "-F", needle)
+
+
+def next_label_number(registry_text: str, stem: str) -> int:
+    """The first ``<n>`` a fragment of ``stem`` may use: one past every
+    label of that stem the registry records (a stem reused after its
+    fragment was assembled starts after the old labels)."""
+    used = [int(m.group(2)) for m in map(LABEL_RE.fullmatch, recorded_labels(registry_text))
+            if m and m.group(1) == stem]
+    return max(used, default=0) + 1
 
 
 # ---------------------------------------------------------------------------
@@ -509,10 +544,8 @@ def cmd_new(args, root: Path) -> int:
             return 2
         if kind == "anomalies":
             text = (root / REGISTRY).read_text(encoding="utf-8")
-            used = [int(m.group(2)) for m in map(LABEL_RE.fullmatch, recorded_labels(text))
-                    if m and m.group(1) == stem]
             body = _ANOMALIES_TEMPLATE.format(
-                line=line_of(version), label=label(stem, max(used, default=0) + 1),
+                line=line_of(version), label=label(stem, next_label_number(text, stem)),
                 first=f"{base_of(version)}.dev0")
         else:
             body = _CHANGES_TEMPLATE.format(
@@ -535,8 +568,11 @@ class AssemblyError(RuntimeError):
 
 def merge_order(root, rels: list[str]) -> dict[str, int]:
     """Where each fragment entered this line's first-parent history."""
+    # --no-renames: a fragment renamed after it merged is an addition under
+    # its new name, not hidden as a rename (and the gate's history ratchet
+    # refuses the old name's disappearance).
     out = git(root, "log", "--first-parent", "--reverse", "--diff-filter=A",
-              "--name-only", "--format=%x00%H", "--", FRAGMENTS)
+              "--no-renames", "--name-only", "--format=%x00%H", "--", FRAGMENTS)
     order: dict[str, int] = {}
     for n, chunk in enumerate(out.split("\x00")):
         for path in chunk.splitlines()[1:]:
@@ -587,20 +623,95 @@ def _write_index(record: str, rel: str, lines: list[tuple[str, bool]]) -> str:
     return record[:at] + live + record[at:tail] + closed + record[tail:]
 
 
-def _changelog_section(version: str, date: str, bullets: dict[str, list[str]],
-                       count: str) -> str:
-    out = [f"## [{version}] - {date}\n"]
+def canonical_bullet(text) -> str:
+    """A bullet's text as a release section carries it: verbatim, but for
+    the whitespace around it and the spaces on a line holding nothing else."""
+    return "\n".join(ln if ln.strip() else "" for ln in str(text).strip().split("\n"))
+
+
+def render_bullet(text) -> str:
+    """A changelog bullet as a release section holds it.
+
+    ``- `` before the first line, and two spaces before every later line that
+    is not blank, which keeps a multi-line bullet, a nested list and a code
+    fence inside its list item.  The text is otherwise carried verbatim
+    (:func:`canonical_bullet`): a leading ``- `` of its own, inner spacing and
+    code stay as written.
+    """
+    lines = canonical_bullet(text).split("\n")
+    return "\n".join(["- " + lines[0]] + [("  " + ln) if ln else "" for ln in lines[1:]])
+
+
+def unrender_bullet(block: str) -> str:
+    """The text :func:`render_bullet` wrote ``block`` from, as
+    :func:`canonical_bullet` gives it.  The assembler's own check that no
+    bullet lost anything on the way."""
+    lines = block.split("\n")
+    first = lines[0][2:] if lines[0].startswith("- ") else lines[0]
+    return "\n".join([first] + [ln[2:] if ln.startswith("  ") else ln for ln in lines[1:]])
+
+
+def _section_parts(section: str):
+    """``(heading line, preamble, [(sub-heading, body)])`` of a release section."""
+    heading, _, rest = section.partition("\n")
+    parts = re.split(r"^### (.+?)[ \t]*$", rest, flags=re.M)
+    return heading, parts[0], [(parts[i], parts[i + 1]) for i in range(1, len(parts), 2)]
+
+
+def _emit_section(heading: str, preamble: str, subs) -> str:
+    out = heading + "\n"
+    if preamble.strip():
+        out += "\n" + preamble.strip("\n") + "\n"
+    for name, body in subs:
+        out += f"\n### {name}\n\n" + body.strip("\n") + "\n"
+    return out + "\n"
+
+
+def release_section(existing: str | None, version: str, date: str,
+                    bullets: dict[str, list[str]], count: str) -> str:
+    """The ``## [version] - date`` section, with ``bullets`` added to
+    ``existing`` (the section an earlier release assembly wrote) or to an
+    empty one.
+
+    Bullets go in the changelog's section order, each after the ones already
+    there; the count of reachable entries replaces the earlier count.  A
+    section with nothing new comes back unchanged, byte for byte.
+    """
+    heading = f"## [{version}] - {date}"
+    preamble, subs = "", []
+    if existing is not None:
+        old_heading, preamble, subs = _section_parts(existing)
+    bodies = {name: body.strip("\n") for name, body in subs}
+    order = [name for name, _ in subs]
+    count_re = re.compile(rf"^- \d+ registry entries are reachable in "
+                          rf"{re.escape(version)}: .*$", re.M)
+    known = bodies.get("Known Anomalies", "")
+    m = count_re.search(known)
+    counted = render_bullet(count)
+    if existing is not None and old_heading == heading and m and m.group(0) == counted \
+            and not any(bullets.get(sec) for sec in CHANGELOG_SECTIONS):
+        return existing
+    if m:
+        known = known[:m.start()] + counted + known[m.end():]
+    else:
+        known = counted + ("\n" + known if known else "")
+    bodies["Known Anomalies"] = known
     for sec in CHANGELOG_SECTIONS:
-        items = list(bullets.get(sec, []))
-        if sec == "Known Anomalies":
-            items = [count] + items
-        if not items:
-            continue
-        out.append(f"\n### {sec}\n\n")
-        for item in items:
-            item = " ".join(str(item).split())
-            out.append(f"{item if item.startswith('- ') else '- ' + item}\n")
-    return "".join(out) + "\n"
+        items = [render_bullet(item) for item in bullets.get(sec, [])]
+        if items:
+            bodies[sec] = "\n".join(([bodies[sec]] if bodies.get(sec) else []) + items)
+    names = ([sec for sec in CHANGELOG_SECTIONS if bodies.get(sec)]
+             + [name for name in order if name not in CHANGELOG_SECTIONS])
+    return _emit_section(heading, preamble, [(name, bodies[name]) for name in names])
+
+
+def version_section_span(changelog: str, version: str):
+    """``[(start, end)]`` of each ``## [version]`` section of a changelog."""
+    spans = []
+    for m in re.finditer(rf"^## \[{re.escape(version)}\][^\n]*(?:\n|\Z)", changelog, re.M):
+        nxt = re.search(r"^## ", changelog[m.end():], re.M)
+        spans.append((m.start(), m.end() + nxt.start() if nxt else len(changelog)))
+    return spans
 
 
 def reachable_count_line(registry: dict, version: str) -> str:
@@ -668,6 +779,12 @@ def _preflight(root: Path, release: str | None) -> tuple[str, str]:
     if release is not None and base_of(version) != release:
         raise AssemblyError(f"--release {release} is not this tree's release "
                             f"({version} builds towards {base_of(version)})")
+    if release is not None and git(root, "rev-parse", "-q", "--verify",
+                                   f"refs/tags/v{release}^{{commit}}", check=False).strip():
+        raise AssemblyError(f"v{release} is tagged: {release} is out, and a fragment that "
+                            f"arrives now belongs to the next version.  Bump the tree to "
+                            f"the next .dev0 version; the fragment waits for that "
+                            f"release's assembly")
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import check_fragments                                   # noqa: PLC0415
 
@@ -782,7 +899,9 @@ def _apply(root, snap, version, line, release, date, take, mapping, appended,
             _notes_append(root, snap, base, "Known anomalies",
                           "\n".join(_wrap(x, subsequent_indent="  ") for x in notes))
 
-    # 5. release only: the changelog section and the release notes
+    # 5. release only: the changelog section and the release notes.  A
+    #    second run (a fragment merged after the first, before the tag) adds
+    #    to the section the first wrote; with nothing new it changes nothing.
     if release is not None:
         bullets: dict[str, list[str]] = {}
         blocks: list[tuple[str, str]] = []
@@ -803,17 +922,30 @@ def _apply(root, snap, version, line, release, date, take, mapping, appended,
         if changelog[m.end():m.end() + nxt.start()].strip():
             raise AssemblyError(f"{CHANGELOG}: '## [Unreleased]' is not empty")
         at = m.end() + nxt.start()
-        section = _changelog_section(release, date, bullets,
-                                     reachable_count_line(reg_now, release))
-        snap.write(CHANGELOG, changelog[:at] + section + changelog[at:])
+        count = reachable_count_line(reg_now, release)
+        spans = version_section_span(changelog, release)
+        if len(spans) > 1:
+            raise AssemblyError(f"{CHANGELOG} has {len(spans)} '## [{release}]' sections")
+        if spans and spans[0][0] != at:
+            raise AssemblyError(f"{CHANGELOG}: '## [{release}]' is not the newest section")
+        if spans:
+            s0, e0 = spans[0]
+            changelog = changelog[:s0] + release_section(
+                changelog[s0:e0], release, date, bullets, count) + changelog[e0:]
+        else:
+            changelog = changelog[:at] + release_section(
+                None, release, date, bullets, count) + changelog[at:]
+        snap.write(CHANGELOG, changelog)
         _notes_append(root, snap, release, None, None)          # the file exists
         for heading, block in blocks:
             _notes_append(root, snap, release, heading, block)
+        if version_parts(release)[2] == 0:
+            _name_every_reachable_entry(root, snap, release, reg_now)
 
     # 6. rewrite every assigned label in every tracked text file, and in the
     #    files this run created (a new notes file is not tracked yet)
     if mapping:
-        hits = git(root, "grep", "-l", "-I", "-F", "MADD-ANO-NEW-", check=False).split()
+        hits = files_naming(root, "MADD-ANO-NEW-")
         created = [rel for rel, data in snap.saved.items() if data is None]
         for rel in sorted(set(hits) | set(created)):
             path = root / rel
@@ -836,7 +968,7 @@ def _apply(root, snap, version, line, release, date, take, mapping, appended,
             raise AssemblyError(f"{SOUP_GENERATOR} failed:\n{done.stdout}{done.stderr}")
 
     # 8. verify the invariants on the files as written
-    _verify(root, take, mapping, appended, hw, k, release, out)
+    _verify(root, take, mapping, appended, hw, k, release, out, snap)
 
 
 def _notes_append(root, snap, version, heading, block):
@@ -855,7 +987,45 @@ def _notes_append(root, snap, version, heading, block):
     snap.write(rel, text)
 
 
-def _verify(root, take, mapping, appended, hw, k, release, out):
+_STATUS_WORDS = {"partially_resolved": "partly resolved"}
+
+
+def _name_every_reachable_entry(root, snap, release, registry):
+    """A ``.0`` release's notes name every reachable entry, as 0.4.0's did.
+
+    The notes of a line are read from its ``.0`` file on (the release-notes
+    test), so the ``.0`` notes must list every entry a user can reach in it,
+    not only those this assembly numbered.  Each entry the Known anomalies
+    section does not name yet gets a line: its id, its status unless open,
+    and its title.  The registry has the full description.
+    """
+    rel = f"{NOTES_DIR}/v{release}.md"
+    text = (root / rel).read_text(encoding="utf-8")
+    span = section_span(text, "Known anomalies")
+    named = set(re.findall(r"MADD-ANO-\d{3,}", text[span[0]:span[1]])) if span else set()
+    lines = []
+    for a in registry.get("anomalies") or []:
+        if not isinstance(a, dict) or a.get("resolution_status") in UNREACHABLE:
+            continue
+        aid = str(a.get("anomaly_id"))
+        if aid in named:
+            continue
+        status = str(a.get("resolution_status") or "open")
+        shown = "" if status == "open" else \
+            f" ({_STATUS_WORDS.get(status, status.replace('_', ' '))})"
+        title = " ".join(str(a.get("title", "")).split()).rstrip(".")
+        lines.append(_wrap(f"- `{aid}`{shown}: {title}.", subsequent_indent="  "))
+    if not lines:
+        return
+    intro = ("" if span else
+             f"These are the registry entries a user can reach in {release}: those still "
+             f"open and those resolved in part. The registry, "
+             f"`docs/validation/known_anomalies.yaml`, has the full description of each, "
+             f"and the development record indexes every entry.\n\n")
+    snap.write(rel, append_to_section(text, "Known anomalies", intro + "\n".join(lines)))
+
+
+def _verify(root, take, mapping, appended, hw, k, release, out, snap=None):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import check_fragments                                    # noqa: PLC0415
 
@@ -890,48 +1060,88 @@ def _verify(root, take, mapping, appended, hw, k, release, out):
         if (root / f.rel).exists():
             problems.append(f"{f.rel} was assembled and still exists")
     if release is not None:
-        changelog = (root / CHANGELOG).read_text(encoding="utf-8")
-        head = re.search(rf"^## \[{re.escape(release)}\] - ", changelog, re.M)
-        section = ""
-        if head:
-            nxt = re.search(r"^## \[", changelog[head.end():], re.M)
-            section = changelog[head.start():head.end() + (nxt.start() if nxt else len(changelog))]
-        else:
-            problems.append(f"no '## [{release}]' section was written")
-        wanted: dict[str, int] = {}
-        for f in take:
-            if f.kind != "changes":
-                continue
-            for items in (f.data.get("changelog") or {}).values():
-                for item in items or []:
-                    text = " ".join(rewrite_labels(str(item), mapping)[0].split())
-                    wanted[text] = wanted.get(text, 0) + 1
-        for text, times in wanted.items():
-            if section.count(text) != times:
-                problems.append(f"a changelog bullet appears {section.count(text)} "
-                                f"time(s) in the new section, not {times}: {text[:60]}")
-        notes = (root / NOTES_DIR / f"v{release}.md").read_text(encoding="utf-8")
-        for f in take:
-            if f.kind != "changes":
-                continue
-            for block in (f.data.get("release_notes") or {}).values():
-                text = rewrite_labels(str(block), mapping)[0].strip()
-                if notes.count(text) < 1:
-                    problems.append(f"a release-notes block from {f.rel} is missing")
-    problems += check_fragments.label_record_findings(reg_text)
+        problems += _verify_release_text(root, take, mapping, release, snap)
+    hist = check_fragments.history(root)
+    problems += check_fragments.label_record_findings(
+        reg_text, None if hist.error else hist.held)
     version = tree_version(root)
     if not is_dev(version):
         # Invariant 3 at a release version: no label at all, nor any fragment.
         problems += [f"release gate: {p}" for p in check_fragments.release_findings(
-            root, version, set())]
+            root, version, set(), leftover_why=(
+                f"this release assembly deferred it, and at release version {version} "
+                f"a fragment never assembled blocks the release"))]
     if problems:
         raise AssemblyError("the assembly's own checks failed:\n  " + "\n  ".join(problems))
+
+
+def _before(root, snap, rel) -> str:
+    """``rel``'s text before this run touched it ('' if it did not exist)."""
+    if snap is not None and rel in snap.saved:
+        data = snap.saved[rel]
+        return "" if data is None else data.decode("utf-8")
+    path = Path(root) / rel
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def _verify_release_text(root, take, mapping, release, snap) -> list[str]:
+    """Invariant 5.1 for the release text: each changelog bullet and notes
+    block of the assembled fragments is added exactly as written, as many
+    times as the fragments give it, to the one ``## [release]`` section and
+    to ``v<release>.md``; a ``.0`` notes file names every reachable entry."""
+    problems = []
+    changelog = (root / CHANGELOG).read_text(encoding="utf-8")
+    spans = version_section_span(changelog, release)
+    if len(spans) != 1:
+        problems.append(f"{CHANGELOG} has {len(spans)} '## [{release}]' sections, not one")
+    section = changelog[spans[0][0]:spans[0][1]] if spans else ""
+    before = _before(root, snap, CHANGELOG)
+    old = version_section_span(before, release)
+    old_section = before[old[0][0]:old[0][1]] if old else ""
+    wanted: dict[str, int] = {}
+    blocks: dict[str, int] = {}
+    for f in take:
+        if f.kind != "changes":
+            continue
+        for items in (f.data.get("changelog") or {}).values():
+            for item in items or []:
+                text = rewrite_labels(str(item), mapping)[0]
+                bullet = render_bullet(text)
+                if unrender_bullet(bullet) != canonical_bullet(text):
+                    problems.append(f"a changelog bullet from {f.rel} does not survive its "
+                                    f"rendering: {' '.join(text.split())[:60]}")
+                wanted[bullet] = wanted.get(bullet, 0) + 1
+        for block in (f.data.get("release_notes") or {}).values():
+            text = rewrite_labels(str(block), mapping)[0].strip()
+            blocks[text] = blocks.get(text, 0) + 1
+    for bullet, times in wanted.items():
+        added = section.count(bullet) - old_section.count(bullet)
+        if added != times:
+            problems.append(f"a changelog bullet was added {added} time(s) to the "
+                            f"'## [{release}]' section, not {times}: {bullet[:60]}")
+    notes_rel = f"{NOTES_DIR}/v{release}.md"
+    notes = (root / notes_rel).read_text(encoding="utf-8")
+    old_notes = _before(root, snap, notes_rel)
+    for text, times in blocks.items():
+        if notes.count(text) - old_notes.count(text) < times:
+            problems.append(f"a release-notes block is missing from {notes_rel}: "
+                            f"{' '.join(text.split())[:60]}")
+    if version_parts(release)[2] == 0:
+        span = section_span(notes, "Known anomalies")
+        named = set(re.findall(r"MADD-ANO-\d{3,}", notes[span[0]:span[1]])) if span else set()
+        registry = load_yaml((root / REGISTRY).read_text(encoding="utf-8"))
+        for a in registry.get("anomalies") or []:
+            if (isinstance(a, dict) and a.get("resolution_status") not in UNREACHABLE
+                    and str(a.get("anomaly_id")) not in named):
+                problems.append(f"{notes_rel} does not name {a.get('anomaly_id')}, which "
+                                f"is reachable in {release}")
+    return problems
 
 
 def _untracked_with(root, mapping):
     """New files the assembly wrote (a notes file) that still hold a label."""
     found = []
-    for rel in git(root, "ls-files", "--others", "--exclude-standard").split():
+    for rel in git_paths(root, "ls-files", "-z", "--others", "--exclude-standard"):
         path = Path(root) / rel
         try:
             text = path.read_text(encoding="utf-8")
@@ -986,8 +1196,7 @@ def relabel(root: Path) -> list[tuple[str, int]]:
     changed = []
     if not mapping:
         return changed
-    for rel in sorted(set(git(root, "grep", "-l", "-I", "-F", "MADD-ANO-NEW-",
-                              check=False).split())):
+    for rel in sorted(set(files_naming(root, "MADD-ANO-NEW-"))):
         path = root / rel
         if not path.exists():
             continue
@@ -1062,7 +1271,10 @@ def from_branch(root: Path, base: str, branch: str | None = None) -> dict[str, s
     own = [(n, s0, e) for n, s0, e in _registry_blocks(text) if n not in fork_ids]
     if not own:
         return {}
-    mapping = {numbered(n): label(stem, k) for k, (n, _, _) in enumerate(own, 1)}
+    # As ``new`` does: a stem whose earlier fragment was assembled starts
+    # after the labels the registry records for it.
+    first = next_label_number(text, stem)
+    mapping = {numbered(n): label(stem, k) for k, (n, _, _) in enumerate(own, first)}
     blocks = []
     keep = [True] * len(lines)
     for n, s, e in own:
@@ -1081,8 +1293,7 @@ def from_branch(root: Path, base: str, branch: str | None = None) -> dict[str, s
                       + "\n\n".join(blocks) + "\n", encoding="utf-8")
     (root / REGISTRY).write_text(remaining, encoding="utf-8")
     full = re.compile(r"(?<![A-Za-z0-9_])MADD-ANO-(\d{3,})(?![0-9])")
-    for rel in sorted(set(git(root, "grep", "-l", "-I", "-E", "MADD-ANO-[0-9]",
-                              check=False).split())):
+    for rel in sorted(set(git_paths(root, "grep", "-l", "-z", "-I", "-E", "MADD-ANO-[0-9]"))):
         path = root / rel
         if not path.exists() or rel == target.relative_to(root).as_posix():
             continue

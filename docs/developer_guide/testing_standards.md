@@ -612,6 +612,18 @@ are in `benchmarks/results/050_p0_3c_shard4/ci_collect_seconds.json`.
 Expect a shard to run up to about a quarter over the prediction on a slow
 runner, and up to two fifths under it on a fast one.
 
+A few files must not share a shard, and the deal keeps them apart
+(`APART` in `tests/_sharding.py`): each file of a group goes onto the
+lightest shard that holds no other file of its group. Each group says which
+defect it works around and is removed when that defect is fixed. The one
+group so far: a JAX trace leaked by
+`tests/api/test_a_checkpoint_load_answers_as_a_params_write_on_every_parameter.py`
+makes the costly-node tests of
+`tests/property/test_rest_requests_generated_from_the_schema.py` about ten
+times slower in the same process, and the shard that held both ran 131.7 /
+142.3 minutes (slow-lane run 38504812929). `test_ci_sharding.py` checks that
+the two files are in the table and on different shards.
+
 The table deals by time, not memory. Each shard runs in one process, and
 JAX keeps every program it compiles; a file that keeps graphs in a
 module-level `functools.lru_cache` keeps them and their programs too. So

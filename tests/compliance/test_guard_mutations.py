@@ -369,6 +369,13 @@ MUTANTS: tuple[Mutant, ...] = (
        SHARD, "a malformed spec dies in int() with a traceback instead of a usage error, or (' 1/4') is accepted"),
     _M("S26", SH, "            record_suite_property(session.config, name, value)", "            pass", SHARD,
        "no shard records how fast its runner was: the next table is weighed by the luck of its runners"),
+    _M("S27", SH, "        lightest = min((k for k in range(n) if k not in held), key=lambda k: (load[k], k), default=None)",
+       "        lightest = min(range(n), key=lambda k: (load[k], k), default=None)", SHARD,
+       "the files of an APART group share a shard again: the checkpoint-load file's leaked JAX trace slows the "
+       "REST file's costly cases ten times (shard 7, run 38504812929: 131.7 / 142.3 minutes)"),
+    _M("S28", SH, '    ("tests/api/test_a_checkpoint_load_answers_as_a_params_write_on_every_parameter.py",\n'
+       '     "tests/property/test_rest_requests_generated_from_the_schema.py"),\n', "", SHARD,
+       "the pin dropped while the leak it works around is still there"),
     # --- SW: the slow lane's table, tests/slow_lane_weights.json ----------------
     _M("SW1", SWT, '  "tests/property/test_sysid_truth_recovery.py": ',
        '  "tests/property/test_sysid_truth_recovered.py": ', SHARD,

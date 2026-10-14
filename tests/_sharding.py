@@ -55,6 +55,10 @@ scales each shard's times to a runner of median speed by
 :func:`runner_scale`, and ``scripts/slow_lane_drift.py`` scales its
 prediction by the same function.  The CPU model is recorded; the weights
 script uses it only for a report that has no collection time.
+
+A few files must not share a shard (:data:`APART`): the deal puts each
+file of a group on a shard that holds no other file of the group.  Each
+group names the defect it works around and is removed when that is fixed.
 """
 
 from __future__ import annotations
@@ -115,6 +119,22 @@ RUNNER_PROPERTIES = (COLLECT_SECONDS_PROPERTY, CPU_PROPERTY, "runner_cpus")
 #: scaling by it halves the spread of one file's time between runners (the
 #: standard deviation of the log, over 146 files, from 0.17 to 0.09).
 SPEED_EXPONENT = 1.5
+
+#: Groups of test files the weighted deal never puts on one shard.
+#: Temporary by rule: each group says which defect it works around, and is
+#: removed when that defect is fixed.
+APART: tuple[tuple[str, ...], ...] = (
+    # A JAX trace leaked by the checkpoint-load file's costly-kind tests
+    # (29k DynamicJaxprTracer still alive after jax.clear_caches() and
+    # gc.collect()) makes the REST file's costly-node tests about ten times
+    # slower when the two share a process: on shard 7 of slow-lane run
+    # 38504812929 they did, and the shard ran 131.7 / 142.3 minutes
+    # (bisect: benchmarks/results/050_p0_3c_shard4/local/shard7_bisect.txt).
+    # The leak is being investigated; remove this group when it is fixed.
+    ("tests/api/test_a_checkpoint_load_answers_as_a_params_write_on_every_parameter.py",
+     "tests/property/test_rest_requests_generated_from_the_schema.py"),
+)
+
 
 def runner_fields(report) -> dict[str, str]:
     """The :data:`RUNNER_PROPERTIES` of a parsed JUnit report (an ``Element``), those it has."""
@@ -227,18 +247,27 @@ def load_weights(path: Path = WEIGHTS_FILE) -> dict[str, int]:
     return seconds
 
 
-def deal(weights: dict[str, int], n: int) -> dict[str, int]:
+def deal(weights: dict[str, int], n: int,
+         apart: tuple[tuple[str, ...], ...] = APART) -> dict[str, int]:
     """``{file: shard}`` for the listed files: longest first, each onto the lightest shard.
 
-    Ties (equal seconds, equal loads) break on the path and on the lower
-    shard number, so the result does not depend on the table's order.
+    A file in a group of ``apart`` goes onto the lightest shard that holds
+    no other file of its group (any shard, when the group outnumbers the
+    shards).  Ties (equal seconds, equal loads) break on the path and on the
+    lower shard number, so the result does not depend on the table's order.
     """
+    group = {path: g for g, files in enumerate(apart) for path in files}
+    taken: dict[int, set[int]] = {}
     load = [0] * n
     shards = {}
     for path, seconds in sorted(weights.items(), key=lambda kv: (-kv[1], kv[0])):
-        lightest = min(range(n), key=lambda k: (load[k], k))
+        held = taken.setdefault(group[path], set()) if path in group else set()
+        lightest = min((k for k in range(n) if k not in held), key=lambda k: (load[k], k), default=None)
+        if lightest is None:
+            lightest = min(range(n), key=lambda k: (load[k], k))
         shards[path] = lightest + 1
         load[lightest] += seconds
+        held.add(lightest)
     return shards
 
 

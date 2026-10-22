@@ -44,7 +44,7 @@
 #
 #   An empty or unparseable range fails the gate, as does a missing one.
 schema_version: "1.0"
-maddening_version: "0.4.2.dev0"
+maddening_version: "0.4.2"
 generated_date: "2026-09-24"
 
 anomalies:
@@ -20972,4 +20972,356 @@ anomalies:
       other extras are not checked that way.
     verification:
       - "tests/test_import_guards.py::TestPackagingConsistency::test_all_is_every_feature_extra_that_installs_from_wheels"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-297"
+    # label: NEW-records-known-anomalies-0-4-2-1
+    title: "A change in transit through an entry far smaller than the rest of its field is not seen: at the default atol = 0 a coupling group reports converged=True after one pass thousands of tolerances from its fixed point"
+    description: >
+      Every convergence norm measures a field's change against that
+      field's own largest magnitude (`_field_reference` and
+      `_scaled_change`, since 0.4.0's development), so at the default
+      `atol = 0` an ENTRY far below the largest entry of its field moves
+      without moving the residual, as a
+      field inside MADD-ANO-254's dead band does.  A change that has to
+      cross such an entry on its way back to an entry the norm resolves is
+      therefore not in the residual until it arrives, and the loop accepts
+      on the first residual it measures, between its first two passes.  As
+      in MADD-ANO-254 it takes two lagged reads in series between the
+      resolved quantity and itself; no `atol` is needed.  Measured on ONE
+      member with one field `y = [b_n + (K / S) u[1], S (1 + C u[0])]` read
+      back through an edge from the member to itself (`S = 1e-8`,
+      `C = 0.5`, `K = 0.8`, a forcing `b_n = 1 + n / 2` that moves from
+      step to step, fixed point `(b_n + K) / (1 - K C)`), `solver="ift"`,
+      CPU, with the same digits on jax 0.10.2, 0.11.0 and 0.11.2: on every
+      other step the group reports `iterations=1, converged=True` with
+      `y[0]` 3.4e3 to 7.1e3 tolerances from its fixed point in float32 at
+      `rtol=1e-5` (0.33 absolute, on a value of 4.7 to 9.7) and 3.4e7 to
+      7.1e7 in float64 at `rtol=1e-9`, over eight steps, under `"mixed"`,
+      `"l2"` and `"interface"` alike, with no acceleration and with
+      IQN-ILS.  The steps between converge honestly (20 to 45 passes
+      without acceleration, 4 to 17 with IQN-ILS; at most 2.2 tolerances).
+      The same map with the small quantity in a field of its
+      own holds (at most 0.79 tolerances, every norm, both dtypes, no
+      acceleration; under IQN-ILS it reaches its iteration cap and reports
+      `converged=False`, which is MADD-ANO-285).  `strict_convergence`
+      does not raise; `validate()` and `compile()` say nothing, since the
+      condition depends on the values the entries take; and with
+      `diagnostics=True` the reported `spectral_error_bound` is infinite on
+      every step, the honest ones too, so it does not single out the wrong
+      ones.  This falsifies the claim that `atol = 0` is safe: CPL-011 in
+      the coupling claims inventory claimed its oracle (the distance of
+      the kept field to its fixed point) for any group at `atol = 0`, and
+      MADD-ANO-254's workaround (leave `atol` at 0.0) does not cover this
+      case.  First affected: 0.4.0's development, where the norms' scale
+      became each field's own largest magnitude (MADD-ANO-114's
+      resolution).  Established with `git archive` of v0.1.0, v0.2.0,
+      v0.2.1, v0.3.0 and v0.3.1 and the same reproducer (CPU, jax 0.11.0,
+      an empty HOME): `"mixed"` at `atol=0`, whose scale was then each
+      entry's own, held the packed field (at most 2.9 tolerances, both
+      dtypes, with and without IQN-ILS); `"l2"`, an absolute norm then,
+      accepted the packed field and the split one alike after one pass,
+      which is an absolute threshold's blindness, of the class
+      MADD-ANO-005 records, and not this mechanism.  v0.4.0 reproduces the
+      numbers above digit for digit.  Found while designing 0.5.0's
+      convergence criterion.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      `converged=True` on a state thousands of tolerances from its fixed
+      point is a silent wrong result, never `minor`, and it is graded as
+      MADD-ANO-254's is.  Not `critical`: a workaround keeps the feature
+      (the small quantity in a field of its own, which held in every
+      measured case), and it needs a field whose entries differ in
+      magnitude by more than the tolerance resolves, a change that crosses
+      the small entry on its way back to the large one through two lagged
+      reads, and a gain on that path large enough for the hidden change to
+      matter.  Unlike MADD-ANO-254 it needs no setting away from the
+      default and nothing warns (no static check can see entry values),
+      and the bound `diagnostics=True` reports is infinite on every step,
+      so it does not single out the wrong steps; a step that reports
+      `iterations=1` among steps of tens of passes is the visible sign.
+      `context_dependent` because whether the verdict gates anything, and
+      what a state off its fixed point does, is the program's.
+    affected_components:
+      - "maddening.core.coupling.acceleration._field_reference"
+      - "maddening.core.coupling.acceleration._scaled_change"
+      - "maddening.core.coupling.group.CouplingGroup"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Keep quantities of very different magnitude in separate fields: a
+      field is measured against its own largest magnitude, so a small
+      quantity in a field of its own is measured against itself (the
+      measured map then held within 0.79 tolerances, every norm, both
+      dtypes).  A tighter `rtol` is not a remedy: in float32 it cannot
+      reach an entry 1e-8 of its field's largest (at `1e-6` and `1e-7` the
+      one-pass steps stayed 0.33 off), and in float64 `rtol=1e-12` still
+      left 2.2e-4 and `1e-13` 1.4e-5, millions of its own tolerances.
+      Leaving `atol` at 0.0, MADD-ANO-254's workaround, does not cover
+      this.
+    resolution_status: "open"
+    residual_risk: >
+      Until the convergence criterion is redesigned, any group whose field
+      holds entries further apart than its tolerance resolves, and carries
+      a change through the small one in two lagged reads, can accept early
+      as described.  Which graphs do depends on the values the entries
+      take, so no static check can list them.
+    verification:
+      - "tests/core/test_a_small_entry_hides_a_change_in_transit.py::test_a_converged_step_of_a_packed_field_holds_its_large_entry"
+      - "tests/core/test_a_small_entry_hides_a_change_in_transit.py::test_the_packed_field_accepts_after_one_pass_far_from_its_fixed_point"
+      - "tests/core/test_a_small_entry_hides_a_change_in_transit.py::test_nothing_warns_about_the_packed_field"
+      - "tests/core/test_a_small_entry_hides_a_change_in_transit.py::test_the_workaround_the_small_quantity_in_its_own_field_is_held"
+      - "tests/core/test_a_small_entry_hides_a_change_in_transit.py::test_the_packed_field_accepts_after_one_pass_under_every_norm"
+      - "tests/core/test_a_small_entry_hides_a_change_in_transit.py::test_the_workaround_holds_under_every_norm"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-298"
+    # label: NEW-records-known-anomalies-0-4-2-2
+    title: "The public check-anomalies command prints OK and exits 0 on a registry it verified nothing in: one with no entries, or one whose only reference could not be checked"
+    description: >
+      `python -m maddening.compliance check-anomalies`, the command a
+      downstream project runs as the gate on its own registry, prints
+      `OK: anomaly registry is valid` and exits 0 on a well-formed registry
+      with `anomalies: []`, and on one whose only reference names a symbol
+      in a module that cannot be imported where the command runs (a
+      package the module imports is not installed).
+      `validate_anomaly_registry` records the second as a reference it
+      could not check, in its `notes=` list, whose docstring asks callers
+      that care about coverage to surface it; the command never passes the
+      list, and prints no count of what it verified.  In both cases nothing
+      was verified and nothing says so.  MADDENING's own gate,
+      `scripts/check_anomalies.py`, refuses both (a registry with no
+      anomalies fails, and so does one in which no reference was
+      verified); the public command has neither guard.  What the command
+      can import, it does check: a reference to a module that does not
+      exist is refused with exit 1.  Established at every tag with `git
+      archive` and the same three registries (CPU, an empty HOME): v0.1.0,
+      v0.2.0, v0.2.1, v0.3.0, v0.3.1, v0.4.0 and v0.4.1 all print OK on the
+      empty registry and on the one whose reference cannot be checked;
+      before 0.4.0 the validator resolved no reference at all, so the
+      dangling reference printed OK as well (exit 1 from 0.4.0).
+      `tests/compliance/test_registry_version_field.py` holds exit 0 for
+      registries that name no reference, so a fix that refuses a registry
+      it verified nothing in changes those tests too.  Found while
+      designing 0.5.0's gate harness.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      The command reports a status, "valid", for an operation that
+      verified nothing, and warns of nothing: a silent wrong result of the
+      kind the severity definition names (the reported status of an
+      operation the library performed), so never `minor`.  Not
+      `critical`: no simulated value is touched, a registry whose
+      references the command can import is checked, and the validator's
+      `notes=` (or MADDENING's own gate) reports the coverage.
+      `context_dependent`: it matters where a downstream project relies on
+      the command alone as the gate on its registry, which is SOUP
+      evidence; an empty or unchecked registry then passes as verified.
+    affected_components:
+      - "maddening.compliance.__main__.main"
+      - "maddening.compliance._validate.validate_anomaly_registry"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Do not rely on the command's exit status alone.  Call
+      `maddening.compliance.validate_anomaly_registry(path, notes=notes)`
+      with a list and treat every note as a reference that was not
+      verified; refuse a registry with no entries in your own gate; and
+      run the check where every package your registry's references import
+      is installed.
+    resolution_status: "open"
+    verification:
+      - "tests/compliance/test_the_anomaly_command_prints_ok_having_verified_nothing.py::test_the_command_prints_ok_on_an_empty_registry"
+      - "tests/compliance/test_the_anomaly_command_prints_ok_having_verified_nothing.py::test_the_command_prints_ok_on_a_registry_whose_only_reference_was_never_checked"
+      - "tests/compliance/test_the_anomaly_command_prints_ok_having_verified_nothing.py::test_the_command_refuses_a_reference_to_a_module_that_does_not_exist"
+      - "tests/compliance/test_the_anomaly_command_prints_ok_having_verified_nothing.py::test_the_command_does_not_pass_a_registry_it_verified_nothing_in"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-299"
+    # label: NEW-records-known-anomalies-0-4-2-3
+    title: "collect_node_metadata() and collect_hazard_hints() walk SimulationNode's direct subclasses only: a node class that derives from another node class, such as WaveletAdaptiveNode or a downstream node with a base of its own, is left out with its metadata and hazard hints"
+    description: >
+      Both harvesting functions iterate `SimulationNode.__subclasses__()`,
+      which lists only the classes that name `SimulationNode` as a base.  A
+      node class that derives from another node class is not visited: its
+      `NodeMeta` is missing from `collect_node_metadata()`, and its hazard
+      hints from `collect_hazard_hints()`, with no warning, although the
+      docstrings say "all SimulationNode subclasses" and "all nodes", and
+      DOCUMENTATION_ARCHITECTURE.md presents the pair as giving a
+      manufacturer "a complete picture" of MADDENING's and a downstream
+      library's nodes for risk management.  The built-in
+      `WaveletAdaptiveNode` derives from `AdaptiveNode`: its own metadata,
+      and its own hazard hints, which are not `AdaptiveNode`'s, are in
+      neither result, though `AdaptiveNode`'s are.  A downstream library
+      whose nodes derive from a base class of its own loses every one of
+      them.  Established at every tag with `git archive` and a two-level
+      pair of classes defined in the reproducer (CPU, an empty HOME):
+      v0.1.0, v0.2.0, v0.2.1, v0.3.0, v0.3.1, v0.4.0 and this tree return
+      the base class and miss the class derived from it, in both
+      collectors.  Before 0.4.0 no built-in node derived from another (ten
+      node classes, all direct), so only a downstream class was missed;
+      `WaveletAdaptiveNode`, new in 0.4.0, is the first built-in one.  The
+      test `tests/compliance/test_metadata.py::TestHarvesting::test_all_builtin_nodes_have_meta`
+      walks the same direct subclasses.  Found while designing 0.5.0's
+      compliance obligations.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A returned value that silently omits what it is documented to
+      return, the metadata and hazard hints of every node class in the
+      process as input to risk management, is a silent wrong result, so
+      never `minor`.  Not `critical`: each class's own `meta` is intact and
+      can be read directly, and only a class two or more levels below
+      `SimulationNode` is missed.  `context_dependent`: it matters where a
+      downstream builds its hazard analysis or capability matrix from
+      these functions; a downstream whose nodes share a base class of its
+      own gets none of them.
+    affected_components:
+      - "maddening.core.compliance.metadata.collect_node_metadata"
+      - "maddening.core.compliance.metadata.collect_hazard_hints"
+      - "maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Walk the descendants yourself and read each class's own `meta`: with
+      `def descendants(cls): return [d for s in cls.__subclasses__() for d in (s, *descendants(s))]`,
+      take `{c.__name__: c.meta for c in descendants(SimulationNode) if getattr(c, "meta", None) is not None}`,
+      and each `list(meta.hazard_hints)` that is not empty.  As for the
+      collectors themselves, import every module that defines node
+      classes first.
+    resolution_status: "open"
+    verification:
+      - "tests/compliance/test_the_node_metadata_collectors_walk_direct_subclasses_only.py::test_the_wavelet_node_s_own_hazard_hints_are_not_collected"
+      - "tests/compliance/test_the_node_metadata_collectors_walk_direct_subclasses_only.py::test_a_downstream_node_deriving_from_its_own_base_is_not_collected"
+      - "tests/compliance/test_the_node_metadata_collectors_walk_direct_subclasses_only.py::test_each_collector_returns_every_node_class_with_metadata"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-300"
+    # label: NEW-records-known-anomalies-0-4-2-4
+    title: "A served node whose initial_state() raises under jax.eval_shape keeps a whole JAX trace alive for every accepted PUT /graph/params and checkpoint load: about 0.5 MB per write on a WaveletAdaptiveNode, never freed"
+    description: >
+      Before a params write builds anything, the server asks whether the
+      state the node would build with the written values has the running
+      layout: `_abstract_initial_state` evaluates `node.initial_state()`
+      under `jax.eval_shape` and catches what it raises.  It runs for an
+      accepted `PUT /graph/params/{node}`, and for a checkpoint load, which
+      is answered as a params write.  A node whose `initial_state` needs a
+      concrete value raises there every time (the answer is "unknown", and
+      the write goes on to the concrete checks); the built-in
+      `WaveletAdaptiveNode` is such a node.  The exception leaves the trace
+      that JAX opened, and JAX does not free a trace that raised:
+      `core.ensure_no_leaks` invalidates the trace after a bare `yield`,
+      which an exception skips, and the finalizer the trace registered for
+      a staged non-scalar constant keeps it reachable from
+      `weakref.finalize`'s registry.  So each accepted write leaves its
+      trace alive for good: neither `gc.collect()` nor
+      `jax.clear_caches()` frees it, and neither does dropping the server
+      and the graph.  The replies and the states are right; only the
+      memory grows.  Measured (CPU, Python 3.12, the in-process client on
+      loopback): a served `WaveletAdaptiveNode` keeps 476 tracers, about
+      3,200 objects and about 0.5 MB per accepted `PUT`, linearly (28,560
+      tracers after 60 writes, and the process from 469 MB to 706 MB) on
+      jax 0.11.0, and 476 per `PUT` and 476 per load on jax 0.10.2 and
+      0.11.2.  A node whose state evaluates abstractly keeps nothing, and a
+      served `LBMNode` ran 100 cycles of writes, saves, loads and steps
+      with a constant tracer count.  Introduced in 0.4.0's development with
+      the abstract evaluation (`maddening/api/server.py` had no
+      `jax.eval_shape` before 0.4.0, and `WaveletAdaptiveNode` is new in
+      0.4.0); v0.4.0, from `git archive`, keeps the same 476 per write.
+      The other places that trace a node's code and catch what it raises
+      (`jax.make_jaxpr` in the server's hook and dry-run checks, and in two
+      `GraphManager` probes) have the same exposure whenever the traced
+      code raises; they are not measured.  Found while tracing a slow REST
+      test in 0.4.2's development.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A denial of service, never a wrong result, graded `major` as
+      MADD-ANO-134 is: a REST feature that grows the server's memory
+      without bound until the process is restarted, the OOM killer then
+      picking the largest process.  Silent: no warning, and nothing frees
+      the memory.  Not `critical`: it needs a node whose `initial_state`
+      raises under abstract evaluation, the writes are the caller's own
+      (the server binds loopback by default), and the growth, about 0.5 MB
+      per write on the built-in node (5 GB per 10,000 writes), is slow
+      enough to see.  `context_dependent`: what else the host runs, and
+      how many writes a deployment makes, are the deployment's.
+    affected_components:
+      - "maddening.api.server._abstract_initial_state"
+      - "maddening.api.server.SimulationServer.create_app"
+      - "maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Restart a server that takes many params writes or checkpoint loads on
+      such a node (a `WaveletAdaptiveNode`, or any node whose
+      `initial_state` needs concrete values); the memory comes back with
+      the process, not before.
+    resolution_status: "open"
+    verification:
+      - "tests/api/test_a_params_write_keeps_a_trace_alive_when_the_state_needs_concrete_values.py::test_each_accepted_params_write_keeps_a_whole_trace_alive"
+      - "tests/api/test_a_params_write_keeps_a_trace_alive_when_the_state_needs_concrete_values.py::test_a_checkpoint_load_keeps_a_whole_trace_alive"
+      - "tests/api/test_a_params_write_keeps_a_trace_alive_when_the_state_needs_concrete_values.py::test_a_node_whose_state_evaluates_abstractly_keeps_nothing"
+      - "tests/api/test_a_params_write_keeps_a_trace_alive_when_the_state_needs_concrete_values.py::test_an_accepted_params_write_keeps_no_trace_alive"
+      - "tests/api/test_a_params_write_keeps_a_trace_alive_when_the_state_needs_concrete_values.py::test_a_served_wavelet_node_keeps_a_whole_trace_alive_per_params_write"
+      - "tests/api/test_a_params_write_keeps_a_trace_alive_when_the_state_needs_concrete_values.py::test_a_checkpoint_load_on_a_wavelet_node_keeps_a_whole_trace_alive"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-301"
+    # label: NEW-records-known-anomalies-0-4-2-5
+    title: "verify_node with a FAIL verdict leaves Hypothesis's sys.monitoring LINE events on for the rest of the caller's process: pure-Python code runs several times slower afterwards"
+    description: >
+      Once an example fails, Hypothesis shrinks it under its branch tracer
+      (`hypothesis.internal.scrutineer.Tracer`) for the `explain` phase.
+      On Python 3.12 and 3.13 that tracer turns `sys.monitoring` LINE
+      events on for its tool id (3) and, on exit, frees the id and drops
+      its callback without turning the events off;
+      `sys.monitoring.free_tool_id` clears a tool's events only from Python
+      3.14.  `maddening.testing.verify_node` runs each check under
+      Hypothesis (`_run`) with the profile's phases, `explain` included,
+      and a check that finds a counterexample fails an example by design.
+      After a FAIL verdict, therefore, every line of Python the caller's
+      process runs, in every thread, goes through the line instrumentation
+      until the process exits.  No value changes.  Measured (CPU, Python
+      3.12.3): FastAPI's `jsonable_encoder` on about 300,000 floats took
+      0.11 s before one failing `finite` check and 3.58 s after it
+      (hypothesis 6.165.3, jax 0.11.0), and 3.60 s and 3.78 s with
+      hypothesis 6.169.0 on jax 0.10.2 and 0.11.2; the tool's events went
+      from none to LINE.  In the test suite the same mechanism made a later
+      test's REST replies ten times slower, which the suite now prevents by
+      turning the events off after every test
+      (`tests/_hypothesis_line_events.py`); that protects the suite, not a
+      user.  The defect is Hypothesis's (6.165.3 and 6.169.0, and unchanged
+      upstream at 6.169.1 when measured); MADDENING reaches it through
+      `verify_node` and `assert_node_verified`.  Present since
+      `maddening.testing` was introduced in 0.4.0's development: v0.4.0,
+      from `git archive`, leaves the same events on.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Performance only: no value, verdict or counterexample changes, and
+      the slowdown ends with the process.  A defect in performance that
+      changes no value describing or vouching for the solution is `minor`
+      by the severity definition, as MADD-ANO-294 is.
+      `not_safety_relevant`: `verify_node` is a verification helper for a
+      node's author, run in a test or authoring process, and a slower
+      process computes the same results.
+    affected_components:
+      - "maddening.testing.verification.verify_node"
+      - "maddening.testing.verification.assert_node_verified"
+      - "maddening.testing.verification._run"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      After a `verify_node` or `assert_node_verified` call that may fail,
+      turn the events off in the same process: when
+      `sys.monitoring.get_tool(3)` is `None` and
+      `sys.monitoring.get_events(3)` is not zero, call
+      `sys.monitoring.use_tool_id(3, "clear")`,
+      `sys.monitoring.set_events(3, sys.monitoring.events.NO_EVENTS)` and
+      `sys.monitoring.free_tool_id(3)`, which is what
+      `tests/_hypothesis_line_events.py` does.  Or run the verification in
+      a process of its own.  Python 3.14 is not affected.
+    resolution_status: "open"
+    verification:
+      - "tests/verification/test_verify_node_leaves_line_events_on_after_a_fail.py::test_a_fail_verdict_leaves_line_events_on_a_freed_tool_id"
+      - "tests/verification/test_verify_node_leaves_line_events_on_after_a_fail.py::test_the_workaround_turns_the_events_off"
+      - "tests/verification/test_verify_node_leaves_line_events_on_after_a_fail.py::test_a_fail_verdict_leaves_no_events_on"
     github_issue: null

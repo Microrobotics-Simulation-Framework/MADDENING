@@ -15,7 +15,7 @@ registered for a staged constant keeps it reachable from
 ``weakref.finalize``'s registry.  Each accepted write therefore leaves one
 whole trace alive, and nothing frees it: not ``gc.collect()``, not
 dropping the server and the graph
-(MADD-ANO-NEW-records-known-anomalies-0-4-2-4, open).  The replies and
+(MADD-ANO-300, open).  The replies and
 the states are right; only the memory grows.
 
 Measured (CPU; jax 0.10.2, 0.11.0 and 0.11.2, the same counts): a served
@@ -47,7 +47,7 @@ from maddening.core.node import SimulationNode
 from maddening.nodes.adaptive import WaveletAdaptiveNode
 from tests._loopback_client import LoopbackTestClient as TestClient
 
-_LABEL = "MADD-ANO-NEW-records-known-anomalies-0-4-2-4"
+_LABEL = "MADD-ANO-300"
 
 #: Fewer live tracers than one kept trace of the small node holds (63 on
 #: every JAX measured), and more than a write that keeps nothing leaves

@@ -10,7 +10,7 @@ profile's phases, ``explain`` included, and a check that finds a
 counterexample fails an example on purpose.  So after a FAIL verdict every
 line of pure Python the caller runs goes through the line
 instrumentation, until the process exits
-(MADD-ANO-NEW-records-known-anomalies-0-4-2-5, open).  No value changes;
+(MADD-ANO-301, open).  No value changes;
 everything is slower: FastAPI's ``jsonable_encoder`` on about 300,000
 floats took 0.11 s before one failing ``finite`` check and 3.6 to 3.8 s
 after it (hypothesis 6.165.3 and 6.169.0; jax 0.10.2, 0.11.0 and 0.11.2).
@@ -35,7 +35,7 @@ from maddening.core.node import SimulationNode
 from maddening.testing.verification import verify_node
 from tests._hypothesis_line_events import TOOL_ID, clear_line_events_hypothesis_left
 
-_LABEL = "MADD-ANO-NEW-records-known-anomalies-0-4-2-5"
+_LABEL = "MADD-ANO-301"
 MONITORING = sys.monitoring
 
 

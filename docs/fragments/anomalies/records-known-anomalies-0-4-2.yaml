@@ -13,9 +13,10 @@ anomalies:
     title: "A change in transit through an entry far smaller than the rest of its field is not seen: at the default atol = 0 a coupling group reports converged=True after one pass thousands of tolerances from its fixed point"
     description: >
       Every convergence norm measures a field's change against that
-      field's own largest magnitude (`_scaled_change`, since 0.4.0's
-      development), so at the default `atol = 0` an ENTRY far below the
-      largest entry of its field moves without moving the residual, as a
+      field's own largest magnitude (`_field_reference` and
+      `_scaled_change`, since 0.4.0's development), so at the default
+      `atol = 0` an ENTRY far below the largest entry of its field moves
+      without moving the residual, as a
       field inside MADD-ANO-254's dead band does.  A change that has to
       cross such an entry on its way back to an entry the norm resolves is
       therefore not in the residual until it arrives, and the loop accepts
@@ -29,11 +30,12 @@ anomalies:
       CPU, with the same digits on jax 0.10.2, 0.11.0 and 0.11.2: on every
       other step the group reports `iterations=1, converged=True` with
       `y[0]` 3.4e3 to 7.1e3 tolerances from its fixed point in float32 at
-      `rtol=1e-5` (0.33 absolute, on a value of 3 to 6) and 3.4e7 to 7.1e7
-      in float64 at `rtol=1e-9`, over eight steps, under `"mixed"`, `"l2"`
-      and `"interface"` alike, with no acceleration and with IQN-ILS.  The
-      steps between converge honestly (20 to 45 passes, at most 2.2
-      tolerances).  The same map with the small quantity in a field of its
+      `rtol=1e-5` (0.33 absolute, on a value of 4.7 to 9.7) and 3.4e7 to
+      7.1e7 in float64 at `rtol=1e-9`, over eight steps, under `"mixed"`,
+      `"l2"` and `"interface"` alike, with no acceleration and with
+      IQN-ILS.  The steps between converge honestly (20 to 45 passes
+      without acceleration, 4 to 17 with IQN-ILS; at most 2.2 tolerances).
+      The same map with the small quantity in a field of its
       own holds (at most 0.79 tolerances, every norm, both dtypes, no
       acceleration; under IQN-ILS it reaches its iteration cap and reports
       `converged=False`, which is MADD-ANO-285).  `strict_convergence`
@@ -76,6 +78,7 @@ anomalies:
       `context_dependent` because whether the verdict gates anything, and
       what a state off its fixed point does, is the program's.
     affected_components:
+      - "maddening.core.coupling.acceleration._field_reference"
       - "maddening.core.coupling.acceleration._scaled_change"
       - "maddening.core.coupling.group.CouplingGroup"
       - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"

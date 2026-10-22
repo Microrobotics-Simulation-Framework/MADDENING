@@ -524,12 +524,21 @@ claims:
     - src/maddening/core/coupling/acceleration.py:65 (_scaled_change)
   conditions: >-
     WHAT HOLDS NOW: the oracle below (the distance of the kept field to its
-    fixed point) is claimed for any group with atol = 0, and for NO group
-    with atol > 0, whatever its member count and schedule: a change that has
-    to cross a field inside the dead band is not in the residual until it
-    reaches a kept field, and the loop accepts on the first residual it
-    measures.  It takes two lagged reads in series between a kept field and
-    itself.  Measured, each under all
+    fixed point) is claimed for any group with atol = 0 in which no change
+    has to cross an entry far below the largest entry of its own field, and
+    for NO group with atol > 0, whatever its member count and schedule: a
+    change that has to cross a field inside the dead band is not in the
+    residual until it reaches a kept field, and the loop accepts on the
+    first residual it measures.  It takes two lagged reads in series between
+    a kept field and itself.  At atol = 0 an entry that small against its
+    field hides a change the same way, every field being measured against
+    its own largest entry (MADD-ANO-NEW-records-known-anomalies-0-4-2-1,
+    open: one member whose one field holds entries of 1 and 1e-8, read back
+    through an edge to itself, accepted after one pass 3.4e3 to 7.1e3
+    tolerances off under all three norms; with the small quantity in a
+    field of its own it held:
+    tests/core/test_a_small_entry_hides_a_change_in_transit.py).
+    Measured, each under all
     three norms: (1) under Jacobi (the residual of p <- f(q), q <- g(p) with
     p dropped tests only that q agrees with the p it was computed from) a
     plain-edge pair whose three forces of 1e-8 are inside atol = 1e-6 and are
@@ -580,6 +589,7 @@ claims:
     - tests/core/test_the_dead_band_of_a_pair_and_of_one_member.py::test_compile_warns_once_for_the_dead_band_of_a_pair_and_of_one_member
     - tests/core/test_the_dead_band_of_a_pair_and_of_one_member.py::test_the_same_pair_or_member_with_no_dead_band_is_held
     - tests/core/test_the_dead_band_of_a_pair_and_of_one_member.py::test_the_banded_pair_or_member_accepts_after_one_pass_far_from_its_fixed_point
+    - tests/core/test_a_small_entry_hides_a_change_in_transit.py::test_the_workaround_the_small_quantity_in_its_own_field_is_held
     - tests/core/test_coupling_convergence.py::TestResidualNorms::test_l2_ignores_a_field_inside_the_dead_band
     - tests/core/test_coupling_error_bound.py::test_the_dead_band_excludes_a_field_only_when_the_caller_declares_it
     - tests/core/test_coupling_error_bound.py::test_a_field_that_is_legitimately_zero_does_not_block_the_group

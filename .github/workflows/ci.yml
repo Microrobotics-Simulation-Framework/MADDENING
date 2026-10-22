@@ -235,6 +235,22 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+      - name: Runner image, for the apt package cache
+        # The cache below is keyed on the runner image: its packages must
+        # match the image's libc6 (libc6-dbg pins it exactly), and a new
+        # image version starts a new cache.
+        id: apt-image
+        run: echo "key=apt-debs-${ImageOS:-unknown}-${ImageVersion:-unknown}-valgrind-clang-v1" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the toolchain's packages from the Actions cache
+        # Saved by the first job of an image version that had to download
+        # them; every later job installs them with dpkg and never touches a
+        # package mirror (2026-10-22: Azure's Ubuntu mirror crawled for hours).
+        uses: actions/cache@v4
+        with:
+          path: ~/apt-debs
+          key: ${{ steps.apt-image.outputs.key }}
+
       - name: Install C toolchain for the FMU wrapper tests
         # gcc + clang ship on the ubuntu-24.04 image; valgrind does not.  Per push,
         # tests/fmi/test_c_unit.py builds the wrapper with the default `cc`
@@ -258,6 +274,15 @@ jobs:
           # fetches from Canonical's, and recommends are not installed (they
           # are most of the download: gdb and its libraries come with
           # valgrind only as recommends).
+          debs="$HOME/apt-debs"
+          if ls "$debs"/*.deb > /dev/null 2>&1; then
+            if sudo dpkg -i "$debs"/*.deb > /dev/null && command -v valgrind > /dev/null; then
+              echo "valgrind and clang installed from the Actions cache: $(ls "$debs" | tr '\n' ' ')"
+              exit 0
+            fi
+            echo "::warning title=apt::the cached packages did not install, fetching them"
+            sudo dpkg --configure -a || true
+          fi
           apt_opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
           for attempt in 1 2 3; do
             if [ "$attempt" -gt 1 ] && [ -f /etc/apt/apt-mirrors.txt ]; then
@@ -265,7 +290,7 @@ jobs:
             fi
             timeout 60 sudo apt-get $apt_opts update -q \
               && timeout 180 sudo apt-get $apt_opts install -y -q --no-install-recommends valgrind clang \
-              && exit 0
+              && { mkdir -p "$debs"; cp /var/cache/apt/archives/*.deb "$debs"/ 2> /dev/null || true; exit 0; }
             echo "::warning title=apt::attempt $attempt to install valgrind and clang timed out or failed, retrying"
             sudo dpkg --configure -a || true
             sleep 10

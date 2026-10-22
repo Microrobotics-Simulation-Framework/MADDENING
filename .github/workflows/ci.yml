@@ -245,10 +245,24 @@ jobs:
         # and run in slow-tests.yml, which installs both itself.
         # A package mirror that stops answering leaves apt-get waiting with no
         # output: on 2026-10-07 this step hung for 1 h 50 min in one shard
-        # while the other eleven jobs were green.  The install takes under a
-        # minute; ten is the limit, and a rerun of the job is the remedy.
-        timeout-minutes: 10
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind clang
+        # while the other eleven jobs were green.
+        timeout-minutes: 12
+        run: |
+          # Each attempt is cut short and retried (2026-10-22: one run lost
+          # four shards to a silent mirror, and a rerun lost one again):
+          # apt's own connection timeouts, `timeout` around each command,
+          # three attempts.  A healthy install takes under a minute.
+          apt_opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+          for attempt in 1 2 3; do
+            timeout 90 sudo apt-get $apt_opts update -q \
+              && timeout 150 sudo apt-get $apt_opts install -y -q valgrind clang \
+              && exit 0
+            echo "::warning title=apt::attempt $attempt to install valgrind and clang timed out or failed; retrying"
+            sudo dpkg --configure -a || true
+            sleep 10
+          done
+          echo "::error title=apt::three attempts to install valgrind and clang failed"
+          exit 1
 
       - name: Compilation cache mode
         # Pull requests run WARM: they restore the base branch's XLA
@@ -646,12 +660,24 @@ jobs:
 
       - name: Install a virtual display and Mesa's software OpenGL
         # A package mirror that stops answering leaves apt-get waiting with no
-        # output (see the test job's C toolchain step); ten minutes is the
-        # limit and a rerun of the job is the remedy.
-        timeout-minutes: 10
+        # output (see the test job's C toolchain step).
+        timeout-minutes: 12
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq xvfb libgl1 libegl1 libosmesa6
+          # Each attempt is cut short and retried (2026-10-22: one run lost
+          # four shards to a silent mirror, and a rerun lost one again):
+          # apt's own connection timeouts, `timeout` around each command,
+          # three attempts.  A healthy install takes under a minute.
+          apt_opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+          for attempt in 1 2 3; do
+            timeout 90 sudo apt-get $apt_opts update -q \
+              && timeout 150 sudo apt-get $apt_opts install -y -q xvfb libgl1 libegl1 libosmesa6 \
+              && exit 0
+            echo "::warning title=apt::attempt $attempt to install the virtual display and Mesa timed out or failed; retrying"
+            sudo dpkg --configure -a || true
+            sleep 10
+          done
+          echo "::error title=apt::three attempts to install the virtual display and Mesa failed"
+          exit 1
 
       - name: Run the 3D frame renderer tests
         env:

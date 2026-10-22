@@ -323,7 +323,7 @@ From 0.4.2, MADDENING is licensed under Apache-2.0 (releases up to and including
 - **Distribution requirements**: keep the copyright and licence notices, ship the attributions in MADDENING's `NOTICE` file, and mark files that were changed. There is no source-offer or replaceability obligation.
 - **Patent grant**: each contributor grants an explicit patent licence for their contributions, which terminates for a party that sues over the work's patents.
 
-Commercial entities building on MADDENING should still record each layer's licence in their technical file: MIME is Apache-2.0 from its 0.3.0, and MICROROBOTICA is AGPL-3.0-or-later.
+Commercial entities building on MADDENING should still record each layer's licence in their technical file, from each layer's own `LICENSE`: they can differ (MICROROBOTICA, for one, is AGPL-3.0-or-later).
 
 **Future commercial offerings**: A future commercial version, paid support, hosted infrastructure, or other services around MADDENING, MIME, or MICROROBOTICA are not ruled out. The documentation architecture described in this document supports that future without requiring structural changes. This possibility is acknowledged as a natural consequence of the licence model, not as a commitment or plan.
 
@@ -3366,7 +3366,7 @@ MADDENING, MIME, and MICROBOTICA are all open-source research tools that evolve 
 
 #### Layer 2: MIME — Physics Engine
 
-**Status**: Open-source physics engine for microrobotics, built on MADDENING. Apache-2.0 licence from MIME 0.3.0 (LGPL before). No medical purpose.
+**Status**: Open-source physics engine for microrobotics, built on MADDENING. Licensed as its own `LICENSE` states. No medical purpose.
 
 **Regulatory requirement**: None. MIME is not a medical device.
 

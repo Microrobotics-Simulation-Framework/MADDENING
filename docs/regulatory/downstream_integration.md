@@ -5,7 +5,7 @@
 ```
 Layer 1: MADDENING          (open source, Apache-2.0, general-purpose framework)
     ↓
-Layer 2: MIME                (open source, Apache-2.0 from 0.3.0, microrobotics physics engine)
+Layer 2: MIME                (open source, microrobotics physics engine)
     ↓
 Layer 3: MICROROBOTICA       (open source, AGPL-3.0, research simulator)
     ↓
@@ -145,4 +145,4 @@ The MADDENING documentation architecture is designed to support the most demandi
 
 ### Licence
 
-From 0.4.2, MADDENING is licensed under Apache-2.0 (releases up to and including 0.4.1: LGPL). It is permissive, with no copyleft and no replaceability obligation: the commercial entity keeps the copyright and licence notices, ships the attributions in MADDENING's `NOTICE` file, and states any changes it made to MADDENING's files. The licence includes a patent grant from each contributor. Record the licence of every layer in the technical file, since they differ: MIME is Apache-2.0 from its 0.3.0, and MICROROBOTICA is AGPL-3.0-or-later, whose network-use clause applies to a product that serves it to users over a network.
+From 0.4.2, MADDENING is licensed under Apache-2.0 (releases up to and including 0.4.1: LGPL). It is permissive, with no copyleft and no replaceability obligation: the commercial entity keeps the copyright and licence notices, ships the attributions in MADDENING's `NOTICE` file, and states any changes it made to MADDENING's files. The licence includes a patent grant from each contributor. Record the licence of every layer in the technical file, from each layer's own `LICENSE`, since they can differ: MICROROBOTICA, for one, is AGPL-3.0-or-later, whose network-use clause applies to a product that serves it to users over a network.

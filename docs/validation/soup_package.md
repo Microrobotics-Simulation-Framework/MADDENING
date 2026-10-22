@@ -14,7 +14,7 @@ to forget on a release; there is deliberately no longer one here.
 | Full Name | Modular Automatic Differentiation and Data Enhanced Neural-network INteracting Graph |
 | Version | 0.4.2.dev0 |
 | Release Date | unreleased (development build) |
-| Licence | LGPL-3.0-or-later |
+| Licence | Apache-2.0 |
 | Source Repository | https://github.com/Microrobotics-Simulation-Framework/MADDENING |
 | Python Version | >=3.12 permitted; verified on 3.12 (the CI matrix) |
 | JAX Version | jax>=0.10,<0.13 permitted; verified at 0.10.2, 0.11.2 (the versions CI installs) |

@@ -3,11 +3,11 @@
 ## Four-Layer Dependency Chain
 
 ```
-Layer 1: MADDENING          (open source, LGPL, general-purpose framework)
+Layer 1: MADDENING          (open source, Apache-2.0, general-purpose framework)
     ↓
-Layer 2: MIME                (open source, LGPL, microrobotics physics engine)
+Layer 2: MIME                (open source, Apache-2.0 from 0.3.0, microrobotics physics engine)
     ↓
-Layer 3: MICROBOTICA         (open source, LGPL, research simulator)
+Layer 3: MICROROBOTICA       (open source, AGPL-3.0, research simulator)
     ↓
 Layer 4: [Commercial Product] (regulated, CE-marked, built by commercial entity)
 ```
@@ -16,7 +16,7 @@ Layer 4: [Commercial Product] (regulated, CE-marked, built by commercial entity)
 |-------|--------|----------------------|
 | MADDENING | Open-source research tool | None (provides {term}`SOUP` documentation voluntarily) |
 | MIME | Open-source research tool | None (provides SOUP documentation voluntarily) |
-| MICROBOTICA | Open-source research tool | None (provides SOUP documentation voluntarily) |
+| MICROROBOTICA | Open-source research tool | None (provides SOUP documentation voluntarily) |
 | Commercial Product | Regulated medical device | Full {term}`EU MDR` manufacturer obligations |
 
 ## Per-Layer Responsibility Details
@@ -63,7 +63,7 @@ Layer 4: [Commercial Product] (regulated, CE-marked, built by commercial entity)
 
 **SOUP classification**: When used in a regulated product, MIME is IEC 62304 SOUP. MADDENING is MIME's own SOUP dependency (SOUP-of-SOUP).
 
-### Layer 3: MICROBOTICA
+### Layer 3: MICROROBOTICA
 
 **Role**: Open-source research simulator for microrobot-assisted drug delivery in CSF.
 
@@ -72,11 +72,11 @@ Layer 4: [Commercial Product] (regulated, CE-marked, built by commercial entity)
 - Pre-configured simulation scenarios for cerebrospinal fluid geometries
 - Visualization and analysis tools for researchers
 - Training data pipelines for reinforcement learning research
-- Own SOUP documentation, anomaly registry, and verification benchmarks (using `MICROBOTICA-` or `MBOT-` prefix)
+- Own SOUP documentation, anomaly registry, and verification benchmarks (using `MICROROBOTICA-` or `MBOT-` prefix)
 
 **Inherits from MIME**: All MIME compliance infrastructure, plus MIME-specific physics and verification evidence.
 
-**SOUP classification**: When used in a regulated product, MICROBOTICA is IEC 62304 SOUP.
+**SOUP classification**: When used in a regulated product, MICROROBOTICA is IEC 62304 SOUP.
 
 ### Layer 4: Commercial Product
 
@@ -94,7 +94,7 @@ The Layer 4 commercial entity is the EU MDR manufacturer (Article 2(30)) and is 
 - Building and maintaining the **clinical evaluation report** (CER) with sufficient clinical evidence
 - Operating **post-market surveillance** including PSUR (annual for Class III), vigilance reporting, and PMCF studies
 - Bearing **manufacturer liability** for the device placed on the EU market
-- Performing **SOUP assessment** of all open-source layers (MADDENING, MIME, MICROBOTICA) per IEC 62304 Clause 5.3.3/5.3.4
+- Performing **SOUP assessment** of all open-source layers (MADDENING, MIME, MICROROBOTICA) per IEC 62304 Clause 5.3.3/5.3.4
 - Maintaining **risk management file** (ISO 14971) incorporating SOUP failure modes
 
 MADDENING provides SOUP documentation to support the commercial entity's regulatory obligations. This provision is voluntary and does not make MADDENING subject to EU MDR or IEC 62304.
@@ -143,6 +143,6 @@ The MADDENING documentation architecture is designed to support the most demandi
   - **{term}`FMU` TCP bridge** (`maddening.fmi.tcp_bridge`): **no authentication at all**.  Any process that can reach its port can read, write, step and hold the model, whatever interface it is bound to.  It binds loopback on an ephemeral port by default, and it is for trusted clients only (MADD-ANO-023, open).
   - No user accounts, per-user authorisation, access audit or rate limiting on any surface.
 
-### LGPL Replaceability
+### Licence
 
-MADDENING is licensed under LGPL-3.0-or-later. The LGPL "replaceability" obligation is satisfied via Python's module system: the end user can replace the `maddening` package with a modified version by installing it into the same Python environment, with no special linking or build steps required. The commercial entity should document this replaceability mechanism in their technical file.
+From 0.4.2, MADDENING is licensed under Apache-2.0 (releases up to and including 0.4.1: LGPL). It is permissive, with no copyleft and no replaceability obligation: the commercial entity keeps the copyright and licence notices, ships the attributions in MADDENING's `NOTICE` file, and states any changes it made to MADDENING's files. The licence includes a patent grant from each contributor. Record the licence of every layer in the technical file, since they differ: MIME is Apache-2.0 from its 0.3.0, and MICROROBOTICA is AGPL-3.0-or-later, whose network-use clause applies to a product that serves it to users over a network.

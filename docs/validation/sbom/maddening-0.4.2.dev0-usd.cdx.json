@@ -1008,7 +1008,7 @@
         {
           "license": {
             "acknowledgement": "declared",
-            "id": "LGPL-3.0-or-later"
+            "id": "Apache-2.0"
           }
         }
       ],
@@ -1191,7 +1191,7 @@
       ]
     }
   },
-  "serialNumber": "urn:uuid:1f9bc2b6-ea38-5b5f-918b-66b93698562d",
+  "serialNumber": "urn:uuid:a2959196-1432-5dc2-b28a-90844a483195",
   "specVersion": "1.6",
   "version": 1
 }

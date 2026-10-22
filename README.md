@@ -137,4 +137,4 @@ MADDENING is designed to be extended by MIME. See:
 
 ## License
 
-LGPL-3.0-or-later. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). Releases up to and including 0.4.1 were distributed under the LGPL; copies obtained under those terms keep them.

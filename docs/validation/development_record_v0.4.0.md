@@ -1951,6 +1951,52 @@ devices again at every eager update() when its static_data builds new array
 objects on each access: correct results, about 50 times slower per step at 10^7
 cells* — **open**.
 
+`MADD-ANO-297` — *A change in transit through an entry far smaller than the
+rest of its field is not seen: at the default atol = 0 a coupling group reports
+converged=True after one pass thousands of tolerances from its fixed point* —
+**open**. At the default `atol=0` a coupling group can report `converged=True`
+after one pass far from its fixed point when one field holds entries of very
+different magnitude (order 1 beside order 1e-8) and a change passes through the
+small one. Keep such quantities in separate fields; a tighter `rtol` does not
+help. A fix is planned for a later patch.
+
+`MADD-ANO-298` — *The public check-anomalies command prints OK and exits 0 on a
+registry it verified nothing in: one with no entries, or one whose only
+reference could not be checked* — **open**. `python -m maddening.compliance
+check-anomalies` prints OK and exits 0 on a registry with no entries, and on
+one whose references could not be checked because a package they import is
+missing. Do not rely on its exit status alone: call `validate_anomaly_registry`
+with `notes=[]` and treat any note as unverified, and refuse an empty registry
+in your own gate. A fix is planned for a later patch.
+
+`MADD-ANO-299` — *collect_node_metadata() and collect_hazard_hints() walk
+SimulationNode's direct subclasses only: a node class that derives from another
+node class, such as WaveletAdaptiveNode or a downstream node with a base of its
+own, is left out with its metadata and hazard hints* — **open**.
+`collect_node_metadata()` and `collect_hazard_hints()` see only direct
+subclasses of `SimulationNode`: `WaveletAdaptiveNode`, and any downstream node
+that derives from a base class of its own, are left out. Walk
+`SimulationNode`'s subclasses recursively and read each class's `meta` instead.
+A fix is planned for a later patch.
+
+`MADD-ANO-300` — *A served node whose initial_state() raises under
+jax.eval_shape keeps a whole JAX trace alive for every accepted PUT
+/graph/params and checkpoint load: about 0.5 MB per write on a
+WaveletAdaptiveNode, never freed* — **open**. A served node whose
+`initial_state()` cannot be evaluated abstractly (`WaveletAdaptiveNode` is one)
+keeps about 0.5 MB of JAX trace alive for every accepted `PUT /graph/params`
+and checkpoint load, until the process exits. Restart a server that takes many
+such writes. A fix is planned for a later patch.
+
+`MADD-ANO-301` — *verify_node with a FAIL verdict leaves Hypothesis's
+sys.monitoring LINE events on for the rest of the caller's process: pure-Python
+code runs several times slower afterwards* — **open**. After `verify_node`
+returns a FAIL verdict, Hypothesis's line-tracing events stay on in the process
+(Python 3.12 and 3.13), and pure-Python code runs several times slower until it
+exits. Turn them off after a failing verification (the registry entry gives the
+three `sys.monitoring` calls), or verify in a separate process. A fix is
+planned for a later patch.
+
 **Resolved.**  `MADD-ANO-006`, `019`, `020`, `024`, `025`, `026`, `028`,
 `029`, `030`, `049`, `062` and `063` above, `064`, `065`, `066` and `067`
 in "[What the differential sharding harness

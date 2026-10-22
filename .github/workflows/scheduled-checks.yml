@@ -86,10 +86,13 @@ jobs:
         run: echo "key=apt-debs-${ImageOS:-unknown}-${ImageVersion:-unknown}-valgrind-clang-v1" >> "$GITHUB_OUTPUT"
 
       - name: Restore the toolchain's packages from the Actions cache
-        # Saved by the first job of an image version that had to download
-        # them; every later job installs them with dpkg and never touches a
-        # package mirror (2026-10-22: Azure's Ubuntu mirror crawled for hours).
-        uses: actions/cache@v4
+        # Saved by the first push (or slow-lane) job of an image version that
+        # had to download them; every later job, pull requests included,
+        # installs them with dpkg and never touches a package mirror
+        # (2026-10-22: Azure's Ubuntu mirror crawled for hours).  Pull
+        # requests restore only, as with the compilation cache.
+        id: apt-cache
+        uses: actions/cache/restore@v4
         with:
           path: ~/apt-debs
           key: ${{ steps.apt-image.outputs.key }}
@@ -131,6 +134,13 @@ jobs:
           done
           echo "::error title=apt::three attempts to install valgrind and clang failed"
           exit 1
+
+      - name: Save the toolchain's packages to the Actions cache
+        if: github.event_name != 'pull_request' && steps.apt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/apt-debs
+          key: ${{ steps.apt-image.outputs.key }}
 
       - name: Run tests
         env:

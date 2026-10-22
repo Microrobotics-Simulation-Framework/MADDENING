@@ -782,12 +782,17 @@ def test_the_toolchain_installs_from_a_package_cache_keyed_on_the_runner_image(w
     steps = _workflow(workflow)["jobs"][job]["steps"]
     names = [s.get("name") for s in steps]
     i = names.index(_TOOLCHAIN_STEP)
-    image, cache, install = steps[i - 2], steps[i - 1], steps[i]
+    image, cache, install, save = steps[i - 2], steps[i - 1], steps[i], steps[i + 1]
     assert "ImageOS" in image.get("run", "") and "ImageVersion" in image.get("run", ""), image
     assert image.get("id") == "apt-image"
-    assert cache.get("uses", "").startswith("actions/cache@"), cache
-    assert cache["with"]["path"] == "~/apt-debs"
-    assert cache["with"]["key"] == "${{ steps.apt-image.outputs.key }}"
+    # Restore and save are separate, so a pull request restores and never saves.
+    assert cache.get("uses", "").startswith("actions/cache/restore@"), cache
+    assert save.get("uses", "").startswith("actions/cache/save@"), save
+    for step in (cache, save):
+        assert step["with"]["path"] == "~/apt-debs"
+        assert step["with"]["key"] == "${{ steps.apt-image.outputs.key }}"
+    assert "github.event_name != 'pull_request'" in save["if"], save
+    assert "steps.apt-cache.outputs.cache-hit != 'true'" in save["if"], save
     run = install["run"]
     assert 'sudo dpkg -i "$debs"/*.deb' in run, "a cache hit must install without a mirror"
     assert 'cp /var/cache/apt/archives/*.deb "$debs"/' in run, "a download must be kept for the cache"

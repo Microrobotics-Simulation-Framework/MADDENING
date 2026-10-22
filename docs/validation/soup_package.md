@@ -12,9 +12,9 @@ to forget on a release; there is deliberately no longer one here.
 |---|---|
 | Name | MADDENING |
 | Full Name | Modular Automatic Differentiation and Data Enhanced Neural-network INteracting Graph |
-| Version | 0.4.2.dev0 |
+| Version | 0.4.3.dev0 |
 | Release Date | unreleased (development build) |
-| Licence | LGPL-3.0-or-later |
+| Licence | Apache-2.0 |
 | Source Repository | https://github.com/Microrobotics-Simulation-Framework/MADDENING |
 | Python Version | >=3.12 permitted; verified on 3.12 (the CI matrix) |
 | JAX Version | jax>=0.10,<0.13 permitted; verified at 0.10.2, 0.11.2 (the versions CI installs) |
@@ -359,8 +359,13 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-294 | The sharded wrappers place a node's static arrays on the devices again at every eager update() when its static_data builds new array objects on each access: correct results, about 50 times slower per step at 10^7 cells | `minor` | `not_safety_relevant` | `open` | >=0.2.1 |
 | MADD-ANO-295 | compile_cache reported one cache directory while JAX wrote to another: enable(b) after a compile kept JAX writing to the first directory, and with MADDENING_COMPILATION_CACHE_DIR set every GraphManager.compile() re-pointed an explicit enable() or warm_cache(cache_dir=) at the variable (never released) | `major` | `not_safety_relevant` | `resolved` (in 0.4.0) | none |
 | MADD-ANO-296 | pip install maddening[all] and maddening[dev] failed without the cairo and GObject-introspection C headers: the all extra held PyGObject, which PyPI ships as source only | `minor` | `not_safety_relevant` | `resolved` (in 0.4.1) | >=0.1.0, <0.4.1 |
+| MADD-ANO-297 | A change in transit through an entry far smaller than the rest of its field is not seen: at the default atol = 0 a coupling group reports converged=True after one pass thousands of tolerances from its fixed point | `major` | `context_dependent` | `open` | >=0.4.0.dev0 |
+| MADD-ANO-298 | The public check-anomalies command prints OK and exits 0 on a registry it verified nothing in: one with no entries, or one whose only reference could not be checked | `major` | `context_dependent` | `open` | >=0.1.0 |
+| MADD-ANO-299 | collect_node_metadata() and collect_hazard_hints() walk SimulationNode's direct subclasses only: a node class that derives from another node class, such as WaveletAdaptiveNode or a downstream node with a base of its own, is left out with its metadata and hazard hints | `major` | `context_dependent` | `open` | >=0.1.0 |
+| MADD-ANO-300 | A served node whose initial_state() raises under jax.eval_shape keeps a whole JAX trace alive for every accepted PUT /graph/params and checkpoint load: about 0.5 MB per write on a WaveletAdaptiveNode, never freed | `major` | `context_dependent` | `open` | >=0.4.0.dev0 |
+| MADD-ANO-301 | verify_node with a FAIL verdict leaves Hypothesis's sys.monitoring LINE events on for the rest of the caller's process: pure-Python code runs several times slower afterwards | `minor` | `not_safety_relevant` | `open` | >=0.4.0.dev0 |
 
-*296 anomalies registered.  57 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 46 `open` plus 11 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.  An entry recorded since the last assembly waits, under a provisional label, in `docs/fragments/anomalies/`; it is listed here once `scripts/fragments.py assemble` numbers it, and every release is assembled before it is tagged.*
+*301 anomalies registered.  62 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 51 `open` plus 11 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.  An entry recorded since the last assembly waits, under a provisional label, in `docs/fragments/anomalies/`; it is listed here once `scripts/fragments.py assemble` numbers it, and every release is assembled before it is tagged.*
 <!-- END GENERATED: known-anomalies -->
 
 ## 4. Verification Evidence
@@ -397,10 +402,10 @@ graph is included, and the root's edges are exactly the direct dependencies
 
 | File | Install | What it covers |
 |---|---|---|
-| `maddening-0.4.2.dev0-core.cdx.json` | `pip install maddening` | The base dependencies: what every user gets, and the SOUP items of §1 |
-| `maddening-0.4.2.dev0-server.cdx.json` | `pip install maddening[server]` | The network-facing bundle: the HTTP/WebSocket API, the ZeroMQ transports, terminal (`rich`) and matplotlib rendering, zstd frames.  A superset of the `api`, `network`, `viz` and `compression` extras, and of `terminal` except `termaid`, which draws the graph diagram on an operator's terminal (below) |
-| `maddening-0.4.2.dev0-surrogates.cdx.json` | `pip install maddening[surrogates]` | Neural surrogate training (`optax`).  A trained surrogate replaces a physics node, so this code is in the computed result |
-| `maddening-0.4.2.dev0-usd.cdx.json` | `pip install maddening[usd]` | OpenUSD stage read and write (`usd-core`, a binary wheel that bundles OpenUSD's C++ libraries) |
+| `maddening-0.4.3.dev0-core.cdx.json` | `pip install maddening` | The base dependencies: what every user gets, and the SOUP items of §1 |
+| `maddening-0.4.3.dev0-server.cdx.json` | `pip install maddening[server]` | The network-facing bundle: the HTTP/WebSocket API, the ZeroMQ transports, terminal (`rich`) and matplotlib rendering, zstd frames.  A superset of the `api`, `network`, `viz` and `compression` extras, and of `terminal` except `termaid`, which draws the graph diagram on an operator's terminal (below) |
+| `maddening-0.4.3.dev0-surrogates.cdx.json` | `pip install maddening[surrogates]` | Neural surrogate training (`optax`).  A trained surrogate replaces a physics node, so this code is in the computed result |
+| `maddening-0.4.3.dev0-usd.cdx.json` | `pip install maddening[usd]` | OpenUSD stage read and write (`usd-core`, a binary wheel that bundles OpenUSD's C++ libraries) |
 
 **Why these installs, and not the others.**  These are the installs whose
 code runs in a deployed simulation: the base install, the network surfaces

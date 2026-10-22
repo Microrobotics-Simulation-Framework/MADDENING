@@ -83,7 +83,7 @@ MADDENING/
 ├── GOVERNANCE.md                      # Decision-making process (new)
 ├── CONTRIBUTING.md                    # Contributor guide (new)
 ├── SECURITY.md                        # Security reporting (new)
-├── LICENSE                            # LGPL-3.0-or-later (existing)
+├── LICENSE                            # Apache-2.0 (from 0.4.2; LGPL before)
 │
 ├── docs/                              # Tier 2: Comprehensive documentation
 │   ├── conf.py                        # Sphinx configuration
@@ -195,7 +195,7 @@ This document should contain the following elements:
 
 **Platform Positioning Statement** — clear, concise, and legally precise:
 
-> MADDENING is a general-purpose computational framework for multiphysics simulation and surrogate model training. It is research software distributed under the LGPL-3.0-or-later license.
+> MADDENING is a general-purpose computational framework for multiphysics simulation and surrogate model training. It is research software distributed under the Apache-2.0 licence (releases up to and including 0.4.1: LGPL).
 >
 > MADDENING is NOT a medical device as defined by EU MDR (EU 2017/745) Article 2(1), nor is it a medical device under US FDA regulations. It does not have a medical purpose. It is not intended for direct clinical use, clinical decision-making, or patient diagnosis. It has not been CE-marked, cleared, or approved by any regulatory body.
 >
@@ -211,9 +211,9 @@ This document should contain the following elements:
 >
 > This boundary is analogous to how a mathematical library like NumPy or LAPACK assumes its callers provide valid inputs — the security perimeter belongs to the application, not the library.
 
-**LGPL Replaceability Statement**:
+**Licence Statement**:
 
-> LGPL-3.0 Section 4 requires that the end user be able to replace the LGPL-licensed component with a modified version. For MADDENING, this obligation is satisfied via Python's standard module system: the end user can replace the `maddening` package by installing a modified version into the same Python environment (e.g., `pip install ./my-modified-maddening`). No special linking, build steps, or binary compatibility mechanisms are required. The commercial product need not provide its own source code or build tooling — only the ability to substitute the MADDENING package.
+> From 0.4.2, MADDENING is licensed under the Apache License, Version 2.0. Releases up to and including 0.4.1 were distributed under the LGPL, and copies obtained under those terms keep them. Apache-2.0 is permissive, with no copyleft and no replaceability obligation: a downstream product keeps the copyright and licence notices, ships the attributions in MADDENING's `NOTICE` file, and states any changes it made to MADDENING's files. The licence includes a patent grant from each contributor.
 
 **Layered Responsibility Model** (updated for EU MDR context):
 
@@ -254,7 +254,7 @@ Secondary regulatory guidance for US-market alignment, explaining:
 Documents the specific relationship chain:
 
 ```
-MADDENING (framework, LGPL, open source research tool, not a medical device)
+MADDENING (framework, Apache-2.0, open source research tool, not a medical device)
     └── MIME (physics engine for microrobotics, open source, not a medical device)
         └── MICROBOTICA (research simulator, open source, not a medical device)
             └── [Commercial Product] (SaMD, EU MDR Class IIb–III, CE marking required)
@@ -294,7 +294,7 @@ MADDENING's open-source nature is an asset, not a liability, in this model:
 
 - **Full inspectability**: Notified Body reviewers can examine the complete source code. There are no black-box concerns — every algorithm, every numerical method, every line of code is available for scrutiny.
 - **Published research credibility**: Broad adoption in published academic research builds an independent verification record. Peer-reviewed publications citing MADDENING constitute third-party evidence of computational credibility that is difficult to manufacture commercially.
-- **No vendor lock-in**: The commercial entity is not dependent on a single vendor for their computational foundation. The LGPL licence ensures they can always fork, modify, and maintain MADDENING independently if needed.
+- **No vendor lock-in**: The commercial entity is not dependent on a single vendor for their computational foundation. The Apache-2.0 licence ensures they can always fork, modify, and maintain MADDENING independently if needed.
 - **Community-surfaced anomalies**: A large research user base surfaces bugs and edge cases faster than any internal QA team. Every research user running MADDENING in novel configurations is effectively performing exploratory testing.
 
 #### Responsibility Allocation
@@ -314,18 +314,18 @@ MADDENING's open-source nature is an asset, not a liability, in this model:
 
 Any number of commercial entities may independently build regulated products on top of MADDENING, MIME, and MICROBOTICA. The documentation architecture is designed to serve all of them equally — any manufacturer performing a Class C SOUP assessment of MADDENING should find everything they need in the SOUP package, regardless of who they are or what specific clinical application they are building.
 
-#### LGPL Licence and the Commercial Model
+#### Licence and the Commercial Model
 
-MADDENING is licensed under LGPL-3.0-or-later, which is deliberately chosen to enable this model:
+From 0.4.2, MADDENING is licensed under Apache-2.0 (releases up to and including 0.4.1: LGPL-3.0-or-later, as declared). Apache-2.0 suits this model:
 
-- **Commercial use permitted**: The LGPL explicitly permits commercial use, including building proprietary products that link against MADDENING.
-- **Weak copyleft**: Unlike the GPL, the LGPL's "weak copyleft" means proprietary products can link against MADDENING without being required to open-source their own code. Only modifications to MADDENING itself must be released under LGPL.
-- **Distribution requirements**: Commercial entities distributing products that include MADDENING must provide the LGPL-licensed MADDENING source (or a written offer to do so) and allow the user to replace the LGPL component. This is standard practice and does not impede commercial deployment.
-- **Patent grant**: LGPL-3.0 includes an implicit patent licence, reducing IP risk for commercial adopters.
+- **Commercial use permitted**: a proprietary product may use, modify and redistribute MADDENING, in source or binary form.
+- **No copyleft**: neither the product's own code nor modifications to MADDENING have to be released.
+- **Distribution requirements**: keep the copyright and licence notices, ship the attributions in MADDENING's `NOTICE` file, and mark files that were changed. There is no source-offer or replaceability obligation.
+- **Patent grant**: each contributor grants an explicit patent licence for their contributions, which terminates for a party that sues over the work's patents.
 
-Commercial entities building on MADDENING should assess LGPL compatibility with their own licensing strategy. The LGPL is widely accepted in medical device software — it imposes no restriction on the proprietary status of the clinical interpretation layer, user interface, or any other code that does not modify MADDENING itself.
+Commercial entities building on MADDENING should still record each layer's licence in their technical file, from each layer's own `LICENSE`: they can differ (MICROROBOTICA, for one, is AGPL-3.0-or-later).
 
-**Future commercial offerings**: A future commercial version, dual licensing arrangement, or services offering around MADDENING itself is not ruled out. If the developer or a future organisation chooses to offer commercial licences, paid support, hosted infrastructure, or other services around MADDENING, MIME, or MICROBOTICA, the documentation architecture described in this document supports that future without requiring structural changes. The LGPL explicitly permits this kind of dual-track open source / commercial offering. This possibility is acknowledged as a natural consequence of the licence model, not as a commitment or plan.
+**Future commercial offerings**: A future commercial version, paid support, hosted infrastructure, or other services around MADDENING, MIME, or MICROROBOTICA are not ruled out. The documentation architecture described in this document supports that future without requiring structural changes. This possibility is acknowledged as a natural consequence of the licence model, not as a commitment or plan.
 
 #### Research Adoption as Regulatory Strategy
 
@@ -828,7 +828,7 @@ If you use MADDENING in academic work, please cite:
 
 ## License
 
-LGPL-3.0-or-later. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 ```
 
 ### Root-Level Governance Files
@@ -2130,7 +2130,7 @@ MADDENING should publish a `docs/validation/soup_package.md` with each release, 
 | Full name | Modular Automatic Differentiation and Data Enhanced Neural-network INteracting Graph |
 | Version | [X.Y.Z] |
 | Release date | [YYYY-MM-DD] |
-| License | LGPL-3.0-or-later |
+| License | Apache-2.0 |
 | Source repository | https://github.com/[org]/MADDENING |
 | PyPI package | https://pypi.org/project/maddening/[X.Y.Z]/ |
 | SHA-256 (sdist) | [hash] |
@@ -2427,7 +2427,7 @@ The technical file must include a complete description of the design stages appl
 - `docs/validation/framework_verification.md` — verification evidence summary with unit-level traceability (required for Class C per IEC 62304 Clause 5.5)
 - `docs/validation/soup_package.md` — structured SOUP package document written for Notified Body review
 - IEC 62304 lifecycle mapping (Section 11) — demonstrates systematic development
-- Source code available under LGPL — full transparency for Notified Body review
+- Source code available under Apache-2.0 — full transparency for Notified Body review
 
 #### Section 6 — Benefit-risk analysis and risk management
 
@@ -2542,7 +2542,7 @@ title: "MADDENING"
 type: software
 version: "0.1.0"                    # Updated with each release
 date-released: "2025-XX-XX"         # Updated with each release
-license: "LGPL-3.0-or-later"
+license: "Apache-2.0"
 repository-code: "https://github.com/[org]/MADDENING"
 identifiers:
   - type: doi
@@ -3010,7 +3010,7 @@ When MIME is assessed as SOUP by a downstream commercial manufacturer, that manu
 |-------|-------|
 | Name | MADDENING |
 | Version | 0.3.2 (pinned) |
-| Licence | LGPL-3.0-or-later |
+| Licence | Apache-2.0 |
 | SOUP package | https://github.com/[org]/MADDENING/blob/v0.3.2/docs/validation/soup_package.md |
 | Known anomalies | https://github.com/[org]/MADDENING/blob/v0.3.2/docs/validation/known_anomalies.yaml |
 | SHA-256 (PyPI sdist) | [hash of maddening-0.3.2.tar.gz] |
@@ -3349,7 +3349,7 @@ MADDENING, MIME, and MICROBOTICA are all open-source research tools that evolve 
 
 #### Layer 1: MADDENING — Computational Foundation
 
-**Status**: Research software, LGPL licence, no medical purpose.
+**Status**: Research software, Apache-2.0 licence (from 0.4.2), no medical purpose.
 
 **Regulatory requirement**: None. MADDENING is not a medical device.
 
@@ -3366,7 +3366,7 @@ MADDENING, MIME, and MICROBOTICA are all open-source research tools that evolve 
 
 #### Layer 2: MIME — Physics Engine
 
-**Status**: Open-source physics engine for microrobotics, built on MADDENING. LGPL licence. No medical purpose.
+**Status**: Open-source physics engine for microrobotics, built on MADDENING. Licensed as its own `LICENSE` states. No medical purpose.
 
 **Regulatory requirement**: None. MIME is not a medical device.
 
@@ -3565,7 +3565,7 @@ These items establish the shared compliance infrastructure that all subsequent p
 - [x] Contains a **Layered Responsibility Model** table assigning responsibilities between MADDENING, downstream manufacturer, and downstream user (Section 2)
 - [x] Contains a **Commercial Boundary Statement** explaining that the regulated clinical product is built by a downstream commercial entity, not by the MADDENING project (Section 2)
 - [x] Contains a **Cybersecurity Boundary Statement** (MDCG 2019-16): MADDENING assumes trusted inputs; the commercial integration layer is responsible for input sanitization, parameter validation, and graph topology validation before data reaches the framework (Section 2)
-- [x] Contains an **LGPL Replaceability Statement**: LGPL-3.0 "replaceability" obligation is satisfied via Python's module system — the end user can replace the `maddening` package with a modified version by installing it into the same Python environment, with no special linking or build steps required (Section 2)
+- [x] Contains a **Licence Statement**: Apache-2.0 from 0.4.2 (notices kept, the `NOTICE` attributions shipped, changed files marked; no copyleft or replaceability obligation; LGPL up to and including 0.4.1).
 
 **Anomaly lifecycle (three-phase model):**
 

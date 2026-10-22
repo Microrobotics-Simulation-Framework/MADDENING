@@ -9,6 +9,20 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-10-22
+
+### Changed
+
+- **MADDENING is now licensed under the Apache License, Version 2.0** (`Apache-2.0`), and ships a `NOTICE` file. Releases up to and including 0.4.1 were distributed under the LGPL, and copies obtained under those terms keep them. The package metadata, `CITATION.cff`, the SOUP document, the SBOMs and the regulatory guides (`intended_use.md`, `downstream_integration.md`) say so; the guides' LGPL replaceability statement becomes a licence statement.
+
+### Verification
+
+- The 3D frame renderer's tests (`tests/api/test_frame_renderer_3d.py`, 14 tests) now run in CI, in their own job under a virtual display. They skipped in every job before, because the sharded lanes do not install PyVista.
+
+### Known Anomalies
+
+- 62 registry entries are reachable in 0.4.2: 51 open and 11 partly resolved.  The release notes' "Known anomalies" section lists each; the registry is `docs/validation/known_anomalies.yaml`.
+
 ## [0.4.1] - 2026-10-13
 
 Packaging and installation-guide fixes. No library code changed.

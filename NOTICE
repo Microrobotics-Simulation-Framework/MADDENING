@@ -1,0 +1,12 @@
+MADDENING
+Copyright 2025-2026 Nicholas Ehsan Roy
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+Releases up to and including 0.4.1 were distributed under the GNU Lesser
+General Public License; copies obtained under those terms keep them.
+
+This product includes third-party files under their own licences:
+
+- src/maddening/fmi/c/include/fmi3*.h: the FMI 3 standard headers,
+  Copyright the Modelica Association Project "FMI", licensed under the
+  2-Clause BSD License as stated in each file.

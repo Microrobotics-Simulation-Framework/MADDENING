@@ -91,7 +91,7 @@ jobs:
             timeout 90 sudo apt-get $apt_opts update -q \
               && timeout 150 sudo apt-get $apt_opts install -y -q valgrind clang \
               && exit 0
-            echo "::warning title=apt::attempt $attempt to install valgrind and clang timed out or failed; retrying"
+            echo "::warning title=apt::attempt $attempt to install valgrind and clang timed out or failed, retrying"
             sudo dpkg --configure -a || true
             sleep 10
           done

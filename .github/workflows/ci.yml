@@ -257,7 +257,7 @@ jobs:
             timeout 90 sudo apt-get $apt_opts update -q \
               && timeout 150 sudo apt-get $apt_opts install -y -q valgrind clang \
               && exit 0
-            echo "::warning title=apt::attempt $attempt to install valgrind and clang timed out or failed; retrying"
+            echo "::warning title=apt::attempt $attempt to install valgrind and clang timed out or failed, retrying"
             sudo dpkg --configure -a || true
             sleep 10
           done
@@ -672,7 +672,7 @@ jobs:
             timeout 90 sudo apt-get $apt_opts update -q \
               && timeout 150 sudo apt-get $apt_opts install -y -q xvfb libgl1 libegl1 libosmesa6 \
               && exit 0
-            echo "::warning title=apt::attempt $attempt to install the virtual display and Mesa timed out or failed; retrying"
+            echo "::warning title=apt::attempt $attempt to install the virtual display and Mesa timed out or failed, retrying"
             sudo dpkg --configure -a || true
             sleep 10
           done

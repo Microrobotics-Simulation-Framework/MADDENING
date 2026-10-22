@@ -435,7 +435,7 @@
       "version": "0.13.8"
     },
     {
-      "bom-ref": "fastapi==0.143.0",
+      "bom-ref": "fastapi==0.159.1",
       "description": "FastAPI framework, high performance, easy to learn, fast to code, ready for production",
       "externalReferences": [
         {
@@ -505,6 +505,18 @@
         {
           "name": "maddening:sbom:requires-dist",
           "value": "fastar>=0.9.0; extra == \"standard\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "httpx2>=2.0.0; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "httpx2>=2.0.0; extra == \"standard\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "httpx2>=2.0.0; extra == \"standard-no-fastapi-cloud-cli\""
         },
         {
           "name": "maddening:sbom:requires-dist",
@@ -640,15 +652,15 @@
         },
         {
           "name": "maddening:sbom:requires-dist-count",
-          "value": "41"
+          "value": "44"
         }
       ],
-      "purl": "pkg:pypi/fastapi@0.143.0",
+      "purl": "pkg:pypi/fastapi@0.159.1",
       "type": "library",
-      "version": "0.143.0"
+      "version": "0.159.1"
     },
     {
-      "bom-ref": "fonttools==4.66.1",
+      "bom-ref": "fonttools==4.67.0",
       "description": "Tools to manipulate font files",
       "externalReferences": [
         {
@@ -784,9 +796,9 @@
           "value": "28"
         }
       ],
-      "purl": "pkg:pypi/fonttools@4.66.1",
+      "purl": "pkg:pypi/fonttools@4.67.0",
       "type": "library",
-      "version": "4.66.1"
+      "version": "4.67.0"
     },
     {
       "bom-ref": "h11==0.16.0",
@@ -881,7 +893,7 @@
       "version": "3.20"
     },
     {
-      "bom-ref": "jax==0.11.2",
+      "bom-ref": "jax==0.12.0.1",
       "description": "Differentiate, compile, and transform Numpy code.",
       "externalReferences": [
         {
@@ -910,71 +922,71 @@
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jax-cuda12-plugin<=0.11.2,>=0.11.2; extra == \"cuda12-local\""
+          "value": "jax-cuda12-plugin<=0.12.0.1,>=0.12.0.1; extra == \"cuda12-local\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jax-cuda12-plugin[with-cuda]<=0.11.2,>=0.11.2; extra == \"cuda\""
+          "value": "jax-cuda12-plugin[with-cuda]<=0.12.0.1,>=0.12.0.1; extra == \"cuda\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jax-cuda12-plugin[with-cuda]<=0.11.2,>=0.11.2; extra == \"cuda12\""
+          "value": "jax-cuda12-plugin[with-cuda]<=0.12.0.1,>=0.12.0.1; extra == \"cuda12\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jax-cuda13-plugin<=0.11.2,>=0.11.2; extra == \"cuda13-local\""
+          "value": "jax-cuda13-plugin<=0.12.0.1,>=0.12.0.1; extra == \"cuda13-local\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jax-cuda13-plugin[with-cuda]<=0.11.2,>=0.11.2; extra == \"cuda13\""
+          "value": "jax-cuda13-plugin[with-cuda]<=0.12.0.1,>=0.12.0.1; extra == \"cuda13\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jax-oneapi-plugin[with-oneapi]<=0.11.2,>=0.11.2; extra == \"oneapi\""
+          "value": "jax-oneapi-plugin[with-oneapi]<=0.12.0.1,>=0.12.0.1; extra == \"oneapi\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jax-rocm7-plugin==0.11.2.*; extra == \"rocm7-local\""
+          "value": "jax-rocm7-plugin==0.12.0.1.*; extra == \"rocm7-local\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jaxlib<=0.11.2,>=0.11.2"
+          "value": "jaxlib<=0.12.0.1,>=0.11.2"
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"cuda\""
+          "value": "jaxlib<=0.12.0.1,>=0.12.0.1; extra == \"cuda\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"cuda12\""
+          "value": "jaxlib<=0.12.0.1,>=0.12.0.1; extra == \"cuda12\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"cuda12-local\""
+          "value": "jaxlib<=0.12.0.1,>=0.12.0.1; extra == \"cuda12-local\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"cuda13\""
+          "value": "jaxlib<=0.12.0.1,>=0.12.0.1; extra == \"cuda13\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"cuda13-local\""
+          "value": "jaxlib<=0.12.0.1,>=0.12.0.1; extra == \"cuda13-local\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"oneapi\""
+          "value": "jaxlib<=0.12.0.1,>=0.12.0.1; extra == \"oneapi\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"rocm7-local\""
+          "value": "jaxlib<=0.12.0.1,>=0.12.0.1; extra == \"rocm7-local\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"tpu\""
+          "value": "jaxlib<=0.12.0.1,>=0.12.0.1; extra == \"tpu\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jaxlib==0.11.1; extra == \"ci\""
+          "value": "jaxlib==0.11.2; extra == \"ci\""
         },
         {
           "name": "maddening:sbom:requires-dist",
@@ -986,7 +998,7 @@
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "libtpu==0.0.48.*; extra == \"tpu\""
+          "value": "libtpu==0.0.50.*; extra == \"tpu\""
         },
         {
           "name": "maddening:sbom:requires-dist",
@@ -994,7 +1006,7 @@
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "numpy>=2.1"
+          "value": "numpy>=2.2"
         },
         {
           "name": "maddening:sbom:requires-dist",
@@ -1017,12 +1029,12 @@
           "value": "26"
         }
       ],
-      "purl": "pkg:pypi/jax@0.11.2",
+      "purl": "pkg:pypi/jax@0.12.0.1",
       "type": "library",
-      "version": "0.11.2"
+      "version": "0.12.0.1"
     },
     {
-      "bom-ref": "jaxlib==0.11.2",
+      "bom-ref": "jaxlib==0.12.0.1",
       "description": "XLA library for JAX",
       "externalReferences": [
         {
@@ -1058,9 +1070,9 @@
           "value": "3"
         }
       ],
-      "purl": "pkg:pypi/jaxlib@0.11.2",
+      "purl": "pkg:pypi/jaxlib@0.12.0.1",
       "type": "library",
-      "version": "0.11.2"
+      "version": "0.12.0.1"
     },
     {
       "bom-ref": "jaxtyping==0.3.11",
@@ -1665,7 +1677,7 @@
       "version": "26.3"
     },
     {
-      "bom-ref": "pillow==12.3.0",
+      "bom-ref": "pillow==13.0.0",
       "description": "Python Imaging Library (fork)",
       "externalReferences": [
         {
@@ -1684,6 +1696,11 @@
           "url": "https://github.com/python-pillow/Pillow"
         },
         {
+          "comment": "from packaging metadata Project-URL: Security",
+          "type": "other",
+          "url": "https://pillow.readthedocs.io/en/stable/handbook/security.html"
+        },
+        {
           "comment": "from packaging metadata Project-URL: Release notes",
           "type": "other",
           "url": "https://pillow.readthedocs.io/en/stable/releasenotes/index.html"
@@ -1691,7 +1708,7 @@
         {
           "comment": "from packaging metadata Project-URL: Funding",
           "type": "other",
-          "url": "https://tidelift.com/subscription/pkg/pypi-pillow?utm_source=pypi-pillow&utm_medium=pypi"
+          "url": "https://tidelift.com/lifter/search/pypi/pillow"
         },
         {
           "comment": "from packaging metadata Project-URL: Changelog",
@@ -1701,7 +1718,7 @@
         {
           "comment": "from packaging metadata Project-URL: Homepage",
           "type": "website",
-          "url": "https://python-pillow.github.io"
+          "url": "https://python-pillow.org"
         }
       ],
       "licenses": [
@@ -1768,6 +1785,10 @@
         },
         {
           "name": "maddening:sbom:requires-dist",
+          "value": "psutil; (sys_platform == \"linux\" or sys_platform == \"darwin\") and extra == \"tests\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
           "value": "pyarrow; extra == \"test-arrow\""
         },
         {
@@ -1816,12 +1837,12 @@
         },
         {
           "name": "maddening:sbom:requires-dist-count",
-          "value": "25"
+          "value": "26"
         }
       ],
-      "purl": "pkg:pypi/pillow@12.3.0",
+      "purl": "pkg:pypi/pillow@13.0.0",
       "type": "library",
-      "version": "12.3.0"
+      "version": "13.0.0"
     },
     {
       "bom-ref": "pydantic==2.14.1",
@@ -2045,7 +2066,7 @@
       "version": "3.3.3"
     },
     {
-      "bom-ref": "python-dateutil==2.9.0.post0",
+      "bom-ref": "python-dateutil==3.0.0",
       "description": "Extensions to the standard Python datetime module",
       "externalReferences": [
         {
@@ -2082,16 +2103,20 @@
       "properties": [
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "six >=1.5"
+          "value": "six>=1.6"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "tzdata"
         },
         {
           "name": "maddening:sbom:requires-dist-count",
-          "value": "1"
+          "value": "2"
         }
       ],
-      "purl": "pkg:pypi/python-dateutil@2.9.0.post0",
+      "purl": "pkg:pypi/python-dateutil@3.0.0",
       "type": "library",
-      "version": "2.9.0.post0"
+      "version": "3.0.0"
     },
     {
       "bom-ref": "PyYAML==6.0.3",
@@ -2485,7 +2510,7 @@
       "version": "1.17.0"
     },
     {
-      "bom-ref": "starlette==1.7.0",
+      "bom-ref": "starlette==1.9.0",
       "description": "The little ASGI library that shines.",
       "externalReferences": [
         {
@@ -2565,9 +2590,9 @@
           "value": "9"
         }
       ],
-      "purl": "pkg:pypi/starlette@1.7.0",
+      "purl": "pkg:pypi/starlette@1.9.0",
       "type": "library",
-      "version": "1.7.0"
+      "version": "1.9.0"
     },
     {
       "bom-ref": "typing_extensions==4.16.0",
@@ -2670,6 +2695,50 @@
       "purl": "pkg:pypi/typing-inspection@0.4.4",
       "type": "library",
       "version": "0.4.4"
+    },
+    {
+      "bom-ref": "tzdata==2026.5",
+      "description": "Provider of IANA time zone data",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: Documentation",
+          "type": "documentation",
+          "url": "https://tzdata.python.org"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Bug Reports",
+          "type": "issue-tracker",
+          "url": "https://github.com/python/tzdata/issues"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Source",
+          "type": "other",
+          "url": "https://github.com/python/tzdata"
+        },
+        {
+          "comment": "from packaging metadata: Home-page",
+          "type": "website",
+          "url": "https://github.com/python/tzdata"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "tzdata",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "0"
+        }
+      ],
+      "purl": "pkg:pypi/tzdata@2026.5",
+      "type": "library",
+      "version": "2026.5"
     },
     {
       "bom-ref": "uvicorn==0.54.0",
@@ -2825,7 +2894,7 @@
       "version": "0.1.7"
     },
     {
-      "bom-ref": "websockets==17.2",
+      "bom-ref": "websockets==17.3",
       "description": "An implementation of the WebSocket Protocol (RFC 6455 & 7692)",
       "externalReferences": [
         {
@@ -2869,9 +2938,9 @@
           "value": "0"
         }
       ],
-      "purl": "pkg:pypi/websockets@17.2",
+      "purl": "pkg:pypi/websockets@17.3",
       "type": "library",
-      "version": "17.2"
+      "version": "17.3"
     },
     {
       "bom-ref": "zstandard==0.25.0",
@@ -2943,7 +3012,7 @@
       "dependsOn": [
         "matplotlib==3.11.2",
         "numpy==2.5.4",
-        "pillow==12.3.0"
+        "pillow==13.0.0"
       ],
       "ref": "contourpy==1.4.0"
     },
@@ -2955,7 +3024,7 @@
     },
     {
       "dependsOn": [
-        "jax==0.11.2",
+        "jax==0.12.0.1",
         "jaxtyping==0.3.11",
         "typing_extensions==4.16.0",
         "wadler_lindig==0.1.7"
@@ -2968,19 +3037,19 @@
         "annotated-doc==0.0.5",
         "opentelemetry-api==1.45.1",
         "pydantic==2.14.1",
-        "starlette==1.7.0",
+        "starlette==1.9.0",
         "typing-inspection==0.4.4",
         "typing_extensions==4.16.0",
         "uvicorn==0.54.0"
       ],
-      "ref": "fastapi==0.143.0"
+      "ref": "fastapi==0.159.1"
     },
     {
       "dependsOn": [
         "matplotlib==3.11.2",
         "scipy==1.18.1"
       ],
-      "ref": "fonttools==4.66.1"
+      "ref": "fonttools==4.67.0"
     },
     {
       "ref": "h11==0.16.0"
@@ -2990,13 +3059,13 @@
     },
     {
       "dependsOn": [
-        "jaxlib==0.11.2",
+        "jaxlib==0.12.0.1",
         "ml_dtypes==0.6.0",
         "numpy==2.5.4",
         "opt_einsum==3.4.0",
         "scipy==1.18.1"
       ],
-      "ref": "jax==0.11.2"
+      "ref": "jax==0.12.0.1"
     },
     {
       "dependsOn": [
@@ -3004,7 +3073,7 @@
         "numpy==2.5.4",
         "scipy==1.18.1"
       ],
-      "ref": "jaxlib==0.11.2"
+      "ref": "jaxlib==0.12.0.1"
     },
     {
       "dependsOn": [
@@ -3018,7 +3087,7 @@
     {
       "dependsOn": [
         "equinox==0.13.8",
-        "jax==0.11.2",
+        "jax==0.12.0.1",
         "jaxtyping==0.3.11",
         "typing_extensions==4.16.0"
       ],
@@ -3027,9 +3096,9 @@
     {
       "dependsOn": [
         "PyYAML==6.0.3",
-        "fastapi==0.143.0",
-        "jax==0.11.2",
-        "jaxlib==0.11.2",
+        "fastapi==0.159.1",
+        "jax==0.12.0.1",
+        "jaxlib==0.12.0.1",
         "lineax==0.1.1",
         "matplotlib==3.11.2",
         "numpy==2.5.4",
@@ -3037,10 +3106,10 @@
         "rich==15.0.0",
         "scipy==1.18.1",
         "uvicorn==0.54.0",
-        "websockets==17.2",
+        "websockets==17.3",
         "zstandard==0.25.0"
       ],
-      "ref": "maddening==0.4.2.dev0"
+      "ref": "maddening==0.4.2"
     },
     {
       "dependsOn": [
@@ -3053,13 +3122,13 @@
       "dependsOn": [
         "contourpy==1.4.0",
         "cycler==0.12.1",
-        "fonttools==4.66.1",
+        "fonttools==4.67.0",
         "kiwisolver==1.5.1",
         "numpy==2.5.4",
         "packaging==26.3",
-        "pillow==12.3.0",
+        "pillow==13.0.0",
         "pyparsing==3.3.3",
-        "python-dateutil==2.9.0.post0"
+        "python-dateutil==3.0.0"
       ],
       "ref": "matplotlib==3.11.2"
     },
@@ -3091,14 +3160,15 @@
       "dependsOn": [
         "packaging==26.3"
       ],
-      "ref": "pillow==12.3.0"
+      "ref": "pillow==13.0.0"
     },
     {
       "dependsOn": [
         "annotated-types==0.8.0",
         "pydantic_core==2.50.1",
         "typing-inspection==0.4.4",
-        "typing_extensions==4.16.0"
+        "typing_extensions==4.16.0",
+        "tzdata==2026.5"
       ],
       "ref": "pydantic==2.14.1"
     },
@@ -3113,9 +3183,10 @@
     },
     {
       "dependsOn": [
-        "six==1.17.0"
+        "six==1.17.0",
+        "tzdata==2026.5"
       ],
-      "ref": "python-dateutil==2.9.0.post0"
+      "ref": "python-dateutil==3.0.0"
     },
     {
       "ref": "pyzmq==27.2.0"
@@ -3146,7 +3217,7 @@
         "opentelemetry-api==1.45.1",
         "typing_extensions==4.16.0"
       ],
-      "ref": "starlette==1.7.0"
+      "ref": "starlette==1.9.0"
     },
     {
       "dependsOn": [
@@ -3158,12 +3229,15 @@
       "ref": "typing_extensions==4.16.0"
     },
     {
+      "ref": "tzdata==2026.5"
+    },
+    {
       "dependsOn": [
         "PyYAML==6.0.3",
         "click==8.5.0",
         "h11==0.16.0",
         "typing_extensions==4.16.0",
-        "websockets==17.2"
+        "websockets==17.3"
       ],
       "ref": "uvicorn==0.54.0"
     },
@@ -3174,7 +3248,7 @@
       "ref": "wadler_lindig==0.1.7"
     },
     {
-      "ref": "websockets==17.2"
+      "ref": "websockets==17.3"
     },
     {
       "ref": "zstandard==0.25.0"
@@ -3182,7 +3256,7 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "maddening==0.4.2.dev0",
+      "bom-ref": "maddening==0.4.2",
       "description": "Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph",
       "externalReferences": [
         {
@@ -3215,9 +3289,9 @@
         }
       ],
       "name": "maddening",
-      "purl": "pkg:pypi/maddening@0.4.2.dev0",
+      "purl": "pkg:pypi/maddening@0.4.2",
       "type": "library",
-      "version": "0.4.2.dev0"
+      "version": "0.4.2"
     },
     "properties": [
       {
@@ -3226,7 +3300,7 @@
       },
       {
         "name": "maddening:sbom:exclude-newer",
-        "value": "2026-10-13T00:00:00Z"
+        "value": "2026-10-22T00:00:00Z"
       },
       {
         "name": "maddening:sbom:generator",
@@ -3289,7 +3363,7 @@
         "value": "uv 0.11.15 (x86_64-unknown-linux-gnu)"
       }
     ],
-    "timestamp": "2026-10-13T00:00:00Z",
+    "timestamp": "2026-10-22T00:00:00Z",
     "tools": {
       "components": [
         {
@@ -3393,7 +3467,7 @@
       ]
     }
   },
-  "serialNumber": "urn:uuid:c50c1a13-97e2-5f2a-ae49-b89ff1b9bef3",
+  "serialNumber": "urn:uuid:67a20118-f139-547e-9553-465cb1af3e5c",
   "specVersion": "1.6",
   "version": 1
 }

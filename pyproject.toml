@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "maddening"
-version = "0.4.2.dev0"
+version = "0.4.2"
 description = "Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph"
 readme = "README.md"
 license = "Apache-2.0"

@@ -532,7 +532,7 @@ claims:
     first residual it measures.  It takes two lagged reads in series between
     a kept field and itself.  At atol = 0 an entry that small against its
     field hides a change the same way, every field being measured against
-    its own largest entry (MADD-ANO-NEW-records-known-anomalies-0-4-2-1,
+    its own largest entry (MADD-ANO-297,
     open: one member whose one field holds entries of 1 and 1e-8, read back
     through an edge to itself, accepted after one pass 3.4e3 to 7.1e3
     tolerances off under all three norms; with the small quantity in a

@@ -7,7 +7,7 @@ first residual it measures.  It takes two lagged reads in series between
 a kept quantity and itself.  At ``atol = 0`` every field is measured
 against its own largest magnitude, so an ENTRY far below its field's
 largest one is just as invisible, and the same thing happens with no
-band declared (MADD-ANO-NEW-records-known-anomalies-0-4-2-1, open):
+band declared (MADD-ANO-297, open):
 
 * ONE member, one field ``y`` of two entries, one edge from the member to
   itself (``y -> u``)::
@@ -86,7 +86,7 @@ PROMISE = 10.0
 #: of five for another jax or platform, and is still 100 promises.
 PINNED_OFF = 1e3
 
-_LABEL = "MADD-ANO-NEW-records-known-anomalies-0-4-2-1"
+_LABEL = "MADD-ANO-297"
 
 _XFAIL = pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
     f"{_LABEL} (open): at atol = 0 a field whose entries are 1 and 1e-8 hides a change in "
@@ -206,7 +206,7 @@ def test_a_converged_step_of_a_packed_field_holds_its_large_entry():
 
 def test_the_packed_field_accepts_after_one_pass_far_from_its_fixed_point():
     """The premise of the strict xfail, as what happens today (a
-    characterisation of MADD-ANO-NEW-records-known-anomalies-0-4-2-1).
+    characterisation of MADD-ANO-297).
     When this stops being true the xfail above turns into a pass and both
     are to be rewritten."""
     steps = run("packed", PER_PUSH_NORM)

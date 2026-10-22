@@ -10,7 +10,7 @@ registry.  It prints ``OK: anomaly registry is valid`` and exits 0 on
   and the command never asks for that list.
 
 Either way nothing was verified, and nothing says so
-(MADD-ANO-NEW-records-known-anomalies-0-4-2-2, open).  MADDENING's own
+(MADD-ANO-298, open).  MADDENING's own
 gate, ``scripts/check_anomalies.py``, refuses both: it fails a registry
 with no anomalies, and one in which no reference was verified.  The
 command does resolve what it can import: a reference to a module that does
@@ -34,7 +34,7 @@ import pytest
 from maddening.compliance import validate_anomaly_registry
 
 _SRC = str(Path(__file__).resolve().parents[2] / "src")
-_LABEL = "MADD-ANO-NEW-records-known-anomalies-0-4-2-2"
+_LABEL = "MADD-ANO-298"
 #: A first-party package of the downstream project, made up for the test.
 _PACKAGE = "madd_ano_downstream_fixture"
 _OK = "OK: anomaly registry is valid"

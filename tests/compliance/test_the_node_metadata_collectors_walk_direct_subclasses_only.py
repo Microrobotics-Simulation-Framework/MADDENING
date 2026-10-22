@@ -5,7 +5,7 @@ name ``SimulationNode`` as a base and no deeper ones.  A node class that
 derives from another node class is left out, with its ``NodeMeta`` and its
 hazard hints, although the documentation promises every node class in the
 process, "a complete picture" for a manufacturer's risk assessment
-(MADD-ANO-NEW-records-known-anomalies-0-4-2-3, open):
+(MADD-ANO-299, open):
 
 * the built-in ``WaveletAdaptiveNode`` derives from ``AdaptiveNode``; its
   own metadata and hazard hints are in neither result, though
@@ -32,7 +32,7 @@ from maddening.compliance import NodeMeta, collect_hazard_hints, collect_node_me
 from maddening.core.node import SimulationNode
 from maddening.nodes.adaptive import AdaptiveNode, WaveletAdaptiveNode
 
-_LABEL = "MADD-ANO-NEW-records-known-anomalies-0-4-2-3"
+_LABEL = "MADD-ANO-299"
 
 
 def _downstream_classes():

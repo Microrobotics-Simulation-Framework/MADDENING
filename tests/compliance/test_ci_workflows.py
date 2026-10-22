@@ -764,6 +764,41 @@ def test_the_scan_for_apt_get_steps_finds_the_ones_there_are():
     assert {(w, j) for w, j, _s in _apt_steps()} >= {("ci.yml", "test"), ("slow-tests.yml", "slow")}
 
 
+_TOOLCHAIN_STEP = "Install C toolchain for the FMU wrapper tests"
+
+
+@pytest.mark.parametrize("workflow, job", [
+    ("ci.yml", "test"), ("slow-tests.yml", "slow"), ("scheduled-checks.yml", "newest-dependencies")])
+def test_the_toolchain_installs_from_a_package_cache_keyed_on_the_runner_image(workflow, job):
+    """The toolchain's packages come from the Actions cache, not a mirror.
+
+    On 2026-10-22 Azure's Ubuntu mirror served package files at a crawl for
+    hours (``apt-get update`` took a second; a 4 MB package over two
+    minutes), and the per-push lane lost shards on every run.  The first job
+    of a runner image version downloads ``valgrind`` and its ``libc6-dbg``
+    once and saves them; every later job installs them with ``dpkg``.  The
+    key must name the image: ``libc6-dbg`` pins the image's own ``libc6``.
+    """
+    steps = _workflow(workflow)["jobs"][job]["steps"]
+    names = [s.get("name") for s in steps]
+    i = names.index(_TOOLCHAIN_STEP)
+    image, cache, install, save = steps[i - 2], steps[i - 1], steps[i], steps[i + 1]
+    assert "ImageOS" in image.get("run", "") and "ImageVersion" in image.get("run", ""), image
+    assert image.get("id") == "apt-image"
+    # Restore and save are separate, so a pull request restores and never saves.
+    assert cache.get("uses", "").startswith("actions/cache/restore@"), cache
+    assert save.get("uses", "").startswith("actions/cache/save@"), save
+    for step in (cache, save):
+        assert step["with"]["path"] == "~/apt-debs"
+        assert step["with"]["key"] == "${{ steps.apt-image.outputs.key }}"
+    assert "github.event_name != 'pull_request'" in save["if"], save
+    assert "steps.apt-cache.outputs.cache-hit != 'true'" in save["if"], save
+    run = install["run"]
+    assert 'sudo dpkg -i "$debs"/*.deb' in run, "a cache hit must install without a mirror"
+    assert 'cp /var/cache/apt/archives/*.deb "$debs"/' in run, "a download must be kept for the cache"
+    assert run.index("dpkg -i") < run.index("apt-get"), "the cache is tried before any mirror"
+
+
 def test_every_apt_get_step_has_a_time_limit_of_its_own():
     """A hung package mirror must cost minutes, not the job's whole limit.
 

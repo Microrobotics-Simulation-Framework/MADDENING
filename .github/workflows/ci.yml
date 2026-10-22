@@ -246,16 +246,25 @@ jobs:
         # A package mirror that stops answering leaves apt-get waiting with no
         # output: on 2026-10-07 this step hung for 1 h 50 min in one shard
         # while the other eleven jobs were green.
-        timeout-minutes: 12
+        timeout-minutes: 14
         run: |
           # Each attempt is cut short and retried (2026-10-22: one run lost
           # four shards to a silent mirror, and a rerun lost one again):
           # apt's own connection timeouts, `timeout` around each command,
-          # three attempts.  A healthy install takes under a minute.
+          # three attempts.  A healthy install takes under a minute.  What
+          # stalled was the package downloads from Azure's Ubuntu mirror
+          # (`update` took a second; a 4 MB package took over two minutes),
+          # so a retry drops that mirror from the runner's mirror list and
+          # fetches from Canonical's, and recommends are not installed (they
+          # are most of the download: gdb and its libraries come with
+          # valgrind only as recommends).
           apt_opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
           for attempt in 1 2 3; do
-            timeout 90 sudo apt-get $apt_opts update -q \
-              && timeout 150 sudo apt-get $apt_opts install -y -q valgrind clang \
+            if [ "$attempt" -gt 1 ] && [ -f /etc/apt/apt-mirrors.txt ]; then
+              sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt || true
+            fi
+            timeout 60 sudo apt-get $apt_opts update -q \
+              && timeout 180 sudo apt-get $apt_opts install -y -q --no-install-recommends valgrind clang \
               && exit 0
             echo "::warning title=apt::attempt $attempt to install valgrind and clang timed out or failed, retrying"
             sudo dpkg --configure -a || true
@@ -661,16 +670,25 @@ jobs:
       - name: Install a virtual display and Mesa's software OpenGL
         # A package mirror that stops answering leaves apt-get waiting with no
         # output (see the test job's C toolchain step).
-        timeout-minutes: 12
+        timeout-minutes: 14
         run: |
           # Each attempt is cut short and retried (2026-10-22: one run lost
           # four shards to a silent mirror, and a rerun lost one again):
           # apt's own connection timeouts, `timeout` around each command,
-          # three attempts.  A healthy install takes under a minute.
+          # three attempts.  A healthy install takes under a minute.  What
+          # stalled was the package downloads from Azure's Ubuntu mirror
+          # (`update` took a second; a 4 MB package took over two minutes),
+          # so a retry drops that mirror from the runner's mirror list and
+          # fetches from Canonical's, and recommends are not installed (they
+          # are most of the download: gdb and its libraries come with
+          # valgrind only as recommends).
           apt_opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
           for attempt in 1 2 3; do
-            timeout 90 sudo apt-get $apt_opts update -q \
-              && timeout 150 sudo apt-get $apt_opts install -y -q xvfb libgl1 libegl1 libosmesa6 \
+            if [ "$attempt" -gt 1 ] && [ -f /etc/apt/apt-mirrors.txt ]; then
+              sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt || true
+            fi
+            timeout 60 sudo apt-get $apt_opts update -q \
+              && timeout 180 sudo apt-get $apt_opts install -y -q --no-install-recommends xvfb xauth libgl1 libegl1 libosmesa6 \
               && exit 0
             echo "::warning title=apt::attempt $attempt to install the virtual display and Mesa timed out or failed, retrying"
             sudo dpkg --configure -a || true

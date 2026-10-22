@@ -20,58 +20,67 @@ Duration-balanced splitters (``pytest-split``) do not have that property:
 they cut the suite into chunks by measured time, so one new test shifts
 every boundary after it, and they split files across shards.
 
-``PINS`` places a file on a shard explicitly, overriding the hash, to fix
-an imbalance the hash leaves.  Pinning moves that file and nothing else.
-Pins apply only when the job count equals ``PINS_FOR``; changing the job
-count is a deliberate rebalance that re-deals every file anyway.
+Both lanes ask for a weighted split, by a suffix on the spec, because a
+hash leaves the shards far from equal: one file takes 48 minutes on the
+slow lane, and by hash a single shard held nearly half of it.  A weighted
+split deals the files of a table of measured seconds per file, longest
+first, each onto the shard with the least time so far; a file the table
+does not list goes by the hash above.  It is still a function of the path
+and of committed data, and a file's tests still stay together.
 
-The slow lane (``slow-tests.yml``) asks for ``i/N:weighted`` instead.  It
-restores no compilation cache, so nothing there depends on a file staying
-on its shard, and its files are far from equal: one takes 48 minutes, and
-by hash a single shard held nearly half of the lane.  A weighted split
-deals the files of ``slow_lane_weights.json`` (measured seconds per file),
-longest first, each onto the shard with the least time so far; a file the
-table does not list goes by the hash above.  It is still a function of the
-path and of committed data, and a file's tests still stay together.
+* ``i/N:weighted`` deals ``slow_lane_weights.json`` (``slow-tests.yml``).
+  That lane restores no compilation cache, so nothing there depends on a
+  file staying on its shard.
+* ``i/N:weighted-push`` deals ``per_push_weights.json`` (``ci.yml``).  The
+  per-push lane does restore a cache per shard, saved by the base branch's
+  run of the same shard, so a pull request must see the same deal as its
+  base.  It does: the deal is a function of the committed table alone, never
+  of the test list, so a change to the table is the one thing that moves a
+  file, and ``ci.yml``'s ``changes`` job runs a pull request cold when its
+  diff touches the table.
+
+A plain ``i/N`` is the hash split alone.
+
+GitHub's runners differ in speed: on the slow lane of 2026-10-11 to 13
+one runner took 1.6 to 1.9 times as long as another over the same files.
+A table measured on fast runners under-weighs what they ran (shard 4
+ran 95 to 108 minutes against 68 predicted: its heaviest file had
+been weighed on the two fastest runners of sixty).  So each shard
+records how fast its runner was, as properties of its JUnit report
+(:data:`RUNNER_PROPERTIES`): the seconds pytest took to collect the
+suite, which is the same work on every shard and comes before any test,
+and the runner's CPU.  The report is the one place these are written and
+read.  The collection time is the speed measure: ``scripts/slow_lane_weights.py``
+scales each shard's times to a runner of median speed by
+:func:`runner_scale`, and ``scripts/slow_lane_drift.py`` scales its
+prediction by the same function.  The CPU model is recorded; the weights
+script uses it only for a report that has no collection time.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import time
 from pathlib import Path
 
 import pytest
 
 ENV_VAR = "MADDENING_TEST_SHARD"
 
-#: ``{test file path relative to the repository root: shard}``.
-#:
-#: The six pins that level the six shards, from the per-file times of three
-#: cold push runs on the release branch (38089224978, 38093868119, 38096508004;
-#: 2026-10-10 and 11).  By hash alone the slowest of six jobs is predicted
-#: at 33 to 37 minutes on those runs; with these, at 28 to 30 against a
-#: mean of 24 to 30 (four shards ran 43 to 48).  Each was chosen as the one
-#: file whose move off the slowest shard lowers the slowest shard most, over
-#: the runs and both JAX lanes; every other file stays where its hash puts
-#: it.  The minutes are the slower JAX lane's, the mean of the runs.
-#: Recompute from the "Test durations" lane summaries of several runs when
-#: a shard runs persistently long (one run carries its runners' speeds, a
-#: factor of up to 1.6); moving a pin moves only that file.
-PINS: dict[str, int] = {
-    "tests/property/test_differential_coupling_topologies.py": 3,               # 5.1 min
-    "tests/nodes/adaptive/test_wavelet_node.py": 3,                             # 2.4 min
-    "tests/core/test_coupling_claims_in_every_domain.py": 6,                    # 2.4 min
-    "tests/core/test_coupling_claims_graphs.py": 2,                             # 2.2 min
-    "tests/test_examples_smoke.py": 6,                                          # 1.6 min
-    "tests/verification/test_verify_node_harness.py": 1,                        # 1.2 min
-}
-#: The job count the pins were balanced for.
-PINS_FOR = 6
+#: The job count ``ci.yml`` runs per JAX version.  Six, from the per-file
+#: times of the cold push runs of 2026-10-11 to 13 (``tests/per_push_weights.json``):
+#: the weighted split predicts 27.6 minutes of test time on the slowest of six
+#: shards, 23.4 of seven and 20.8 of eight.  Six keeps a push at 19 jobs, so
+#: three runs at once fit the organisation's 60.
+PER_PUSH_SHARDS = 6
 
-#: The suffix of a shard spec that asks for the weighted split.
+#: The suffix of a shard spec that asks for the slow lane's weighted split.
 WEIGHTED = "weighted"
+#: ... and for the per-push lane's.
+WEIGHTED_PUSH = "weighted-push"
 #: The job count ``slow-tests.yml`` runs per JAX version.  Ten, not the
 #: six of the per-push lane: the measured lane is 635 minutes of tests
 #: (each file's slower JAX version, 2026-10-10; 477 three days earlier),
@@ -81,28 +90,117 @@ WEIGHTED = "weighted"
 #: lane's 24): they are the next step.  The heaviest file alone is 49
 #: minutes, so past twelve the step is to split that file.
 SLOW_LANE_SHARDS = 10
-#: Measured seconds per test file for the weighted split, next to this
-#: module.  ``scripts/slow_lane_weights.py`` writes it from the JUnit
-#: artifacts of a slow-lane run and prints the minutes it predicts per shard.
+#: Measured seconds per test file for each weighted split, next to this
+#: module.  ``scripts/slow_lane_weights.py`` writes them from the JUnit
+#: artifacts of a run and prints the minutes it predicts per shard.
 WEIGHTS_FILE = Path(__file__).with_name("slow_lane_weights.json")
+PER_PUSH_WEIGHTS_FILE = Path(__file__).with_name("per_push_weights.json")
+#: ``{suffix of a shard spec: its table}``.
+TABLES = {WEIGHTED: WEIGHTS_FILE, WEIGHTED_PUSH: PER_PUSH_WEIGHTS_FILE}
+
+#: The JUnit report's property holding the seconds from the session's start
+#: to the end of collection: the runner's speed, measured on the same work
+#: on every shard (every test module of the suite is imported; the other
+#: shards' tests are only deselected).
+COLLECT_SECONDS_PROPERTY = "runner_collect_seconds"
+#: ... the runner's CPU model (metadata; see :func:`runner_scale`).
+CPU_PROPERTY = "runner_cpu"
+#: Every property :class:`Plugin` adds to the report (``testsuite`` level).
+RUNNER_PROPERTIES = (COLLECT_SECONDS_PROPERTY, CPU_PROPERTY, "runner_cpus")
+#: How a runner's collection time scales its test time: a test file's
+#: seconds go as the collection seconds to this power.  Fitted on the
+#: sixty runners of the slow-lane runs 38182068116, 38206585198 and
+#: 38332673699 (2026-10-11 to 13): the collection time and each runner's
+#: speed over the files it ran agree with r = 0.86, slope 1.54 in logs, and
+#: scaling by it halves the spread of one file's time between runners (the
+#: standard deviation of the log, over 146 files, from 0.17 to 0.09).
+SPEED_EXPONENT = 1.5
+
+def runner_fields(report) -> dict[str, str]:
+    """The :data:`RUNNER_PROPERTIES` of a parsed JUnit report (an ``Element``), those it has."""
+    suites = [report] if report.tag == "testsuite" else list(report.iter("testsuite"))
+    found: dict[str, str] = {}
+    for suite in suites:
+        for prop in suite.findall("properties/property"):
+            if prop.get("name") in RUNNER_PROPERTIES and prop.get("value"):
+                found.setdefault(prop.get("name"), prop.get("value"))
+    return found
 
 
-def parse(spec: str) -> tuple[int, int, bool]:
-    """``"i/N"`` or ``"i/N:weighted"`` -> ``(i, N, weighted)``, 1 <= i <= N.
+def collect_seconds(report) -> float | None:
+    """A parsed report's :data:`COLLECT_SECONDS_PROPERTY` in seconds, or None without a usable one."""
+    try:
+        seconds = float(runner_fields(report).get(COLLECT_SECONDS_PROPERTY, ""))
+    except ValueError:
+        return None
+    return seconds if seconds > 0 else None
 
-    Anything else is an error, an unknown suffix included: a misspelt
-    ``:weighted`` must not fall back to the hash split unnoticed.
+
+def runner_scale(seconds: float, reference_seconds: float, exponent: float = SPEED_EXPONENT) -> float:
+    """What one second on a runner that collected in ``seconds`` is on one that collected in ``reference_seconds``.
+
+    ``(reference_seconds / seconds) ** exponent``: below 1 for a runner slower
+    than the reference, above 1 for a faster one.  The one rule both the
+    weights table (each report times this) and the drift check (its
+    prediction divided by this) use.
+    """
+    return (reference_seconds / seconds) ** exponent
+
+
+def cpu_model() -> str:
+    """The CPU's model name from ``/proc/cpuinfo``, or ``"unknown"``."""
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8", errors="replace") as info:
+            for line in info:
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return "unknown"
+
+
+def usable_cpus() -> int:
+    """The CPUs this process may run on (its affinity), else the machine's count."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        return os.cpu_count() or 0
+
+
+def record_suite_property(config, name: str, value: str) -> bool:
+    """Add a ``testsuite`` property to the ``--junitxml`` report, if one is written.
+
+    The same call pytest's ``record_testsuite_property`` fixture makes; it
+    returns False when no report is being written.
+    """
+    try:
+        from _pytest.junitxml import xml_key
+    except ImportError:  # checked against a real report in tests/compliance/test_ci_sharding.py
+        return False
+    xml = config.stash.get(xml_key, None)
+    if xml is None:
+        return False
+    xml.add_global_property(name, value)
+    return True
+
+
+def parse(spec: str) -> tuple[int, int, str | None]:
+    """``"i/N"`` or ``"i/N:<table>"`` -> ``(i, N, table suffix or None)``, 1 <= i <= N.
+
+    The suffix is one of ``TABLES``.  Anything else is an error, an unknown
+    suffix included: a misspelt ``:weighted`` must not fall back to the hash
+    split unnoticed.
     """
     counts, colon, plan = spec.partition(":")
-    if colon and plan != WEIGHTED:
-        raise pytest.UsageError(f"{ENV_VAR}={spec!r}: the only suffix is ':{WEIGHTED}'")
+    if colon and plan not in TABLES:
+        raise pytest.UsageError(f"{ENV_VAR}={spec!r}: the suffixes are {', '.join(':' + t for t in TABLES)}")
     # Digits only: int() would also take " 6", "+6" and "1_0".
     if not re.fullmatch(r"[0-9]+/[0-9]+", counts):
         raise pytest.UsageError(f"{ENV_VAR}={spec!r}: expected 'i/N' or 'i/N:{WEIGHTED}', e.g. '2/4'")
     i, n = (int(x) for x in counts.split("/"))
     if not 1 <= i <= n:
         raise pytest.UsageError(f"{ENV_VAR}={spec!r}: need 1 <= i <= N")
-    return i, n, bool(colon)
+    return i, n, plan if colon else None
 
 
 def _by_hash(path: str, n: int) -> int:
@@ -111,9 +209,7 @@ def _by_hash(path: str, n: int) -> int:
 
 
 def shard_of(path: str, n: int) -> int:
-    """The 1-based shard of a test file, out of ``n`` (the per-push split)."""
-    if n == PINS_FOR and path in PINS:
-        return PINS[path]
+    """The 1-based shard of a test file, out of ``n``, by the hash of its path alone."""
     return _by_hash(path, n)
 
 
@@ -151,7 +247,7 @@ def weighted_shard_of(path: str, n: int, dealt: dict[str, int]) -> int:
 
     ``dealt`` is ``deal(weights, n)``.  A file it does not list -- a new
     one, or one too light to be in the table -- goes by the hash of its
-    path, never by a pin: the pins balance the per-push lane.
+    path.
     """
     return dealt[path] if path in dealt else _by_hash(path, n)
 
@@ -161,6 +257,20 @@ class Plugin:
         self.shard, self.of = shard, of
         self.weighted = weights is not None
         self._dealt = deal(weights, of) if weights is not None else {}
+        self._session_start: float | None = None
+
+    def pytest_sessionstart(self, session):
+        self._session_start = time.perf_counter()
+
+    @pytest.hookimpl(trylast=True)
+    def pytest_collection_finish(self, session):
+        # trylast: after every other plugin's work on the collected items.
+        if self._session_start is None:
+            return
+        seconds = time.perf_counter() - self._session_start
+        for name, value in zip(RUNNER_PROPERTIES,
+                               (f"{seconds:.3f}", cpu_model(), str(usable_cpus()))):
+            record_suite_property(session.config, name, value)
 
     def shard_of(self, path: str) -> int:
         if self.weighted:
@@ -184,9 +294,6 @@ class Plugin:
 
 
 def register(config, spec: str):
-    shard, of, weighted = parse(spec)
-    for path, pinned in PINS.items():
-        if not 1 <= pinned <= PINS_FOR:
-            raise pytest.UsageError(f"tests/_sharding.py pins {path} to shard {pinned} of {PINS_FOR}")
-    weights = load_weights() if weighted else None
+    shard, of, plan = parse(spec)
+    weights = load_weights(TABLES[plan]) if plan else None
     config.pluginmanager.register(Plugin(shard, of, weights), "maddening-test-shard")

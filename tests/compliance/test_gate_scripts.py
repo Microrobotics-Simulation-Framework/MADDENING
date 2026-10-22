@@ -26,6 +26,20 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO_ROOT / "scripts"
 
 
+def _shipped_registry_data():
+    """The shipped registry, parsed with libyaml's loader where PyYAML has it.
+
+    The pure-Python loader takes about ten times as long on a registry of
+    several hundred entries, and the tests that seed a fault into a copy of
+    it read it once each.
+    """
+    import yaml
+
+    registry = REPO_ROOT / "docs" / "validation" / "known_anomalies.yaml"
+    return yaml.load(registry.read_text(),
+                     Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader))
+
+
 def _load(name):
     """Import one of the scripts/ gates as a module (they are not a package)."""
     spec = importlib.util.spec_from_file_location(
@@ -1917,10 +1931,7 @@ class TestAnomalyGateFailsClosedOnEvidence:
 
     @staticmethod
     def _mutated_registry(tmp_path, mutate):
-        import yaml
-
-        registry = REPO_ROOT / "docs" / "validation" / "known_anomalies.yaml"
-        data = yaml.safe_load(registry.read_text())
+        data = _shipped_registry_data()
         mutate(data)
         path = tmp_path / "known_anomalies.yaml"
         path.write_text(_canonical_registry_dump(data))
@@ -2210,17 +2221,20 @@ class TestARetirementOfAReachableEntryIsRefused:
 
 
 def _canonical_registry_dump(data):
-    """``yaml.safe_dump`` of a registry, with each ID in the gate's spelling.
+    """A safe YAML dump of a registry, with each ID in the gate's spelling.
 
-    ``safe_dump`` writes the IDs plain (``- anomaly_id: MADD-ANO-001``),
+    The safe dumper writes the IDs plain (``- anomaly_id: MADD-ANO-001``),
     which the gate refuses as non-canonical; a test seeding some other
     fault re-quotes them so that the fault it seeds is the only one.
+    libyaml's dumper is used where PyYAML has it: the pure-Python one takes
+    about ten times as long on the shipped registry.
     """
     import re
 
     import yaml
 
-    text = yaml.safe_dump(data, sort_keys=False)
+    text = yaml.dump(data, sort_keys=False,
+                     Dumper=getattr(yaml, "CSafeDumper", yaml.SafeDumper))
     return re.sub(r"^(\s*- anomaly_id: )(\S+)$", r'\1"\2"', text, flags=re.M)
 
 
@@ -2337,7 +2351,7 @@ class TestAnomalyGateVerifiesSomething:
         path.write_text(_minimal_anomaly(status="open"))
 
         def every_reference_unavailable(
-            _path, *, prefix="", repo_root=None,
+            _path, _document, *, prefix="", repo_root=None,
             resolve_references=True, notes=None, version_field=None,
         ):
             if notes is not None:
@@ -2348,8 +2362,11 @@ class TestAnomalyGateVerifiesSomething:
                 )
             return []
 
+        # The gate loads the registry once and hands the document to the
+        # validator's document entry point (``validate_anomaly_registry``
+        # minus the load).
         monkeypatch.setattr(
-            gate, "validate_anomaly_registry", every_reference_unavailable
+            gate, "_validate_registry_document", every_reference_unavailable
         )
         assert gate.main([str(path), "--repo-root", str(REPO_ROOT)]) == 1
 
@@ -2366,14 +2383,14 @@ class TestAnomalyGateVerifiesSomething:
         ))
 
         def one_unavailable(
-            _path, *, prefix="", repo_root=None,
+            _path, _document, *, prefix="", repo_root=None,
             resolve_references=True, notes=None, version_field=None,
         ):
             if notes is not None:
                 notes.append("MADD-ANO-001: one entry was NOT checked")
             return []
 
-        monkeypatch.setattr(gate, "validate_anomaly_registry", one_unavailable)
+        monkeypatch.setattr(gate, "_validate_registry_document", one_unavailable)
         assert gate.main([str(path), "--repo-root", str(REPO_ROOT)]) == 0
 
     def test_the_summary_separates_verified_from_not_checked(self):
@@ -2393,10 +2410,7 @@ class TestAnomalyGateVerifiesSomething:
 
 def _shipped_registry_with(tmp_path, mutate):
     """A copy of the shipped registry with one seeded fault, and its path."""
-    import yaml
-
-    registry = REPO_ROOT / "docs" / "validation" / "known_anomalies.yaml"
-    data = yaml.safe_load(registry.read_text())
+    data = _shipped_registry_data()
     mutate(data)
     path = tmp_path / "known_anomalies.yaml"
     path.write_text(_canonical_registry_dump(data))
@@ -2415,10 +2429,7 @@ def _set_range(aid, value):
 
 
 def _status_of(aid):
-    import yaml
-
-    registry = REPO_ROOT / "docs" / "validation" / "known_anomalies.yaml"
-    data = yaml.safe_load(registry.read_text())
+    data = _shipped_registry_data()
     return next(a for a in data["anomalies"]
                 if a["anomaly_id"] == aid)["resolution_status"]
 
@@ -3227,11 +3238,16 @@ class TestAnomalyGateRefusesEvidenceCINeverRuns:
         assert f"'{ref}': 'tests/viz/test_network.py' is under tests/viz/" in err
 
     @pytest.mark.parametrize("status", ["resolved", "open"])
-    def test_a_test_in_a_file_every_lane_skips_at_import_is_refused(self, status, tmp_path, capsys):
+    def test_a_test_in_a_file_every_lane_skips_at_import_is_refused(
+            self, status, tmp_path, capsys, monkeypatch):
         """The same refusal as for ``tests/viz``, whatever the entry's
-        status, and it says why the file never runs."""
+        status, and it says why the file never runs.  The shipped record
+        holds no such file since the ``viz3d`` job runs the 3D renderer's
+        tests, so the entry is seeded."""
         gate = _load("check_anomalies")
-        (rel, needs), = gate.IMPORTS_NO_CI_JOB_INSTALLS.items()
+        rel, needs = "tests/api/test_needs_a_package.py", ("pyvista",)
+        monkeypatch.setattr(gate, "PATHS_CI_NEVER_RUNS", (*gate.PATHS_CI_NEVER_RUNS, rel))
+        monkeypatch.setattr(gate, "IMPORTS_NO_CI_JOB_INSTALLS", {rel: needs})
         target = tmp_path / rel
         target.parent.mkdir(parents=True)
         target.write_text(
@@ -3443,11 +3459,8 @@ class TestAnomalyGateHoldsEveryRangeToTheRegistrysVersion:
         self, tmp_path, aid
     ):
         """MADD-ANO-006 shipped ``resolved`` in 0.4.0 with ``>=0.1.0``."""
-        import yaml
-
         assert _status_of(aid) == "resolved"
-        registry = REPO_ROOT / "docs" / "validation" / "known_anomalies.yaml"
-        version = yaml.safe_load(registry.read_text())["maddening_version"]
+        version = _shipped_registry_data()["maddening_version"]
         path = _shipped_registry_with(tmp_path, _set_range(aid, ">=0.1.0"))
         result = self._gate(path, "--no-resolve")
         assert result.returncode == 1, result.stdout

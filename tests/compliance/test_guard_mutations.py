@@ -67,6 +67,11 @@ _DURATIONS = "tests/compliance/test_report_test_durations.py"
 _COLLECTS = f"{_DURATIONS}::test_every_shipped_allowlist_entry_is_a_node_id_pytest_collects"
 _REASONS = f"{_DURATIONS}::test_the_shipped_allowlist_names_real_tests_with_reasons"
 _SHARDING = "tests/compliance/test_ci_sharding.py"
+_HEALTH = "tests/compliance/test_ci_runner_health.py"
+_RERUN = "tests/compliance/test_rerun_degraded.py"
+_NORMALISE = "tests/compliance/test_weights_cpu_normalisation.py"
+_VARIANCE = "tests/compliance/test_ci_variance_report.py"
+_DEPS = "tests/compliance/test_ci_dependency_jobs.py"
 _WORKFLOWS = "tests/compliance/test_ci_workflows.py"
 _PRUNE = "tests/compliance/test_prune_jax_cache.py"
 _COMPILE_CACHE = "tests/core/test_compile_cache.py"
@@ -77,6 +82,13 @@ _SLOW_RULE = "tests/compliance/test_slow_only_rule.py"
 #: mutants need it.
 DUR = (_DURATIONS, "--deselect", _COLLECTS)
 SHARD = (_SHARDING,)
+HEALTH = (_HEALTH,)
+RERUN = (_RERUN,)
+NORMALISE = (_NORMALISE,)
+VARIANCE = (_VARIANCE,)
+DEPS = (_DEPS,)
+_HYGIENE = "tests/compliance/test_slow_lane_hygiene.py"
+HYGIENE = (_HYGIENE,)
 WF = (_WORKFLOWS,)
 PRUNE = (_PRUNE,)
 CC = (_COMPILE_CACHE,)
@@ -125,8 +137,18 @@ CI_ALL = DUR + SHARD + WF
 _HUNTS = "tests/property/test_targeted_search.py"
 
 #: Every guard file, run whole on the unmutated copy before any mutant.
-GUARD_FILES = (_DURATIONS, _SHARDING, _WORKFLOWS, _PRUNE, _COMPILE_CACHE, _SLOW_RULE, _PLAN_SCAN,
+GUARD_FILES = (_DURATIONS, _SHARDING, _WORKFLOWS, _DEPS, _PRUNE, _COMPILE_CACHE, _SLOW_RULE, _PLAN_SCAN,
                _HUNTS)
+
+
+GUARD_FILES = GUARD_FILES + (_HYGIENE, _HEALTH, _RERUN, _NORMALISE, _VARIANCE)
+
+#: What the anomaly gate holds to the workflows: the paths it records as run by no job are
+#: derived from ``ci.yml``, the extras and the test files, and must equal its own list.
+_GATE_PATHS = ("tests/compliance/test_gate_scripts.py::TestAnomalyGateRefusesEvidenceCINeverRuns"
+               "::test_the_paths_the_gate_refuses_are_the_paths_no_ci_lane_runs")
+GATE_PATHS = (_GATE_PATHS,)
+GUARD_FILES = GUARD_FILES + GATE_PATHS
 
 
 @dataclass(frozen=True)
@@ -152,7 +174,14 @@ PR = "scripts/prune_jax_cache.py"
 CI = ".github/workflows/ci.yml"
 SL = ".github/workflows/slow-tests.yml"
 SWT = "tests/slow_lane_weights.json"
+PWT = "tests/per_push_weights.json"
+GEN = "scripts/generate_ci_constraints.py"
+DRIFT = "scripts/report_constraint_drift.py"
+CONS = "ci/constraints.txt"
+SC = ".github/workflows/scheduled-checks.yml"
+SLD = "scripts/slow_lane_drift.py"
 SLW = "scripts/slow_lane_weights.py"
+RR_WF = ".github/workflows/rerun-degraded.yml"
 PP = "pyproject.toml"
 AL = "tests/duration_allowlist.txt"
 TC = "tests/core/test_compile_cache.py"
@@ -208,6 +237,16 @@ def _wrong_cell(id: str, domain: str, cited: str, wrong: str, lets_through: str)
 # A test under tests/usd that a claims row cites.
 _USD_SPEC = "tests/usd/test_usd_mapping_spec.py"
 _USD_GONE = "test_a_stage_written_with_a_kind_that_is_no_longer_registered_is_refused"
+
+#: The test lane's canary step and the start of its marker step, which pins the marker's name to
+#: that lane: the viz3d job has an identical marker step.
+_TEST_LANE_CANARY = (
+    '        run: python scripts/ci_runner_health.py canary --label "per-push JAX ${{ matrix.jax-version }} '
+    'shard ${{ matrix.shard }}/6"\n\n'
+    "      - name: Mark a degraded runner\n"
+    "        if: ${{ always() && steps.canary.outputs.degraded == 'true' }}\n"
+    "        uses: actions/upload-artifact@v4\n"
+    "        with:\n")
 
 MUTANTS: tuple[Mutant, ...] = (
     # --- R: the time budget, scripts/report_test_durations.py --------------
@@ -279,26 +318,36 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("R27", RTD, '        "allow_fast": [t for t in ranked if t.nodeid in allow and t.seconds <= slow_over',
        '        "allow_fast": [t for t in ranked if t.nodeid in allow and t.seconds <= fail_over', DUR,
        "a kept test that passed at 6-20 s is offered as a removable allowlist entry"),
+    # --- R, continued: the outlier re-run ------------------------------------
+    _M("R28", RTD, "        if again is not None and again.outcome == \"passed\" and again.seconds <= fail_over:",
+       "        if again is not None and again.outcome == \"passed\":", DUR,
+       "a test that is over the hard line on its re-run too is forgiven"),
+    _M("R29", RTD, "        if again is not None and again.outcome == \"passed\" and again.seconds <= fail_over:",
+       "        if again is not None and again.seconds <= fail_over:", DUR,
+       "a test that fails on its re-run, fast, is forgiven"),
+    _M("R30", RTD, "        if again is not None and again.outcome == \"passed\" and again.seconds <= fail_over:",
+       "        if again is None or (again.outcome == \"passed\" and again.seconds <= fail_over):", DUR,
+       "a test the re-run never found (pytest could not start) is forgiven"),
+    _M("R31", RTD, '    env["JAX_COMPILATION_CACHE_DIR"] = str(cache_dir)\n', "", DUR,
+       "the re-run reads the cache the first run wrote: a real compile reads back as 1 s and passes"),
+    _M("R32", RTD, 'for k, v in os.environ.items() if k != "MADDENING_TEST_SHARD"}',
+       "for k, v in os.environ.items()}", DUR,
+       "the re-run names the shard of the job: with the root conftest it deselects the test it was asked to run"),
+    _M("R33", RTD, "        if len(verdict[\"failing\"]) > args.retry_max:", "        if False:", DUR,
+       "a lane full of tests over the line is re-run as if each were an outlier"),
+    _M("R34", RTD, '            verdict["failing"] = still\n', "", DUR,
+       "a forgiven test still fails the job"),
+    _M("R35", RTD, "    if args.retry_outliers and verdict[\"failing\"]:", "    if verdict[\"failing\"]:", DUR,
+       "every run retries, flag or not"),
     # --- S: the shard split, tests/_sharding.py ------------------------------
     _M("S1", SH, 'return int(hashlib.sha256(path.encode("utf-8")).hexdigest(), 16) % n + 1',
        'return int(hashlib.sha256(path.encode("utf-8")).hexdigest(), 16) % n', SHARD,
        "0-based shards: every file hashing to 0 runs nowhere"),
-    _M("S2", SH, "    if n == PINS_FOR and path in PINS:", "    if False:", SHARD, "pins ignored"),
-    _M("S3", SH, "    if n == PINS_FOR and path in PINS:", "    if path in PINS:", SHARD,
-       "pins leak into other job counts"),
     _M("S4", SH, "(keep if self.shard_of(path) == self.shard else drop).append(item)", "keep.append(item)",
        SHARD, "every shard runs the whole suite"),
     _M("S5", SH, 'path = item.nodeid.split("::", 1)[0]', "path = item.nodeid", SHARD,
        "a file's tests split across shards (hashed by node id)"),
-    _M("S6", SH, "        if not 1 <= pinned <= PINS_FOR:", "        if False:", SHARD,
-       "a pin to a shard that does not exist is accepted at registration",
-       equivalent="defence in depth: test_every_pin_names_a_real_file_and_a_real_shard checks every "
-                  "shipped pin directly, so an out-of-range pin is still caught (mutant S8)"),
     _M("S7", SH, "    if not 1 <= i <= n:", "    if not 0 <= i <= n:", SHARD, "MADDENING_TEST_SHARD=0/4 accepted"),
-    _M("S8", SH, '"tests/property/test_differential_coupling_topologies.py": 3,',
-       '"tests/property/test_differential_coupling_topologies.py": 7,', SHARD, "a file pinned to shard 7 of 6 runs nowhere"),
-    _M("S9", SH, '"tests/property/test_differential_coupling_topologies.py": 3,',
-       '"tests/property/test_differential_coupling_topologies_renamed.py": 3,', SHARD, "a pin naming a renamed file"),
     _M("S10", SH, 'return int(hashlib.sha256(path.encode("utf-8")).hexdigest(), 16) % n + 1',
        'return int(hashlib.md5(path.encode("utf-8")).hexdigest(), 16) % n + 1', SHARD,
        "every file re-dealt (every saved base cache is for the wrong files)"),
@@ -310,20 +359,23 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("S13", SH, "    return dealt[path] if path in dealt else _by_hash(path, n)", "    return _by_hash(path, n)",
        SHARD, "the weighted split ignores its table: the slow lane is back on the hash split, one shard at "
               "its timeout"),
-    _M("S14", SH, "    return dealt[path] if path in dealt else _by_hash(path, n)",
-       "    return dealt[path] if path in dealt else shard_of(path, n)", SHARD,
-       "the per-push pins leak into the weighted split"),
     _M("S15", SH, "        lightest = min(range(n), key=lambda k: (load[k], k))", "        lightest = 0", SHARD,
        "every measured file dealt to shard 1"),
     _M("S16", SH, "sorted(weights.items(), key=lambda kv: (-kv[1], kv[0])):",
        "sorted(weights.items(), key=lambda kv: (kv[1], kv[0])):", SHARD,
        "shortest first: the 48-minute file lands last, on top of a full shard"),
-    _M("S17", SH, "    return i, n, bool(colon)", "    return i, n, False", SHARD,
+    _M("S17", SH, "    return i, n, plan if colon else None", "    return i, n, None", SHARD,
        "the ':weighted' suffix is parsed and ignored"),
-    _M("S18", SH, "    if colon and plan != WEIGHTED:", "    if False:", SHARD,
-       "any suffix is taken for ':weighted', a misspelt one included"),
-    _M("S19", SH, "    weights = load_weights() if weighted else None", "    weights = None", SHARD,
+    _M("S18", SH, "    if colon and plan not in TABLES:", "    if False:", SHARD,
+       "any suffix is taken for a weighted split, a misspelt one included"),
+    _M("S19", SH, "    weights = load_weights(TABLES[plan]) if plan else None", "    weights = None", SHARD,
        "a weighted spec registers the hash split"),
+    _M("S24", SH, "    weights = load_weights(TABLES[plan]) if plan else None",
+       "    weights = load_weights() if plan else None", SHARD,
+       "the per-push suffix deals the slow lane's table: every shard's cache was built from other files"),
+    _M("S25", SH, "TABLES = {WEIGHTED: WEIGHTS_FILE, WEIGHTED_PUSH: PER_PUSH_WEIGHTS_FILE}",
+       "TABLES = {WEIGHTED: WEIGHTS_FILE, WEIGHTED_PUSH: WEIGHTS_FILE}", SHARD,
+       "both suffixes read the slow lane's table"),
     _M("S20", SH, "        if self.weighted:\n            return weighted_shard_of(path, self.of, self._dealt)\n",
        "", SHARD, "the plugin holds the dealt table and never reads it"),
     _M("S21", SH, "if type(v) is not int or v <= 0}", "if type(v) is not int or v < 0}", SHARD,
@@ -332,13 +384,22 @@ MUTANTS: tuple[Mutant, ...] = (
        SHARD, "an empty table accepted: a weighted run that is a hash split"),
     _M("S23", SH, '    if not re.fullmatch(r"[0-9]+/[0-9]+", counts):', '    if not re.fullmatch(r".+/.+", counts):',
        SHARD, "a malformed spec dies in int() with a traceback instead of a usage error, or (' 1/4') is accepted"),
+    _M("S26", SH, "            record_suite_property(session.config, name, value)", "            pass", SHARD,
+       "no shard records how fast its runner was: the next table is weighed by the luck of its runners"),
     # --- SW: the slow lane's table, tests/slow_lane_weights.json ----------------
     _M("SW1", SWT, '  "tests/property/test_sysid_truth_recovery.py": ',
        '  "tests/property/test_sysid_truth_recovered.py": ', SHARD,
-       "the table's heaviest entry names a file that does not exist: its shard is 49 minutes lighter than dealt"),
+       "a heavy entry of the table names a file that does not exist: its shard is 46 minutes lighter than dealt"),
     _M("SW2", SWT, ' "min_seconds": ', ' "min_seconds": 1000', SHARD,
        "the table claims a floor its entries are under"),
     _M("SW3", SWT, ' "runs": [', ' "runs": [], "earlier": [', SHARD, "weights with no CI run to trace them to"),
+    # --- PW: the per-push lane's table, tests/per_push_weights.json --------------
+    _M("PW1", PWT, '  "tests/compliance/test_gate_scripts.py": ',
+       '  "tests/compliance/test_gate_script.py": ', SHARD,
+       "the table's heaviest entry names a file that does not exist: its shard is five minutes lighter than dealt"),
+    _M("PW2", PWT, ' "min_seconds": ', ' "min_seconds": 1000', SHARD,
+       "the table claims a floor its entries are under"),
+    _M("PW3", PWT, ' "runs": [', ' "runs": [], "earlier": [', SHARD, "weights with no CI run to trace them to"),
     # --- G: the table's generator, scripts/slow_lane_weights.py ----------------
     _M("G1", SLW, "            slowest[path] = max(slowest[path], seconds)",
        "            slowest[path] = seconds", SHARD, "a file's weight is whichever lane was read last"),
@@ -346,9 +407,60 @@ MUTANTS: tuple[Mutant, ...] = (
        SHARD, "the first run's measurement wins over a later one"),
     _M("G3", SLW, "             if round(s) >= min_seconds and p not in gone}",
        "             if round(s) >= min_seconds}", SHARD, "a measured file that no longer exists stays in the table"),
-    _M("G4", SLW, "            lanes[lane][path] += float(case.get(\"time\") or 0.0)",
-       "            lanes[lane][path] = float(case.get(\"time\") or 0.0)", SHARD,
+    _M("G5", SLW, "        merged[lane] = {path: statistics.median(times) for path, times in files.items()}",
+       "        merged[lane] = {path: max(times) for path, times in files.items()}", SHARD,
+       "one slow runner in three sets a file's weight"),
+    _M("G6", SLW, "    lanes = merge(runs, args.aggregate)", "    lanes = merge(runs)", SHARD,
+       "--aggregate median is parsed and ignored"),
+    _M("G7", SLW, '    ap.add_argument("--lane", choices=sorted(LANES), default="slow",',
+       '    ap.add_argument("--lane", choices=sorted(LANES), default="per-push",', SHARD,
+       "the generator writes the per-push table when asked for the slow lane's"),
+    _M("G4", SLW, "            files[path] += float(case.get(\"time\") or 0.0)",
+       "            files[path] = float(case.get(\"time\") or 0.0)", SHARD,
        "a file weighs what its last test took"),
+    _M("G8", SLW,
+       "    scales = [_sharding.runner_scale(u.collect, reference, exponent) if u.collect else 1.0 for u in units]",
+       "    scales = [1.0 for u in units]", SHARD,
+       "every shard's times taken as measured: a file weighed on a fast runner is under-weighed and its "
+       "shard runs long (shard 4, 2026-10-12 and 13: 95 to 108 minutes against 68 predicted)"),
+    _M("G9", SH, "    return (reference_seconds / seconds) ** exponent", "    return (seconds / reference_seconds) ** exponent",
+       SHARD, "a slow runner's times scaled up and a fast one's down: the runner's luck doubled, not removed"),
+    # --- D: the dependency jobs and the constraints file ------------------------
+    _M("D1", GEN, "        if differing:\n", "        if False:\n", DEPS,
+       "one constraints file written for two JAX versions that resolved to different numpy: one lane installs a pin it was not resolved with"),
+    _M("D2", GEN, '[*requirement_strings(pyproject), "jax-versions: " + ",".join(JAX_VERSIONS)]',
+       "requirement_strings(pyproject)", DEPS, "a new JAX version in the matrix does not make the file stale"),
+    _M("D3", GEN, '    for extra in EXTRAS:\n        out += [', '    for extra in EXTRAS[:1]:\n        out += [', DEPS,
+       "an edit to the usd requirements does not make the file stale"),
+    _M("D4", CONS, "hypothesis==6.169.0\n", "hypothesis==7.0.0\n", DEPS, "a pin outside the range pyproject declares"),
+    _M("D5", CONS, "\nlineax==0.1.1\n", "\n", DEPS, "a requirement CI installs that the file does not pin"),
+    _M("D6", PP, '    "lineax>=0.0.7",\n', '    "lineax>=0.0.8",\n', DEPS,
+       "a range edited and the constraints file, and the floor job, not regenerated"),
+    _M("D7", CI, '          pip install "jax==${{ matrix.jax-version }}" "jaxlib==${{ matrix.jax-version }}" "lineax==0.0.7"',
+       '          pip install "jax==${{ matrix.jax-version }}" "jaxlib==${{ matrix.jax-version }}" "lineax==0.0.8"', DEPS,
+       "the floor job installs something above the floor"),
+    _M("D8", CI, "            tests/core/test_solver_ift_lineax_is_core.py \\\n", "", DEPS,
+       "a test that names lineax is not run at its floor"),
+    _M("D11", CI, "      - name: Install dependencies\n        env:\n          # The versions CI installs against (ci/constraints.txt, written by\n"
+                  "          # scripts/generate_ci_constraints.py): a run is reproducible, and a\n"
+                  "          # new release of a dependency is taken on purpose.  The weekly\n"
+                  "          # scheduled-checks.yml installs without it.\n"
+                  "          PIP_CONSTRAINT: ci/constraints.txt\n        run: |\n          python -m pip install --upgrade pip\n"
+                  "          # Exact JAX pin per lane",
+       "      - name: Install dependencies\n        run: |\n          python -m pip install --upgrade pip\n          # Exact JAX pin per lane", DEPS,
+       "the test lanes install the newest versions again, whatever the constraints file says"),
+    _M("D12", SC, "      - name: Install the newest versions the ranges allow\n        # No PIP_CONSTRAINT and no jax pin, on purpose (see the header).\n",
+       "      - name: Install the newest versions the ranges allow\n        env:\n          PIP_CONSTRAINT: ci/constraints.txt\n", DEPS,
+       "the weekly newest-versions check installs the pinned versions: it can never find a break"),
+    _M("D13", SC, "          MADDENING_SEARCH_ENTROPY: fresh\n", "          MADDENING_SEARCH_ENTROPY: \"0\"\n", DEPS,
+       "the exploring job reads a fixed entropy: the same draws every week"),
+    _M("D14", SC, "          - tests/property/test_sysid_targeted_search.py\n", "", DEPS,
+       "a file that hunts under a seed is not explored"),
+    _M("D15", SC, "          python -m pytest ${{ matrix.file }} -m slow -v -rfEP --tb=short \\\n",
+       "          python -m pytest ${{ matrix.file }} -m slow -v -rfEP --tb=short -p no:cacheprovider --maxfail=0 || true \\\n", DEPS,
+       "the exploring job is green whatever it finds"),
+    _M("D16", DRIFT, "    have = {k: v for k, v in have.items() if k != \"maddening\" and k not in LANE_PINNED}",
+       "    have = dict(have)", DEPS, "the drift report lists jax, which every lane pins itself, and the project, as new"),
     # --- C: the root conftest -------------------------------------------------
     _M("C1", CF, "    if spec:\n        from tests import _sharding", "    if False:\n        from tests import _sharding",
        CI_ALL, "MADDENING_TEST_SHARD ignored: every shard runs everything"),
@@ -374,8 +486,8 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("P6", PR, "    if len(payload) <= TIME_BYTES:\n", "    if len(payload) < TIME_BYTES:\n", PRUNE,
        "an entry holding only the compile-time header is kept"),
     # --- Y: the default lanes, .github/workflows/ci.yml -----------------------
-    _M("Y1", CI, '          MADDENING_TEST_SHARD: "${{ matrix.shard }}/6"\n        run: |',
-       '          MADDENING_TEST_SHARD: "${{ matrix.shard }}/6"\n'
+    _M("Y1", CI, '          MADDENING_TEST_SHARD: "${{ matrix.shard }}/6:weighted-push"\n        run: |',
+       '          MADDENING_TEST_SHARD: "${{ matrix.shard }}/6:weighted-push"\n'
        '          PYTEST_ADDOPTS: "--deselect tests/core"\n        run: |', CI_ALL,
        "every shard silently drops tests/core (selection moved into the step's env)"),
     _M("Y2", CI, "        if: ${{ !cancelled() && github.event_name == 'push' && steps.tests.outcome == 'success' "
@@ -387,6 +499,17 @@ MUTANTS: tuple[Mutant, ...] = (
        'case "$msg" in *"[cold-ci-off]"*) mode=cold ;; esac', CI_ALL, "a [cold-ci] request is ignored"),
     _M("Y4", CI, '-shard${{ matrix.shard }}of6" >> "$GITHUB_OUTPUT"', '" >> "$GITHUB_OUTPUT"', CI_ALL,
        "one compilation cache shared by all shards"),
+    _M("Y41", CI, "tests/_sharding\\.py|tests/per_push_weights\\.json", "tests/_sharding\\.py", CI_ALL,
+       "re-dealing the per-push shards (a new weights table) no longer forces a cold run"),
+    _M("Y42", CI, 'MADDENING_TEST_SHARD: "${{ matrix.shard }}/6:weighted-push"',
+       'MADDENING_TEST_SHARD: "${{ matrix.shard }}/6"', CI_ALL,
+       "the per-push lane splits by hash again: every shard's compile cache is for other files"),
+    _M("Y43", CI, " \\\n            --retry-outliers\n", "\n", CI_ALL,
+       "the budget step no longer re-runs an outlier: one runner's stall fails a pull request again"),
+    _M("Y44", CI, '          JAX_PLATFORMS: cpu\n          XLA_FLAGS: "--xla_gpu_autotune_level=0"\n'
+                  '          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"\n        run: |\n          # What this shard',
+       '          JAX_PLATFORMS: cpu\n        run: |\n          # What this shard', CI_ALL,
+       "the re-run is a pytest without the test step's environment (plugins autoload, XLA flags)"),
     _M("Y5", CI, "mark\\.slow|^-", "mark\\.slowXX|^-", CI_ALL, "a slow-mark edit no longer forces a cold run"),
     _M("Y7", CI, '--pytest-arg=--tb=short \\\n            --pytest-arg=-m "--pytest-arg=slow or not slow"',
        "--pytest-arg=--tb=short", CI_ALL, "verify-hypothesis drops the slow-marked properties"),
@@ -406,17 +529,17 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("Y18", CI, "python -m pytest tests/ -v -rs --tb=short --ignore=tests/viz \\",
        "python -m pytest tests/ -v -rs --tb=short --ignore=tests/viz -k 'not property' \\", CI_ALL,
        "the default lane deselects tests by keyword"),
-    _M("Y19", CI, "--allowlist tests/duration_allowlist.txt --markdown /dev/null\n",
-       "--allowlist tests/duration_allowlist.txt --markdown /dev/null --fail-over 0\n", CI_ALL,
+    _M("Y19", CI, "--markdown /dev/null \\\n            --retry-outliers\n",
+       "--markdown /dev/null \\\n            --retry-outliers --fail-over 0\n", CI_ALL,
        "the budget step switches its hard line off"),
     _M("Y20", CI, "      - name: Test time budget\n",
        "      - name: Test time budget\n        continue-on-error: true\n", CI_ALL,
        "the budget step can no longer fail the job"),
-    _M("Y21", CI, "--allowlist tests/duration_allowlist.txt --markdown /dev/null\n",
-       "--allowlist tests/duration_allowlist.txt --markdown /dev/null || true\n", CI_ALL,
+    _M("Y21", CI, "--markdown /dev/null \\\n            --retry-outliers\n",
+       "--markdown /dev/null \\\n            --retry-outliers || true\n", CI_ALL,
        "the budget step swallows the gate's exit code with `|| true`"),
-    _M("Y22", CI, "--allowlist tests/duration_allowlist.txt --markdown /dev/null\n",
-       "--allowlist tests/duration_allowlist.txt --markdown /dev/null; true\n", CI_ALL,
+    _M("Y22", CI, "--markdown /dev/null \\\n            --retry-outliers\n",
+       "--markdown /dev/null \\\n            --retry-outliers; true\n", CI_ALL,
        "the budget step swallows the gate's exit code with `; true`"),
     _M("Y23", CI, '          if [ "${{ github.event_name }}" != "pull_request" ]; then\n            mode=cold',
        '          if [ "${{ github.event_name }}" != "pull_request" ]; then\n            mode=warm', CI_ALL,
@@ -427,7 +550,7 @@ MUTANTS: tuple[Mutant, ...] = (
                   "&& steps.prune-cache.outcome == 'success' }}",
        "if: ${{ !cancelled() && github.event_name == 'push' && steps.prune-cache.outcome == 'success' }}", CI_ALL,
        "the cache is saved even when the test step failed"),
-    _M("Y26", CI, "key=jaxcc-v1-${{ runner.os }}-$cpu-py", "key=jaxcc-v1-${{ runner.os }}-py", CI_ALL,
+    _M("Y26", CI, "key=jaxcc-v2-${{ runner.os }}-$cpu-py", "key=jaxcc-v2-${{ runner.os }}-py", CI_ALL,
        "the CPU model is dropped from the compilation-cache key",
        equivalent="the CPU model only raises the hit rate: JAX's own cache key includes the CPU's "
                   "features, so a cache from another model is never used wrongly, only missed"),
@@ -469,21 +592,21 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("Y38", CI, "          key: ${{ steps.cc.outputs.key }}-${{ github.sha }}\n\n      - name: Upload test durations",
        "          key: ${{ steps.cc.outputs.key }}\n\n      - name: Upload test durations", CI_ALL,
        "the first cache saved per key is kept for good (keys are immutable): PRs restore an ever older base"),
-    _M("Y39", CI, "        timeout-minutes: 10\n        run: sudo apt-get update",
-       "        run: sudo apt-get update", CI_ALL,
+    _M("Y39", CI, "        # while the other eleven jobs were green.\n        timeout-minutes: 14\n",
+       "        # while the other eleven jobs were green.\n", CI_ALL,
        "a silent package mirror holds a per-push runner for six hours (it did for 1 h 50 min on 2026-10-07)"),
-    _M("Y40", CI, "        timeout-minutes: 10\n        run: sudo apt-get update",
-       "        timeout-minutes: 600\n        run: sudo apt-get update", CI_ALL,
+    _M("Y40", CI, "        # while the other eleven jobs were green.\n        timeout-minutes: 14\n",
+       "        # while the other eleven jobs were green.\n        timeout-minutes: 600\n", CI_ALL,
        "the install step has a limit in name only"),
     # --- Z: the slow lane, .github/workflows/slow-tests.yml -------------------
     _M("Z1", SL, '          echo "pytest exited with code ${{ steps.pytest.outputs.exit_code }}"\n          exit 1',
        '          echo "pytest exited with code ${{ steps.pytest.outputs.exit_code }}"', CI_ALL,
        "the slow lane goes green on ordinary test failures"),
-    _M("Z2", SL, "sudo apt-get install -y -qq valgrind clang", "sudo apt-get install -y -qq clang", CI_ALL,
+    _M("Z2", SL, "install -y -q --no-install-recommends valgrind clang", "install -y -q --no-install-recommends clang", CI_ALL,
        "the valgrind tests skip in the only lane that runs them"),
-    _M("Z10", SL, "        timeout-minutes: 10\n        run: sudo apt-get update",
-       "        run: sudo apt-get update", CI_ALL,
-       "a silent package mirror holds a slow-lane runner for the job's 180 minutes"),
+    _M("Z10", SL, "        timeout-minutes: 14\n        run: |\n          # Each attempt is cut short",
+       "        run: |\n          # Each attempt is cut short", CI_ALL,
+       "a silent package mirror holds a slow-lane runner for the job's 200 minutes"),
     _M("Z3", SL, "      - name: Run full suite (slow lane)\n        id: pytest\n        continue-on-error: true\n"
                  "        env:\n",
        "      - name: Run full suite (slow lane)\n        id: pytest\n        continue-on-error: true\n"
@@ -492,8 +615,8 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("Z4", SL, "        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]\n",
        "        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]\n        exclude:\n          - shard: 10\n", CI_ALL,
        "the slow lane's matrix excludes shard 10"),
-    _M("Z5", SL, "          timeout --kill-after=60s 175m python -m pytest tests/ \\\n",
-       "          MADDENING_TEST_SHARD=1/10 timeout --kill-after=60s 175m python -m pytest tests/ \\\n", CI_ALL,
+    _M("Z5", SL, "          timeout --kill-after=60s \"${limit}s\" python -m pytest tests/ \\\n",
+       "          MADDENING_TEST_SHARD=1/10 timeout --kill-after=60s \"${limit}s\" python -m pytest tests/ \\\n", CI_ALL,
        "all ten slow-lane shards run shard 1's files"),
     _M("Z6", SL, '          MADDENING_TEST_SHARD: "${{ matrix.shard }}/10:weighted"',
        '          MADDENING_TEST_SHARD: "${{ matrix.shard }}/10"', SHARD,
@@ -505,6 +628,35 @@ MUTANTS: tuple[Mutant, ...] = (
        "the slow lane's artifacts are named for four shards: a download by name misses six"),
     _M("Z9", SL, "shard ${{ matrix.shard }} of 10)", "shard ${{ matrix.shard }} of 4)", SHARD,
        "a shard's summary is titled 'shard 5 of 4'"),
+    # --- Z, continued: the time limit, the issue gate and the drift warning ----
+    _M("Z11", SL, "          used=$(( now - ${JOB_START:-$now} ))\n", "          used=0\n", HYGIENE,
+       "pytest's limit ignores what the job used before it: a slow setup and the job's own limit fires first"),
+    _M("Z12", SL, '          if [ "$limit" -lt 60 ]; then limit=60; fi\n', "", HYGIENE,
+       "a job nearly out of time runs pytest under `timeout 0`, which is no limit at all"),
+    _M("Z13", SL, '          PYTEST_MAX_MIN: "175"\n', '          PYTEST_MAX_MIN: "199"\n', HYGIENE,
+       "pytest may run to within a minute of the job's limit: the classifier steps cannot finish"),
+    _M("Z14", SL, '          if [ "$limit" -gt "$max" ]; then limit=$max; fi\n', "", HYGIENE,
+       "pytest's limit is the job's whatever is left, up to 200 minutes: nothing is kept for the steps after it"),
+    _M("Z15", SL, "        if: steps.pytest.outputs.exit_code != '0' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))\n",
+       "        if: steps.pytest.outputs.exit_code != '0'\n", HYGIENE,
+       "a slow lane dispatched on a throwaway branch opens a public tracking issue"),
+    _M("Z16", SL, "|| startsWith(github.ref, 'refs/heads/release/'))\n", "|| startsWith(github.ref, 'refs/heads/relea/'))\n",
+       HYGIENE, "a run on a release branch opens no tracking issue"),
+    _M("Z17", SL, '            --shard "${{ matrix.shard }}/10:weighted"\n', '            --shard "${{ matrix.shard }}/10"\n',
+       HYGIENE, "the drift check is told the hash split and refuses every shard: the warning never runs"),
+    _M("Z18", SLD, "    return result[\"measured\"] > expected * (1 + margin) and",
+       "    return result[\"measured\"] > expected * (1 + margin) * 2 and", HYGIENE,
+       "the warning waits for the shard to take twice the margin past its prediction"),
+    _M("Z21", SLD, "            \"expected\": predicted * speed}", "            \"expected\": predicted}", HYGIENE,
+       "the runner's speed is read and ignored: a slow runner's shard is called a stale table"),
+    _M("Z22", SLD, "    factor = 1.0 / _sharding.runner_scale(seconds, reference, exponent)",
+       "    factor = _sharding.runner_scale(seconds, reference, exponent)",
+       HYGIENE, "a slow runner's prediction scaled down: the runner's luck doubled, not removed"),
+    _M("Z19", SLD, "                        key=lambda kv: (-kv[1], kv[0]))\n    grown", "                        key=lambda kv: (kv[1], kv[0]))\n    grown", HYGIENE,
+       "the files the table has not measured are named lightest first, the heavy one cut off the list"),
+    _M("Z20", SLD, "    unmeasured = sorted(((p, s) for p, s in measured.items() if p not in weights and s >= min_seconds),",
+       "    unmeasured = sorted(((p, s) for p, s in measured.items() if s >= min_seconds),", HYGIENE,
+       "the warning names the files the table has measured as the ones it has not"),
     # --- PY: the pytest configuration, pyproject.toml -------------------------
     _M("PY1", PP, "addopts = \"-m 'not slow'\"", "addopts = \"-m 'not slow' --ignore=tests/fmi\"", CI_ALL,
        "every lane silently stops collecting tests/fmi (selection moved into addopts)"),
@@ -803,9 +955,19 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("K26", _USD_SPEC, f"\n\ndef {_USD_GONE}():", f"\n\n@pytest.mark.skip(reason='x')\ndef {_USD_GONE}():",
        CLAIMS, "a cited tests/usd test skip-marked: it is collected and never runs"),
     _M("K27", CI, "      # running them locally relies on.\n      - name: Install dependencies\n"
+       "        env:\n          # The versions CI installs against (ci/constraints.txt, written by\n"
+       "          # scripts/generate_ci_constraints.py): a run is reproducible, and a\n"
+       "          # new release of a dependency is taken on purpose.  The weekly\n"
+       "          # scheduled-checks.yml installs without it.\n"
+       "          PIP_CONSTRAINT: ci/constraints.txt\n"
        "        run: |\n          python -m pip install --upgrade pip\n"
        '          pip install "jax==0.10.2" "jaxlib==0.10.2"\n          pip install -e ".[ci,usd]"\n',
        "      # running them locally relies on.\n      - name: Install dependencies\n"
+       "        env:\n          # The versions CI installs against (ci/constraints.txt, written by\n"
+       "          # scripts/generate_ci_constraints.py): a run is reproducible, and a\n"
+       "          # new release of a dependency is taken on purpose.  The weekly\n"
+       "          # scheduled-checks.yml installs without it.\n"
+       "          PIP_CONSTRAINT: ci/constraints.txt\n"
        "        run: |\n          python -m pip install --upgrade pip\n"
        '          pip install "jax==0.10.2" "jaxlib==0.10.2"\n          pip install -e ".[ci]"\n',
        CLAIMS, "the compliance job without usd-core: no per-push job compares the claims "
@@ -945,6 +1107,104 @@ MUTANTS: tuple[Mutant, ...] = (
         "test_a_pair_stalled_on_a_narrowing_transform_has_no_flag_on_a_bound_under_the_distance",),
        "the step's own analysis not handed the group's edges: the report's floor counts the "
        "delivered dtype and the spectral analysis inside the step rounds at the fields' finer one"),
+    # --- RH: runner health, the degraded-runner canary and its wiring (P0.3b) ------
+    _M("RH1", "scripts/ci_runner_health.py", "    elif canary_s is not None and canary_s > canary_limit:",
+       "    elif canary_s is not None and canary_s >= canary_limit:", HEALTH,
+       "a canary at exactly its limit fails the job"),
+    _M("RH2", "scripts/ci_runner_health.py", "    return DEGRADED_EXIT\n", "    return 1\n", HEALTH,
+       "a degraded runner exits 1, the status of any failing step: the re-run cannot tell it apart"),
+    _M("RH3", "scripts/ci_runner_health.py", '            return {"total": sum(fields[:8]), "steal": fields[7]}',
+       '            return {"total": sum(fields[:8]), "steal": fields[6]}', HEALTH,
+       "the steal time logged is softirq time"),
+    _M("RH4", "scripts/ci_runner_health.py", "CANARY_LIMIT_S = 8.5\n", "CANARY_LIMIT_S = 1e9\n", HEALTH,
+       "the canary can never trip: a degraded runner burns the job's hours"),
+    _M("RH5", "scripts/ci_runner_health.py", "INSTALL_LIMIT_S = 204.0\n", "INSTALL_LIMIT_S = 20.0\n", HEALTH,
+       "a healthy install trips the canary: every job fails"),
+    _M("RH6", CI, _TEST_LANE_CANARY + "          name: degraded-runner-${{ job.check_run_id }}\n",
+       _TEST_LANE_CANARY + "          name: degraded-runner-${{ github.job }}\n", HEALTH + RERUN,
+       "the marker artifact is not named by the job: the re-run finds no marker and never re-runs"),
+    _M("RH7", SL, "        id: canary\n", "", HEALTH,
+       "the slow lane's canary has no id: steps.canary.* is empty, so no later step knows it tripped"),
+    _M("RH8", CI, "        if: ${{ !cancelled() && steps.canary.outcome != 'failure' }}\n        uses: actions/upload-artifact@v4",
+       "        if: ${{ !cancelled() }}\n        uses: actions/upload-artifact@v4", HEALTH,
+       "the durations artifact uploaded after a tripped canary: the re-run of the job cannot upload that name again"),
+    _M("RH9", CI, "      - name: Runner health (before the tests)\n        id: health-before\n        run: python scripts/ci_runner_health.py before-tests\n\n",
+       "", HEALTH, "no memory or steal baseline for the test step: the after-step logs nothing"),
+    _M("RH10", CI, "    needs: changes\n    if: needs.changes.outputs.code == 'true'\n    runs-on: ubuntu-24.04\n    strategy:",
+       "    needs: changes\n    if: needs.changes.outputs.code == 'true'\n    runs-on: ubuntu-latest\n    strategy:", HEALTH,
+       "the test lane on ubuntu-latest again: the image changes to 26.04 mid-cycle"),
+    _M("RH11", SL, "jobs:\n  slow:\n    runs-on: ubuntu-24.04\n", "jobs:\n  slow:\n    runs-on: ubuntu-latest\n", HEALTH,
+       "the slow lane on ubuntu-latest again"),
+    # --- RR: the re-run of degraded runners (P0.3b) -------------------------------
+    _M("RR1", RR_WF, '              if int(run.get("run_attempt") or 0) != 1:', "              if False:", RERUN,
+       "a run is re-run on every attempt: two degraded runners in a row loop"),
+    _M("RR2", RR_WF, '                  if not (job.get("conclusion") == "failure" and canary_failed and marked):',
+       "                  if not marked:", RERUN,
+       "a planted artifact marks a job that failed in its tests: a real failure is re-run"),
+    _M("RR3", RR_WF, '              markers = {a["name"] for a in artifacts if not a.get("expired")}',
+       '              markers = {a["name"] for a in artifacts}', RERUN, "an expired artifact still marks a job"),
+    _M("RR4", RR_WF, "permissions:\n  actions: write\n\nconcurrency", "permissions:\n  actions: write\n  contents: read\n\nconcurrency",
+       RERUN, "the re-run workflow's token can read the repository"),
+    _M("RR5", RR_WF, '          NOT_FAILED = {"success", "skipped", "neutral"}', '          NOT_FAILED = {"success", "skipped", "neutral", "cancelled"}',
+       RERUN, "a cancelled job beside a degraded one is ignored: the run is re-run over a cancellation"),
+    _M("RR6", RR_WF, '["gh", "run", "rerun", run_id, "--failed"]', '["gh", "run", "rerun", run_id]', RERUN,
+       "every job is re-run, passing ones too"),
+    _M("RR7", RR_WF, "    steps:\n      - name: Re-run the failed jobs if every one drew a degraded runner",
+       "    steps:\n      - uses: actions/checkout@v4\n      - name: Re-run the failed jobs if every one drew a degraded runner",
+       RERUN, "the re-run workflow checks out the run's code"),
+    _M("RR8", RR_WF, '                     and not str(j.get("name", "")).startswith(DEPENDENTS)]',
+       "                     ]", RERUN,
+       "a lane whose six shards all drew degraded runners is never re-run: its summary job fails too and counts"),
+    # --- GN: the weights generator's CPU normalisation (P0.3b) --------------------
+    _M("GN1", SLW, "    return [Unit(u.lane, u.artifact, u.cpu, {p: s * k for p, s in u.files.items()}, u.cache, u.run, u.collect)",
+       "    return [Unit(u.lane, u.artifact, u.cpu, {p: s for p, s in u.files.items()}, u.cache, u.run, u.collect)",
+       NORMALISE, "no report is scaled, whatever its runner: the unlucky draw sets the table"),
+    _M("GN2", SLW, "            factors[cpu] = statistics.median(ratios)", "            factors[cpu] = statistics.mean(ratios)",
+       NORMALISE, "one file's outlier ratio sets a model's factor"),
+    _M("GN3", SLW, '            units = [u for u in units if u.cache != "warm"]', "            units = units", NORMALISE,
+       "a warm per-push shard's times are taken for a cold table's"),
+    _M("GN4", SLW, "                if base >= min_seconds:", "                if True:", NORMALISE,
+       "a file of a second or two, all noise, sets the speed factor"),
+    _M("GN5", SLW, "else max(sorted(count), key=lambda c: count[c])", "else min(sorted(count), key=lambda c: count[c])",
+       NORMALISE, "the reference is the model with the fewest shards"),
+    _M("GN6", SLW, "        if len(ratios) >= MIN_FILES_FOR_FACTOR:", "        if len(ratios) >= 1:", NORMALISE,
+       "a factor from one file's ratio"),
+    _M("GN7", SLW, "    fallback = [i for i, u in enumerate(units) if not u.collect and u.cpu != UNKNOWN_CPU]",
+       "    fallback = [i for i, u in enumerate(units) if u.cpu != UNKNOWN_CPU]", NORMALISE,
+       "a report scaled by its collection time is divided by its CPU model's factor too: corrected twice"),
+    _M("GN8", SLW, "speed_factors(pool, MEDIAN_RUNNER if timed else None)", "speed_factors(pool, None)", NORMALISE,
+       "the CPU fallback is estimated against the commonest model, not the scaled reports: a table on two "
+       "references at once"),
+    # --- VR: the variance report ---------------------------------------------------
+    _M("VR1", "scripts/ci_variance_report.py",
+       "        others = [o for o in records if o is not r and o.lane == r.lane and o.shard == r.shard]",
+       "        others = [o for o in records if o.lane == r.lane and o.shard == r.shard]", VARIANCE,
+       "a degraded job is judged against a median it pulled up itself"),
+    _M("VR2", "scripts/ci_variance_report.py", "            limit, basis = flag_ratio * CPU_SPREAD,",
+       "            limit, basis = flag_ratio,", VARIANCE,
+       "the generation spread is flagged as degradation whenever a CPU has few peers"),
+    # --- VZ: the viz3d job and the anomaly gate's record of what no job runs ------------
+    # `tests/api/test_frame_renderer_3d.py` ran in no job until the viz3d job; the gate's
+    # PATHS_CI_NEVER_RUNS is held equal to what the workflow, the extras and the test files give.
+    _M("VZ1", CI, '          pip install -e ".[ci,viz3d]"\n', '          pip install -e ".[ci]"\n', GATE_PATHS,
+       "the viz3d job installing no PyVista: the renderer's tests skip in it, and the gate's record "
+       "says the file runs in CI"),
+    _M("VZ2", CI, "--tb=short tests/api/test_frame_renderer_3d.py\n",
+       "--tb=short tests/api/test_bearer_auth.py\n", GATE_PATHS + WF,
+       "the viz3d job running some other file: nothing in CI runs the renderer's tests"),
+    _M("VZ3", "scripts/check_anomalies.py", 'PATHS_CI_NEVER_RUNS = ("tests/viz",)',
+       'PATHS_CI_NEVER_RUNS = ("tests/viz", "tests/api/test_frame_renderer_3d.py")', GATE_PATHS,
+       "the gate refusing a citation of the renderer's tests as evidence that never runs, "
+       "though the viz3d job runs them (and the verification page saying so)"),
+    _M("VZ4", "scripts/check_anomalies.py", "IMPORTS_NO_CI_JOB_INSTALLS: dict[str, tuple[str, ...]] = {}",
+       'IMPORTS_NO_CI_JOB_INSTALLS: dict[str, tuple[str, ...]] = {"tests/api/test_frame_renderer_3d.py": ("pyvista",)}',
+       GATE_PATHS, "the gate's record of what a skipped file waits for out of step with the derivation"),
+    _M("VZ5", CI, "        run: xvfb-run -a python -m pytest -v -rs", "        run: python -m pytest -v -rs", WF,
+       "the viz3d job running with no display: VTK cannot open a render window and every test errors "
+       "(or, with the switch off, skips)"),
+    _M("VZ6", CI, '          MADDENING_REQUIRE_VIZ3D_TESTS: "1"\n', '          MADDENING_REQUIRE_VIZ3D_TESTS: "0"\n', WF,
+       "a missing PyVista skipping the whole module in the viz3d job, which would stay green with "
+       "the tests running nowhere"),
 )
 
 

@@ -507,7 +507,11 @@ def render_known_anomalies(registry: dict) -> str:
         f"release carried.  The convention, and the gate that holds every "
         f"range to it, are in the header of `known_anomalies.yaml`.  "
         f"Rationale, workaround, affected components and "
-        f"verification evidence for each: `known_anomalies.yaml`.*"
+        f"verification evidence for each: `known_anomalies.yaml`.  "
+        f"An entry recorded since the last assembly waits, under a "
+        f"provisional label, in `docs/fragments/anomalies/`; it is listed "
+        f"here once `scripts/fragments.py assemble` numbers it, and every "
+        f"release is assembled before it is tagged.*"
     )
 
 

@@ -27,10 +27,13 @@ When you discover a bug or anomaly:
 
 Once the anomaly is confirmed and understood:
 
-1. Add an entry to `docs/validation/known_anomalies.yaml`
-2. The entry must follow the schema: `anomaly_id`, `title`, `description`, `severity`, `safety_relevance`, `safety_relevance_rationale`
-3. Run `python -m maddening.compliance check-anomalies docs/validation/known_anomalies.yaml` to validate
-4. Cross-reference the GitHub Issue number in the YAML entry
+1. Check that it is not registered already: `python scripts/anom.py list --similar "a few words"`
+2. Write the entry in your branch's anomalies fragment, `docs/fragments/anomalies/<branch>.yaml` (`python scripts/fragments.py new --anomaly` starts one), never in `docs/validation/known_anomalies.yaml` directly. Its id is the label `MADD-ANO-NEW-<branch>-<n>`; name it by that label in tests and other files. Do not pick a number: `scripts/fragments.py assemble` numbers it later, as its own pull request, and rewrites the label everywhere
+3. The entry must follow the schema: `anomaly_id`, `title`, `description`, `severity`, `safety_relevance`, `safety_relevance_rationale`, `resolution_status`; a reachable entry also carries a `release_note`, the release notes' Known-anomalies text
+4. Run `python scripts/check_anomalies.py --prefix MADD-ANO-` and `python scripts/check_fragments.py --base origin/<your base branch>` to validate
+5. Cross-reference the GitHub Issue number in the YAML entry
+
+The changelog bullet and the release-notes text go in your changes fragment, `docs/fragments/changes/<branch>.yaml`; a pull request never edits `CHANGELOG.md` or `docs/release_notes/`.  The developer guide's "Recording a change" (`docs/developer_guide/documentation_standards.md`) has the whole procedure.
 
 ### Which defects get an entry
 
@@ -48,9 +51,9 @@ entry.  The release gate below says when an entry falls due.
 
 When the anomaly is resolved:
 
-1. Update the YAML entry with resolution status and version
+1. Update the YAML entry with resolution status and version (in the registry once it is numbered, in your fragment until then), and say so in your changes fragment under the release notes' `Known anomalies` heading
 2. Add or update verification tests that demonstrate the fix
-3. Never delete anomaly entries — mark them as resolved.  A number that must be
+3. Never delete anomaly entries — mark them as resolved.  The same holds for an entry still in a merged fragment: close it (`duplicate`, `resolved`); CI refuses the deletion of a merged fragment.  A number that must be
    retired goes in `_RETIRED_ANOMALY_IDS` (`tests/compliance/test_soup_evidence.py`)
    with its reason, and only a closed entry (`resolved` or `duplicate`), or a
    number no commit ever recorded, can be retired; `scripts/check_anomalies.py`
@@ -63,6 +66,16 @@ When the anomaly is resolved:
 - **Tier 3** (`anomaly:minor`): Two-cycle grace period; CI warns after one release cycle, blocks after two
 
 Because a silent wrong result is at least `major`, it is always Tier 2 or Tier 1: it never takes the grace period.  The Tier 3 cycle counting is not automated yet (DOCUMENTATION_ARCHITECTURE.md section 9.7), so nothing in CI enforces the grace period either way.
+
+## Pull Requests
+
+Pull requests into `main` and `release/**` merge with a merge commit only:
+squash and rebase merging are turned off in the repository's settings.
+`scripts/check_fragments.py` reads each line's merge history, one merge commit
+per pull request.  A rebase merge would put the branch's own commits on the
+line, where a fragment the branch added and then renamed or dropped reads as a
+merged fragment deleted, and every later run on that line fails.  The
+developer guide's "Recording a change" has the rest.
 
 ## Code Style
 

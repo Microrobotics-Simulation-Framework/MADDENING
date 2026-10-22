@@ -6,6 +6,17 @@ on:
   pull_request:
     branches: [main, "release/**"]
 
+# Runner image: every job says `runs-on: ubuntu-24.04`, never `ubuntu-latest`.
+# `ubuntu-latest` becomes Ubuntu 26.04 on 2026-10-19, which would change the
+# image (apt package names, the system Python, glibc) in the middle of a
+# release cycle and under every pinned dependency.  Moving to 26.04 is a
+# deliberate pull request of its own: change every `runs-on` in
+# .github/workflows together, regenerate the SOUP tables
+# (scripts/generate_soup_tables.py), and re-measure the test lanes
+# (a new image is a new baseline for the weights tables and for the
+# degraded-runner limits in scripts/ci_runner_health.py).
+# tests/compliance/test_ci_workflows.py holds every `runs-on` to the pin.
+
 # One run per branch or PR at a time.  The organisation's plan runs sixty
 # jobs at once across its repositories and every run of this workflow
 # costs about nineteen, so a run nobody will read holds up everyone's CI.
@@ -44,7 +55,7 @@ jobs:
   # (package content, but nothing the test lanes read).  Renames are not
   # detected, so a rename out of a code path lists the source path too.
   changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       code: ${{ steps.classify.outputs.code }}
       cold: ${{ steps.classify.outputs.cold }}
@@ -93,9 +104,10 @@ jobs:
           # A cold test run (see "Compilation cache mode") when the diff can
           # move a compile cost onto another test: a slow mark added or
           # removed, a test function removed (deleted, renamed or moved),
-          # or the allowlist or the shard assignment edited.
+          # or the allowlist or the shard assignment (the sharding module, or
+          # the weights table it deals) edited.
           cold=false
-          if grep -qxE 'tests/duration_allowlist\.txt|tests/_sharding\.py' <<< "$changed" \
+          if grep -qxE 'tests/duration_allowlist\.txt|tests/_sharding\.py|tests/per_push_weights\.json' <<< "$changed" \
               || git diff -U0 --no-renames "$base" HEAD -- 'tests/*.py' \
                  | grep -qE '^[-+][^-+].*mark\.slow|^-[[:space:]]*(async[[:space:]]+)?def[[:space:]]+test'; then
             cold=true
@@ -106,7 +118,7 @@ jobs:
   test:
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       # Two lanes: every supported interpreter crossed with every JAX
       # minor the declared range can reach.
@@ -152,18 +164,23 @@ jobs:
         # in tests/core/test_sysid_degenerate_inputs.py).
         jax-version: ["0.10.2", "0.11.2"]
         # Each lane runs as six jobs, each on its own runner and each
-        # running its share one test at a time.  The split is by test file
-        # and stable (tests/_sharding.py): a file's shard is a hash of its
-        # path, or an explicit pin for the heaviest files, never a function
-        # of the test list -- so shard i of a pull request holds the same
-        # files as shard i of the base branch.  One process per runner
-        # keeps per-test times comparable to the budget and memory at a
-        # sixth of the suite's; xdist on one runner did neither (four
-        # workers stretched every test's wall time, and memory grew to
-        # 14 GB of 16 before a runner died, PR #133).  Changing the count
+        # running its share one test at a time.  The split is by test file,
+        # weighted by measured seconds, and stable (tests/_sharding.py,
+        # `:weighted-push`, tests/per_push_weights.json): the files of the
+        # table are dealt longest first onto the lightest shard, and a file
+        # it does not list goes by a hash of its path.  The deal is a
+        # function of the committed table alone, never of the test list --
+        # so shard i of a pull request holds the same files as shard i of
+        # the base branch, until the table changes (that run is cold).  One
+        # process per runner keeps per-test times comparable to the budget
+        # and memory at a sixth of the suite's; xdist on one runner did
+        # neither (four workers stretched every test's wall time, and
+        # memory grew to 14 GB of 16 before a runner died, PR #133).  Changing the count
         # means changing MADDENING_TEST_SHARD, the cache key and the
         # artifact name below, the three counts in the test-durations
-        # job, and PINS_FOR with its pins in tests/_sharding.py.
+        # job, and PER_PUSH_SHARDS in tests/_sharding.py; regenerate the
+        # table (scripts/slow_lane_weights.py --lane per-push) when a shard
+        # runs persistently long.
         shard: [1, 2, 3, 4, 5, 6]
 
     steps:
@@ -179,15 +196,47 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Runner health (machine)
+        # The CPU model, the vCPU count and the memory of the runner this job
+        # drew, and the start of the clock the canary reads the install time
+        # from.  scripts/ci_runner_health.py says why.
+        run: python scripts/ci_runner_health.py machine
+
       - name: Install dependencies
+        env:
+          # The versions CI installs against (ci/constraints.txt, written by
+          # scripts/generate_ci_constraints.py): a run is reproducible, and a
+          # new release of a dependency is taken on purpose.  The weekly
+          # scheduled-checks.yml installs without it.
+          PIP_CONSTRAINT: ci/constraints.txt
         run: |
           python -m pip install --upgrade pip
           # Exact JAX pin per lane; jaxlib tracks jax version-for-version.
           pip install "jax==${{ matrix.jax-version }}" "jaxlib==${{ matrix.jax-version }}"
           pip install -e ".[ci]"
 
+      - name: Runner canary (degraded runner check)
+        # Times a fixed CPU micro-benchmark and reads how long the install
+        # took, and stops the job at once -- exit 75, an error annotation
+        # "Degraded runner" and the artifact degraded-runner-<job id> -- when
+        # either is far outside anything a healthy runner does (limits and
+        # their data: scripts/ci_runner_health.py).  A degraded runner would
+        # otherwise burn hours and report a slow test run.
+        # .github/workflows/rerun-degraded.yml re-runs such a job once.
+        id: canary
+        run: python scripts/ci_runner_health.py canary --label "per-push JAX ${{ matrix.jax-version }} shard ${{ matrix.shard }}/6"
+
+      - name: Mark a degraded runner
+        if: ${{ always() && steps.canary.outputs.degraded == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: degraded-runner-${{ job.check_run_id }}
+          path: ${{ runner.temp }}/degraded-runner.json
+          retention-days: 7
+          if-no-files-found: error
+
       - name: Install C toolchain for the FMU wrapper tests
-        # gcc + clang ship on ubuntu-latest; valgrind does not.  Per push,
+        # gcc + clang ship on the ubuntu-24.04 image; valgrind does not.  Per push,
         # tests/fmi/test_c_unit.py builds the wrapper with the default `cc`
         # (gcc), plain and with ASan/UBSan, and runs the fuzz binary under
         # valgrind (test_fuzz_under_valgrind), which self-skips without it:
@@ -196,10 +245,33 @@ jobs:
         # and run in slow-tests.yml, which installs both itself.
         # A package mirror that stops answering leaves apt-get waiting with no
         # output: on 2026-10-07 this step hung for 1 h 50 min in one shard
-        # while the other eleven jobs were green.  The install takes under a
-        # minute; ten is the limit, and a rerun of the job is the remedy.
-        timeout-minutes: 10
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind clang
+        # while the other eleven jobs were green.
+        timeout-minutes: 14
+        run: |
+          # Each attempt is cut short and retried (2026-10-22: one run lost
+          # four shards to a silent mirror, and a rerun lost one again):
+          # apt's own connection timeouts, `timeout` around each command,
+          # three attempts.  A healthy install takes under a minute.  What
+          # stalled was the package downloads from Azure's Ubuntu mirror
+          # (`update` took a second; a 4 MB package took over two minutes),
+          # so a retry drops that mirror from the runner's mirror list and
+          # fetches from Canonical's, and recommends are not installed (they
+          # are most of the download: gdb and its libraries come with
+          # valgrind only as recommends).
+          apt_opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+          for attempt in 1 2 3; do
+            if [ "$attempt" -gt 1 ] && [ -f /etc/apt/apt-mirrors.txt ]; then
+              sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt || true
+            fi
+            timeout 60 sudo apt-get $apt_opts update -q \
+              && timeout 180 sudo apt-get $apt_opts install -y -q --no-install-recommends valgrind clang \
+              && exit 0
+            echo "::warning title=apt::attempt $attempt to install valgrind and clang timed out or failed, retrying"
+            sudo dpkg --configure -a || true
+            sleep 10
+          done
+          echo "::error title=apt::three attempts to install valgrind and clang failed"
+          exit 1
 
       - name: Compilation cache mode
         # Pull requests run WARM: they restore the base branch's XLA
@@ -247,7 +319,8 @@ jobs:
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           # One cache per shard: shard i holds the same test files on every
           # branch (tests/_sharding.py), so it compiles the same programs.
-          echo "key=jaxcc-v1-${{ runner.os }}-$cpu-py${{ matrix.python-version }}-jax${{ matrix.jax-version }}-shard${{ matrix.shard }}of6" >> "$GITHUB_OUTPUT"
+          # v2: the weighted deal of 2026-10-14 re-dealt every file.
+          echo "key=jaxcc-v2-${{ runner.os }}-$cpu-py${{ matrix.python-version }}-jax${{ matrix.jax-version }}-shard${{ matrix.shard }}of6" >> "$GITHUB_OUTPUT"
           echo "compilation cache: $mode on '$model'"
 
       - name: Restore compilation cache
@@ -258,6 +331,10 @@ jobs:
           path: ${{ runner.temp }}/jax-cache
           key: ${{ steps.cc.outputs.key }}-${{ github.sha }}
           restore-keys: ${{ steps.cc.outputs.key }}-
+
+      - name: Runner health (before the tests)
+        id: health-before
+        run: python scripts/ci_runner_health.py before-tests
 
       - name: Run tests
         id: tests
@@ -296,7 +373,7 @@ jobs:
           # proof stopped running -- fail instead.
           MADDENING_REQUIRE_PACKAGING_TESTS: "1"
           # This job's share of the suite (tests/_sharding.py).
-          MADDENING_TEST_SHARD: "${{ matrix.shard }}/6"
+          MADDENING_TEST_SHARD: "${{ matrix.shard }}/6:weighted-push"
         run: |
           # -rs prints every skip's reason.  A skip whose reason nobody
           # reads is indistinguishable from a test that never existed,
@@ -310,13 +387,32 @@ jobs:
             --durations=0 --durations-min=1.0 \
             --junitxml=test-results-shard${{ matrix.shard }}.xml -o junit_family=xunit1
 
+      - name: Runner health (after the tests)
+        # Memory at the end of the test step and the CPU steal time over it
+        # (/proc/stat), in the log.  The weights tooling reads this shard's
+        # runner (collection time, CPU) from its JUnit report, written by
+        # tests/_sharding.py, not from this step.
+        if: ${{ !cancelled() && steps.health-before.outcome == 'success' }}
+        run: python scripts/ci_runner_health.py after-tests --label "per-push JAX ${{ matrix.jax-version }} shard ${{ matrix.shard }}/6"
+
       - name: Test time budget
         # Runs after a red test step too.  The gate half only: warns on any
         # test over 5 s that is not on tests/duration_allowlist.txt and
         # fails on one over 20 s.  The summary is written once per lane,
         # from all six shards, by the "Test durations" job below.  The
         # budget is in docs/developer_guide/testing_standards.md.
-        if: ${{ !cancelled() }}
+        #
+        # An unlisted test over the hard line is re-run once, alone, with an
+        # empty compilation cache before the step fails (--retry-outliers):
+        # one runner's stall read 23.9 s for a test that takes 1.1-1.6 s
+        # everywhere else and failed a pull request (2026-10-13).  A test
+        # over the line twice still fails.  The re-run is a pytest of this
+        # checkout, so it needs the environment the test step runs in.
+        if: ${{ !cancelled() && steps.canary.outcome != 'failure' }}
+        env:
+          JAX_PLATFORMS: cpu
+          XLA_FLAGS: "--xla_gpu_autotune_level=0"
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: |
           # What this shard's cache was, for the lane summary: warm only if a
           # cache was actually restored.  Written first: this runs under
@@ -325,7 +421,8 @@ jobs:
           echo "${{ (steps.cc.outputs.mode == 'warm' && steps.cc-restore.outputs.cache-matched-key != '') && 'warm' || 'cold' }}" \
             > cache-mode-shard${{ matrix.shard }}.txt
           python scripts/report_test_durations.py test-results-shard${{ matrix.shard }}.xml \
-            --allowlist tests/duration_allowlist.txt --markdown /dev/null
+            --allowlist tests/duration_allowlist.txt --markdown /dev/null \
+            --retry-outliers
 
       - name: Drop unreadable compilation-cache entries
         # A truncated entry (see "No JAX_COMPILATION_CACHE_MAX_SIZE" above)
@@ -351,7 +448,9 @@ jobs:
       - name: Upload test durations
         # Kept 90 days so a regression can be traced to the run that
         # introduced it without re-running anything.
-        if: ${{ !cancelled() }}
+        # Not after a degraded runner: nothing ran, and a re-run of the job
+        # (rerun-degraded.yml) could not upload this name again.
+        if: ${{ !cancelled() && steps.canary.outcome != 'failure' }}
         uses: actions/upload-artifact@v4
         with:
           name: test-durations-py${{ matrix.python-version }}-jax${{ matrix.jax-version }}-shard${{ matrix.shard }}of6
@@ -373,7 +472,7 @@ jobs:
     name: Test durations
     needs: [changes, test]
     if: ${{ !cancelled() && needs.changes.outputs.code == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -411,7 +510,7 @@ jobs:
   test-usd:
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -421,6 +520,12 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies (with USD)
+        env:
+          # The versions CI installs against (ci/constraints.txt, written by
+          # scripts/generate_ci_constraints.py): a run is reproducible, and a
+          # new release of a dependency is taken on purpose.  The weekly
+          # scheduled-checks.yml installs without it.
+          PIP_CONSTRAINT: ci/constraints.txt
         run: |
           python -m pip install --upgrade pip
           pip install "jax==0.10.2" "jaxlib==0.10.2"
@@ -475,7 +580,7 @@ jobs:
     # about 30 s.
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -493,6 +598,175 @@ jobs:
             -e MADDENING_REQUIRE_STREAMING_TESTS=1 \
             -v "$PWD":/src:ro maddening-streaming-test:ci \
             python3 -m pytest tests/cloud/test_webrtc_loopback.py tests/cloud/test_entrypoint_streams.py tests/cloud/test_local_webrtc_viewer_example.py -v -rs --tb=short -p no:cacheprovider
+
+  viz3d:
+    # tests/api/test_frame_renderer_3d.py (the server-side 3D frame renderer,
+    # 14 tests) needs PyVista, which only the viz3d extra installs.  The
+    # sharded lanes install .[ci] without it, so the module skipped itself
+    # there, and until this job existed those tests ran in no CI job.  The
+    # renderer draws off screen through VTK's OpenGL, which wants a display:
+    # xvfb-run supplies a virtual one, drawn by Mesa's software rasteriser.
+    # Measured on a runner: 14 passed in 6.5 s.
+    # MADDENING_REQUIRE_VIZ3D_TESTS=1 makes a missing PyVista fail the module
+    # instead of skipping it: a skip here would mean the tests ran nowhere,
+    # again.
+    #
+    # Held to the same rules as the other jobs: the constraints file, the
+    # exact JAX pin of the oldest lane, and the degraded-runner canary
+    # (rerun-degraded.yml re-runs a job whose canary tripped).  The constraints
+    # file pins what the ci and usd extras pull in; PyVista, VTK and the
+    # packages only they bring are not in it (scripts/generate_ci_constraints.py
+    # resolves ci and usd), so those four or five float to the newest
+    # release.  Pinning them means adding viz3d to that script's EXTRAS and
+    # regenerating the whole file, which re-resolves every lane: a decision of
+    # its own.
+    # tests/viz (the matplotlib and ZMQ viewers) is not run here: it is the
+    # other path scripts/check_anomalies.py records as run by no job.
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Runner health (machine)
+        # See the test job: scripts/ci_runner_health.py says why.
+        run: python scripts/ci_runner_health.py machine
+
+      - name: Install dependencies (with viz3d)
+        env:
+          # The versions CI installs against (ci/constraints.txt, written by
+          # scripts/generate_ci_constraints.py): a run is reproducible, and a
+          # new release of a dependency is taken on purpose.  The weekly
+          # scheduled-checks.yml installs without it.
+          PIP_CONSTRAINT: ci/constraints.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install "jax==0.10.2" "jaxlib==0.10.2"
+          pip install -e ".[ci,viz3d]"
+
+      - name: Runner canary (degraded runner check)
+        # As in the test job: stops the job at once, exit 75 and the artifact
+        # degraded-runner-<job id>, when the runner is far slower than any
+        # healthy one.  It sits before the apt step so the install time it
+        # reads is pip's alone.
+        id: canary
+        run: python scripts/ci_runner_health.py canary --label "viz3d"
+
+      - name: Mark a degraded runner
+        if: ${{ always() && steps.canary.outputs.degraded == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: degraded-runner-${{ job.check_run_id }}
+          path: ${{ runner.temp }}/degraded-runner.json
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Install a virtual display and Mesa's software OpenGL
+        # A package mirror that stops answering leaves apt-get waiting with no
+        # output (see the test job's C toolchain step).
+        timeout-minutes: 14
+        run: |
+          # Each attempt is cut short and retried (2026-10-22: one run lost
+          # four shards to a silent mirror, and a rerun lost one again):
+          # apt's own connection timeouts, `timeout` around each command,
+          # three attempts.  A healthy install takes under a minute.  What
+          # stalled was the package downloads from Azure's Ubuntu mirror
+          # (`update` took a second; a 4 MB package took over two minutes),
+          # so a retry drops that mirror from the runner's mirror list and
+          # fetches from Canonical's, and recommends are not installed (they
+          # are most of the download: gdb and its libraries come with
+          # valgrind only as recommends).
+          apt_opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+          for attempt in 1 2 3; do
+            if [ "$attempt" -gt 1 ] && [ -f /etc/apt/apt-mirrors.txt ]; then
+              sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt || true
+            fi
+            timeout 60 sudo apt-get $apt_opts update -q \
+              && timeout 180 sudo apt-get $apt_opts install -y -q --no-install-recommends xvfb xauth libgl1 libegl1 libosmesa6 \
+              && exit 0
+            echo "::warning title=apt::attempt $attempt to install the virtual display and Mesa timed out or failed, retrying"
+            sudo dpkg --configure -a || true
+            sleep 10
+          done
+          echo "::error title=apt::three attempts to install the virtual display and Mesa failed"
+          exit 1
+
+      - name: Run the 3D frame renderer tests
+        env:
+          JAX_PLATFORMS: cpu
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          MADDENING_REQUIRE_VIZ3D_TESTS: "1"
+        run: xvfb-run -a python -m pytest -v -rs --tb=short tests/api/test_frame_renderer_3d.py
+
+  lineax-floor:
+    # `pyproject.toml` allows lineax>=0.0.7 and the lanes above install the
+    # newest (0.1.1 when this job was written), so the floor of the range was
+    # claimed and never installed: the same gap the JAX matrix closes for jax.
+    # This installs lineax at its floor, on both JAX versions, and runs every
+    # test that names lineax.  The floor is read from pyproject.toml by
+    # tests/compliance/test_ci_workflows.py, which also fails when a test
+    # file that names lineax is missing from the list below.
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        jax-version: ["0.10.2", "0.11.2"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies (lineax at its floor)
+        run: |
+          python -m pip install --upgrade pip
+          # The same constraints as every other job, but for lineax itself.
+          grep -v '^lineax==' ci/constraints.txt > "$RUNNER_TEMP/constraints-without-lineax.txt"
+          export PIP_CONSTRAINT="$RUNNER_TEMP/constraints-without-lineax.txt"
+          pip install "jax==${{ matrix.jax-version }}" "jaxlib==${{ matrix.jax-version }}" "lineax==0.0.7"
+          pip install -e ".[ci]"
+          # Installed first, so `.[ci]` keeps it; make sure of it.
+          python -c "import importlib.metadata as m; v = m.version('lineax'); print('lineax', v); assert v == '0.0.7', v"
+
+      - name: Run the tests that name lineax
+        env:
+          JAX_PLATFORMS: cpu
+          XLA_FLAGS: "--xla_gpu_autotune_level=0"
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+        run: |
+          python -m pytest -v -rs --tb=short \
+            tests/adaptive/test_ift_linear_solve.py \
+            tests/cloud/multigpu/test_a_sharded_solve_of_a_non_finite_rhs_is_nan_on_a_mesh.py \
+            tests/cloud/multigpu/test_derivatives_through_the_sharded_solvers.py \
+            tests/cloud/multigpu/test_iterative_solver.py \
+            tests/cloud/multigpu/test_sharded_cg_default_route_in_every_context.py \
+            tests/cloud/multigpu/test_what_sharded_cg_reports_on_each_route.py \
+            tests/cloud/multigpu/test_what_the_sharded_solvers_answer_at_the_edges_of_a_tolerance_and_of_the_dtype.py \
+            tests/cloud/multigpu/test_what_the_sharded_solvers_refuse_and_report.py \
+            tests/core/test_coupling_claims_helpers.py \
+            tests/core/test_coupling_claims_in_every_domain.py \
+            tests/core/test_coupling_ift_iqn_imvj.py \
+            tests/core/test_coupling_ift_lineax.py \
+            tests/core/test_coupling_sixteen_bit_groups.py \
+            tests/core/test_ift_linear_solve_never_returns_a_non_solution_on_a_floor_that_is_not_normal.py \
+            tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py \
+            tests/core/test_library_programs_trace_products_at_their_matmul_precision.py \
+            tests/core/test_linear_solvers_in_any_units.py \
+            tests/core/test_show_versions.py \
+            tests/core/test_solver_ift_lineax_is_core.py \
+            tests/nodes/adaptive/test_wavelet_cg_conditioning.py \
+            tests/property/test_coupling_adjoint_solve.py
 
   typecheck:
     # Phase 2 of the typing policy (docs/developer_guide/typing.md): the
@@ -515,7 +789,7 @@ jobs:
     # verdicts are independent and both are visible in the summary.
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -536,6 +810,12 @@ jobs:
         # same.  The lane pins the lower of the two JAX versions the
         # test matrix runs; pyright reads stubs, not behaviour, and the
         # ceilings were measured against this one.
+        env:
+          # The versions CI installs against (ci/constraints.txt, written by
+          # scripts/generate_ci_constraints.py): a run is reproducible, and a
+          # new release of a dependency is taken on purpose.  The weekly
+          # scheduled-checks.yml installs without it.
+          PIP_CONSTRAINT: ci/constraints.txt
         run: |
           python -m pip install --upgrade pip
           pip install "jax==0.10.2" "jaxlib==0.10.2"
@@ -587,7 +867,7 @@ jobs:
           exit "$rc"
 
   compliance:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -611,6 +891,12 @@ jobs:
       # maddening.compliance._validate -- which is what a contributor
       # running them locally relies on.
       - name: Install dependencies
+        env:
+          # The versions CI installs against (ci/constraints.txt, written by
+          # scripts/generate_ci_constraints.py): a run is reproducible, and a
+          # new release of a dependency is taken on purpose.  The weekly
+          # scheduled-checks.yml installs without it.
+          PIP_CONSTRAINT: ci/constraints.txt
         run: |
           python -m pip install --upgrade pip
           pip install "jax==0.10.2" "jaxlib==0.10.2"
@@ -629,6 +915,29 @@ jobs:
 
       - name: Validate anomaly registry
         run: python scripts/check_anomalies.py --prefix MADD-ANO-
+
+      # Changelog and registry fragments (scripts/fragments.py): every label
+      # live and spelled one way, every assembled entry recording its label,
+      # the release gate at a version without .dev, and the ratchet over the
+      # line's whole first-parent history: every label and changes fragment
+      # the line ever merged survives here, in a fragment, as a label the
+      # registry records, or as text the release assembly wrote.  So a merged
+      # fragment cannot be deleted unnoticed, however many commits a push
+      # holds.  On a pull request the line is HEAD^1: the checkout is GitHub's
+      # merge commit, whose first parent is the target branch as that merge
+      # was computed.  origin/<base> is fetched later, and a pull request
+      # merged in between would turn this one red on every re-run.  The
+      # branch's own commits before it merges are not read either way.  On a
+      # push the line is HEAD.  fetch-depth 0 above provides the whole history.
+      - name: Check changelog and registry fragments
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            python scripts/check_fragments.py --base HEAD^1
+          else
+            python scripts/check_fragments.py --base HEAD
+          fi
 
       - name: Check implementation mapping
         run: python scripts/check_impl_mapping.py
@@ -689,7 +998,7 @@ jobs:
   verify-hypothesis:
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -699,6 +1008,12 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
+        env:
+          # The versions CI installs against (ci/constraints.txt, written by
+          # scripts/generate_ci_constraints.py): a run is reproducible, and a
+          # new release of a dependency is taken on purpose.  The weekly
+          # scheduled-checks.yml installs without it.
+          PIP_CONSTRAINT: ci/constraints.txt
         run: |
           python -m pip install --upgrade pip
           pip install "jax==0.10.2" "jaxlib==0.10.2"

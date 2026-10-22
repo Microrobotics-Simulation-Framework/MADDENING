@@ -34,13 +34,21 @@ stand in for the tested one.
 |---|---|
 | Test runner | pytest |
 | CI system | GitHub Actions |
-| CI runners | `ubuntu-latest` |
+| CI runners | `ubuntu-24.04` |
 | Python versions | 3.12 (floor: >=3.12) |
 | JAX | evidence generated at `0.10.2`, `0.11.2`, the 2 versions CI installs; `jax>=0.10,<0.13` is the *declared* range and no other point in it has been exercised |
 | Other base dependencies | `lineax>=0.0.7`, `numpy>=1.24`, `pyyaml>=6.0`, `scipy>=1.14` — installed from these ranges, not pinned, so the resolved version differs between runs and **is not recorded** |
 | Backend | CPU (GPU tests are not run in CI — MADD-ANO-001) |
-| Test packages | 13 — listed below; the CI test lanes collect 12 of them, and no lane collects `tests/viz/`; every lane skips `tests/api/test_frame_renderer_3d.py` |
+| Test packages | 13 — listed below; the CI test lanes collect 12 of them, and no lane collects `tests/viz/` |
 <!-- END GENERATED: test-suite -->
+
+The sharded test lanes install the `ci` extra, which has no PyVista, so
+`tests/api/test_frame_renderer_3d.py` (the server-side 3D frame renderer, 14
+tests) skips itself there.  It runs in its own job, `viz3d` in
+`.github/workflows/ci.yml`: the `viz3d` extra, JAX 0.10.2, and a virtual
+display (`xvfb-run`) with Mesa's software OpenGL.  That job sets
+`MADDENING_REQUIRE_VIZ3D_TESTS=1`, so a missing PyVista fails it rather than
+skipping the file.
 
 ## Test Organization
 
@@ -48,7 +56,7 @@ stand in for the tested one.
 | Directory | Scope |
 |---|---|
 | `tests/adaptive/` | Adaptive timestepping: Richardson extrapolation, PI controller |
-| `tests/api/` | FastAPI server, WebSocket, binary encoding, server-side rendering — **not run by CI**: `tests/api/test_frame_renderer_3d.py` (it skips itself where `pyvista` is not installed, and no CI job installs it) |
+| `tests/api/` | FastAPI server, WebSocket, binary encoding, server-side rendering |
 | `tests/cloud/` | Distributed execution: multi-GPU sharding, halo exchange, resume transport, checkpoint download |
 | `tests/compliance/` | Compliance infrastructure: metadata, anomaly validator, stability decorator, benchmark registry, provenance |
 | `tests/core/` | Core framework: GraphManager, scheduling, coupling, params, checkpoint, sweep, solver utilities |

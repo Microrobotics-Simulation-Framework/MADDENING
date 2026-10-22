@@ -47,6 +47,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -366,8 +367,9 @@ _COLD_CASES = {
                      "true"),
     "test file deleted": ("tests/test_shared.py", None, "true"),
     "allowlist edited": ("tests/duration_allowlist.txt", "t # kept: why\n", "true"),
-    "shard assignment edited": ("tests/_sharding.py", "PINS = {'tests/test_shared.py': 2}\n",
-                                "true"),
+    "shard assignment edited": ("tests/_sharding.py", "PER_PUSH_SHARDS = 5\n", "true"),
+    "shard weights edited": ("tests/per_push_weights.json", '{"seconds": {"tests/test_shared.py": 99}}\n',
+                             "true"),
     "test added at the end": ("tests/test_shared.py", _SHARED + (
         "\n\ndef test_new():\n    pass\n"), "false"),
     "test body changed": ("tests/test_shared.py", _SHARED.replace("x = 2", "x = 3"), "false"),
@@ -408,7 +410,8 @@ def test_a_pull_request_that_can_move_a_compile_cost_runs_cold(tmp_path, case):
     _git(repo, "init", "-q", "-b", "main")
     _commit(repo, "src/m.py", "x = 1\n")
     _commit(repo, "tests/duration_allowlist.txt", "# empty\n")
-    _commit(repo, "tests/_sharding.py", "PINS = {}\n")
+    _commit(repo, "tests/_sharding.py", "PER_PUSH_SHARDS = 6\n")
+    _commit(repo, "tests/per_push_weights.json", '{"seconds": {"tests/test_shared.py": 9}}\n')
     base = _commit(repo, "tests/test_shared.py", _SHARED)
     rel, text, cold = _COLD_CASES[case]
     if text is None:
@@ -433,6 +436,8 @@ GATED_ON_CODE = {
                        "${{ !cancelled() && needs.changes.outputs.code == 'true' }}"),
     "test-usd": ("changes", "needs.changes.outputs.code == 'true'"),
     "test-streaming": ("changes", "needs.changes.outputs.code == 'true'"),
+    "viz3d": ("changes", "needs.changes.outputs.code == 'true'"),
+    "lineax-floor": ("changes", "needs.changes.outputs.code == 'true'"),
     "typecheck": ("changes", "needs.changes.outputs.code == 'true'"),
     "verify-hypothesis": ("changes", "needs.changes.outputs.code == 'true'"),
 }
@@ -577,7 +582,7 @@ def test_pushes_start_cold_and_a_pull_request_restores_the_base_cache_unless_tol
     assert outputs["mode"] == mode, f"{event} {message!r} cold={cold_diff}: {outputs}\n{log}"
     assert "::warning" not in log, log
     # One cache per shard and lane (whatever else the key holds).
-    assert re.fullmatch(r"jaxcc-v1-Linux-.*py3\.12-jax0\.10\.2-shard3of6", outputs["key"]), outputs["key"]
+    assert re.fullmatch(r"jaxcc-v2-Linux-.*py3\.12-jax0\.10\.2-shard3of6", outputs["key"]), outputs["key"]
 
 
 def test_a_cold_ci_request_that_cannot_be_read_runs_cold_and_says_so(tmp_path):
@@ -802,11 +807,12 @@ def test_the_lanes_install_the_tools_the_c_tests_skip_without(workflow, job, run
 CLASSIFY_FAILURE = "Classify failure and open tracking issue"
 
 
-def _classify_failure(exit_code: str, elapsed_sec: int) -> list[dict]:
+def _classify_failure(exit_code: str, elapsed_sec: int, limit_sec: int = 175 * 60) -> list[dict]:
     step = _step(_workflow("slow-tests.yml")["jobs"]["slow"], CLASSIFY_FAILURE)
     script = _render(step["with"]["script"], {
         "steps.pytest.outputs.exit_code": exit_code,
         "steps.pytest.outputs.elapsed_sec": str(elapsed_sec),
+        "steps.pytest.outputs.limit_sec": str(limit_sec),
         "matrix.python-version": "3.12", "matrix.jax-version": "0.10.2", "matrix.shard": "1",
     })
     harness = (
@@ -857,7 +863,7 @@ def test_the_slow_lane_files_an_abort_as_an_abort_and_names_both_causes():
 # ---------------------------------------------------------------------------
 
 #: The workflows whose jobs run tests or gates.
-TEST_WORKFLOWS = ("ci.yml", "slow-tests.yml")
+TEST_WORKFLOWS = ("ci.yml", "slow-tests.yml", "scheduled-checks.yml")
 
 #: ``(workflow, job, step)`` allowed ``continue-on-error``: the slow lane's
 #: pytest step, so that the failure classifier after it runs on a red
@@ -927,7 +933,8 @@ def test_the_slow_lane_goes_red_when_pytest_fails(tmp_path, pytest_exit):
     bin_dir.mkdir()
     (bin_dir / "timeout").write_text('#!/bin/sh\nexit "$FAKE_PYTEST_EXIT"\n')
     (bin_dir / "timeout").chmod(0o755)
-    proc, outputs = _run_step(run_pytest, {"matrix.shard": "2"}, tmp_path,
+    proc, outputs = _run_step(run_pytest, {"matrix.shard": "2",
+                                           "steps.clock.outputs.job_start": str(int(time.time()))}, tmp_path,
                               extra_env={"FAKE_PYTEST_EXIT": pytest_exit},
                               path=f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -1190,6 +1197,76 @@ def test_the_streaming_job_cannot_pass_without_running_its_tests():
     assert len(lines) == 1 and lines[0].startswith("docker run"), (
         f"the run step must be one docker run command: {lines}")
     assert not re.search(r"\|\||;|&&|\||\bset\s+\+e\b|\bexit\b", lines[0]), lines[0]
+
+
+#: The 3D frame renderer's tests: they need PyVista (the ``viz3d`` extra) and a display.
+VIZ3D_TESTS = "tests/api/test_frame_renderer_3d.py"
+VIZ3D_REQUIRE_ENV = "MADDENING_REQUIRE_VIZ3D_TESTS"
+
+
+def _viz3d_run_step() -> dict:
+    job = _workflow("ci.yml")["jobs"]["viz3d"]
+    runs = [s for s in job["steps"] if "-m pytest" in s.get("run", "")]
+    assert len(runs) == 1, runs
+    return runs[0]
+
+
+def test_the_viz3d_job_installs_the_extra_and_runs_the_renderer_tests_under_a_display():
+    """The renderer's tests ran in no job until this one: the sharded lanes install ``.[ci]``,
+    which has no PyVista, so the module skipped itself there.  The job must install the
+    extra, run the file (and only a selection that cannot drop it), under a virtual display,
+    on the pinned image and the oldest JAX the package supports."""
+    job = _workflow("ci.yml")["jobs"]["viz3d"]
+    installs = " ".join(s.get("run", "") for s in job["steps"])
+    assert '".[ci,viz3d]"' in installs, "the viz3d job no longer installs the viz3d extra"
+    assert 'pip install "jax==0.10.2" "jaxlib==0.10.2"' in installs, installs
+    assert "xvfb" in installs, "the viz3d job installs no virtual display"
+    assert job["runs-on"] == "ubuntu-24.04"
+    run = _viz3d_run_step()
+    lines = _logical_lines(run["run"])
+    assert len(lines) == 1 and lines[0].startswith("xvfb-run "), (
+        f"the renderer's tests must run under xvfb-run, as one command: {lines}")
+    args = shlex.split(lines[0])
+    args = args[args.index("pytest") + 1:]
+    assert not any(a in ("-m", "-k") or a.startswith(("-m=", "-k=", "--deselect", "--ignore"))
+                   for a in args), f"the viz3d job narrows its selection: {args}"
+    assert [a for a in args if not a.startswith("-")] == [VIZ3D_TESTS], args
+
+
+def test_the_viz3d_job_cannot_pass_by_skipping_its_tests():
+    """No ``if:`` on a step other than the canary's marker, the require variable is set, and the
+    test module turns it into an import that fails rather than a skip."""
+    job = _workflow("ci.yml")["jobs"]["viz3d"]
+    assert job.get("if") == GATED_ON_CODE["viz3d"][1], job.get("if")
+    conditional = [s.get("name") for s in job["steps"] if "if" in s]
+    assert conditional == ["Mark a degraded runner"], conditional
+    run = _viz3d_run_step()
+    assert "shell" not in run and "continue-on-error" not in run
+    assert str(run["env"].get(VIZ3D_REQUIRE_ENV)) == "1", run["env"]
+    assert not re.search(r"\|\||;|&&|\bset\s+\+e\b|\bexit\b", run["run"]), run["run"]
+    module = (REPO_ROOT / VIZ3D_TESTS).read_text(encoding="utf-8")
+    assert f'os.environ.get("{VIZ3D_REQUIRE_ENV}") == "1"' in module
+    assert "    import pyvista as pv" in module, "the require switch no longer imports PyVista bare"
+
+
+def test_the_viz3d_job_runs_after_the_degraded_runner_canary_like_the_test_lanes():
+    """Machine line, canary, marker, in that order, before the tests; the marker is named as
+    ``rerun-degraded.yml`` reads it."""
+    steps = _workflow("ci.yml")["jobs"]["viz3d"]["steps"]
+    names = [s.get("name") for s in steps]
+    for step in ("Runner health (machine)", "Runner canary (degraded runner check)",
+                 "Mark a degraded runner", "Run the 3D frame renderer tests"):
+        assert names.count(step) == 1, (step, names)
+    assert (names.index("Runner health (machine)")
+            < names.index("Install dependencies (with viz3d)")
+            < names.index("Runner canary (degraded runner check)")
+            < names.index("Mark a degraded runner")
+            < names.index("Run the 3D frame renderer tests")), names
+    by_name = {s.get("name"): s for s in steps}
+    marker = by_name["Mark a degraded runner"]
+    assert marker["with"]["name"] == "degraded-runner-${{ job.check_run_id }}"
+    assert marker["if"] == "${{ always() && steps.canary.outputs.degraded == 'true' }}"
+    assert by_name["Runner canary (degraded runner check)"]["id"] == "canary"
 
 
 

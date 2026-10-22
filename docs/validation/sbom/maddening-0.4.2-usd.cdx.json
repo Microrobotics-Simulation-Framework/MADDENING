@@ -48,7 +48,7 @@
       "version": "0.13.8"
     },
     {
-      "bom-ref": "jax==0.11.2",
+      "bom-ref": "jax==0.12.0.1",
       "description": "Differentiate, compile, and transform Numpy code.",
       "externalReferences": [
         {
@@ -77,71 +77,71 @@
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jax-cuda12-plugin<=0.11.2,>=0.11.2; extra == \"cuda12-local\""
+          "value": "jax-cuda12-plugin<=0.12.0.1,>=0.12.0.1; extra == \"cuda12-local\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jax-cuda12-plugin[with-cuda]<=0.11.2,>=0.11.2; extra == \"cuda\""
+          "value": "jax-cuda12-plugin[with-cuda]<=0.12.0.1,>=0.12.0.1; extra == \"cuda\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jax-cuda12-plugin[with-cuda]<=0.11.2,>=0.11.2; extra == \"cuda12\""
+          "value": "jax-cuda12-plugin[with-cuda]<=0.12.0.1,>=0.12.0.1; extra == \"cuda12\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jax-cuda13-plugin<=0.11.2,>=0.11.2; extra == \"cuda13-local\""
+          "value": "jax-cuda13-plugin<=0.12.0.1,>=0.12.0.1; extra == \"cuda13-local\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jax-cuda13-plugin[with-cuda]<=0.11.2,>=0.11.2; extra == \"cuda13\""
+          "value": "jax-cuda13-plugin[with-cuda]<=0.12.0.1,>=0.12.0.1; extra == \"cuda13\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jax-oneapi-plugin[with-oneapi]<=0.11.2,>=0.11.2; extra == \"oneapi\""
+          "value": "jax-oneapi-plugin[with-oneapi]<=0.12.0.1,>=0.12.0.1; extra == \"oneapi\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jax-rocm7-plugin==0.11.2.*; extra == \"rocm7-local\""
+          "value": "jax-rocm7-plugin==0.12.0.1.*; extra == \"rocm7-local\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jaxlib<=0.11.2,>=0.11.2"
+          "value": "jaxlib<=0.12.0.1,>=0.11.2"
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"cuda\""
+          "value": "jaxlib<=0.12.0.1,>=0.12.0.1; extra == \"cuda\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"cuda12\""
+          "value": "jaxlib<=0.12.0.1,>=0.12.0.1; extra == \"cuda12\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"cuda12-local\""
+          "value": "jaxlib<=0.12.0.1,>=0.12.0.1; extra == \"cuda12-local\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"cuda13\""
+          "value": "jaxlib<=0.12.0.1,>=0.12.0.1; extra == \"cuda13\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"cuda13-local\""
+          "value": "jaxlib<=0.12.0.1,>=0.12.0.1; extra == \"cuda13-local\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"oneapi\""
+          "value": "jaxlib<=0.12.0.1,>=0.12.0.1; extra == \"oneapi\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"rocm7-local\""
+          "value": "jaxlib<=0.12.0.1,>=0.12.0.1; extra == \"rocm7-local\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"tpu\""
+          "value": "jaxlib<=0.12.0.1,>=0.12.0.1; extra == \"tpu\""
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "jaxlib==0.11.1; extra == \"ci\""
+          "value": "jaxlib==0.11.2; extra == \"ci\""
         },
         {
           "name": "maddening:sbom:requires-dist",
@@ -153,7 +153,7 @@
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "libtpu==0.0.48.*; extra == \"tpu\""
+          "value": "libtpu==0.0.50.*; extra == \"tpu\""
         },
         {
           "name": "maddening:sbom:requires-dist",
@@ -161,7 +161,7 @@
         },
         {
           "name": "maddening:sbom:requires-dist",
-          "value": "numpy>=2.1"
+          "value": "numpy>=2.2"
         },
         {
           "name": "maddening:sbom:requires-dist",
@@ -184,12 +184,12 @@
           "value": "26"
         }
       ],
-      "purl": "pkg:pypi/jax@0.11.2",
+      "purl": "pkg:pypi/jax@0.12.0.1",
       "type": "library",
-      "version": "0.11.2"
+      "version": "0.12.0.1"
     },
     {
-      "bom-ref": "jaxlib==0.11.2",
+      "bom-ref": "jaxlib==0.12.0.1",
       "description": "XLA library for JAX",
       "externalReferences": [
         {
@@ -225,9 +225,9 @@
           "value": "3"
         }
       ],
-      "purl": "pkg:pypi/jaxlib@0.11.2",
+      "purl": "pkg:pypi/jaxlib@0.12.0.1",
       "type": "library",
-      "version": "0.11.2"
+      "version": "0.12.0.1"
     },
     {
       "bom-ref": "jaxtyping==0.3.11",
@@ -770,7 +770,7 @@
       "version": "4.16.0"
     },
     {
-      "bom-ref": "usd-core==26.8",
+      "bom-ref": "usd-core==26.11",
       "description": "Pixar's Universal Scene Description",
       "externalReferences": [
         {
@@ -814,9 +814,9 @@
           "value": "0"
         }
       ],
-      "purl": "pkg:pypi/usd-core@26.8",
+      "purl": "pkg:pypi/usd-core@26.11",
       "type": "library",
-      "version": "26.8"
+      "version": "26.11"
     },
     {
       "bom-ref": "wadler_lindig==0.1.7",
@@ -894,7 +894,7 @@
     },
     {
       "dependsOn": [
-        "jax==0.11.2",
+        "jax==0.12.0.1",
         "jaxtyping==0.3.11",
         "typing_extensions==4.16.0",
         "wadler_lindig==0.1.7"
@@ -903,13 +903,13 @@
     },
     {
       "dependsOn": [
-        "jaxlib==0.11.2",
+        "jaxlib==0.12.0.1",
         "ml_dtypes==0.6.0",
         "numpy==2.5.4",
         "opt_einsum==3.4.0",
         "scipy==1.18.1"
       ],
-      "ref": "jax==0.11.2"
+      "ref": "jax==0.12.0.1"
     },
     {
       "dependsOn": [
@@ -917,7 +917,7 @@
         "numpy==2.5.4",
         "scipy==1.18.1"
       ],
-      "ref": "jaxlib==0.11.2"
+      "ref": "jaxlib==0.12.0.1"
     },
     {
       "dependsOn": [
@@ -928,7 +928,7 @@
     {
       "dependsOn": [
         "equinox==0.13.8",
-        "jax==0.11.2",
+        "jax==0.12.0.1",
         "jaxtyping==0.3.11",
         "typing_extensions==4.16.0"
       ],
@@ -937,14 +937,14 @@
     {
       "dependsOn": [
         "PyYAML==6.0.3",
-        "jax==0.11.2",
-        "jaxlib==0.11.2",
+        "jax==0.12.0.1",
+        "jaxlib==0.12.0.1",
         "lineax==0.1.1",
         "numpy==2.5.4",
         "scipy==1.18.1",
-        "usd-core==26.8"
+        "usd-core==26.11"
       ],
-      "ref": "maddening==0.4.1"
+      "ref": "maddening==0.4.2"
     },
     {
       "dependsOn": [
@@ -969,7 +969,7 @@
       "ref": "typing_extensions==4.16.0"
     },
     {
-      "ref": "usd-core==26.8"
+      "ref": "usd-core==26.11"
     },
     {
       "dependsOn": [
@@ -980,7 +980,7 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "maddening==0.4.1",
+      "bom-ref": "maddening==0.4.2",
       "description": "Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph",
       "externalReferences": [
         {
@@ -1008,14 +1008,14 @@
         {
           "license": {
             "acknowledgement": "declared",
-            "id": "LGPL-3.0-or-later"
+            "id": "Apache-2.0"
           }
         }
       ],
       "name": "maddening",
-      "purl": "pkg:pypi/maddening@0.4.1",
+      "purl": "pkg:pypi/maddening@0.4.2",
       "type": "library",
-      "version": "0.4.1"
+      "version": "0.4.2"
     },
     "properties": [
       {
@@ -1024,7 +1024,7 @@
       },
       {
         "name": "maddening:sbom:exclude-newer",
-        "value": "2026-10-13T00:00:00Z"
+        "value": "2026-10-22T00:00:00Z"
       },
       {
         "name": "maddening:sbom:generator",
@@ -1064,7 +1064,7 @@
       },
       {
         "name": "maddening:sbom:marker:python_full_version",
-        "value": "3.12.3"
+        "value": "3.12.15"
       },
       {
         "name": "maddening:sbom:marker:python_version",
@@ -1087,7 +1087,7 @@
         "value": "uv 0.11.15 (x86_64-unknown-linux-gnu)"
       }
     ],
-    "timestamp": "2026-10-13T00:00:00Z",
+    "timestamp": "2026-10-22T00:00:00Z",
     "tools": {
       "components": [
         {
@@ -1191,7 +1191,7 @@
       ]
     }
   },
-  "serialNumber": "urn:uuid:48e1d84f-f9cb-5b7a-95c0-ba4f87973abe",
+  "serialNumber": "urn:uuid:8ee6934e-dddf-5c6b-8112-af4ae9b76fa4",
   "specVersion": "1.6",
   "version": 1
 }

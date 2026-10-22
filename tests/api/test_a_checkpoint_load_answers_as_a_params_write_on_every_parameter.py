@@ -21,15 +21,17 @@ does not change -- which the last test pins.
 from __future__ import annotations
 
 import random
+import sys
 import warnings
 
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hypothesis import find
+from hypothesis import Phase, find, settings
 
 from maddening.core.simulation import checkpoint as checkpoint_module
 from maddening.nodes import HeatNode
+from tests._hypothesis_line_events import TOOL_ID, clear_line_events_hypothesis_left
 from tests.property.node_catalogue import CHEAP_KINDS, COSTLY_KINDS, KINDS
 from tests.property.rest_oracle import (
     assert_nothing_changed,
@@ -48,12 +50,33 @@ NOT_REST = ("gm.", "remove_node", "add_node", "reset_params", "to_dict()", "save
 NO_LEAVES = ("health_check",)
 
 
+#: How :func:`_kwargs` searches: without the ``explain`` phase, whose branch
+#: tracer would leave ``sys.monitoring`` LINE events on for the rest of the
+#: process once ``find``'s condition holds -- every REST reply of every
+#: later test ran ten times slower (``tests/_hypothesis_line_events.py``) --
+#: and without the example database, so that what is found does not depend
+#: on what a previous run stored.  The shrink still runs: the arguments are
+#: the ones the default settings find.
+KWARGS_SEARCH = settings(database=None,
+                         phases=[phase for phase in Phase if phase is not Phase.explain])
+
+
 def _kwargs(kind_name: str) -> dict:
     """One valid set of constructor arguments of the kind: the simplest
     its catalogue strategy draws, the same on every run."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        return find(KINDS[kind_name].kwargs, lambda _: True, random=random.Random(0))
+        return find(KINDS[kind_name].kwargs, lambda _: True, settings=KWARGS_SEARCH,
+                    random=random.Random(0))
+
+
+@pytest.mark.parametrize("kind_name", KINDS)
+def test_finding_the_constructor_arguments_leaves_no_line_events_on(kind_name):
+    """The search for a kind's arguments leaves the process as fast as it
+    found it: no ``sys.monitoring`` events on Hypothesis's tool id."""
+    clear_line_events_hypothesis_left()
+    _kwargs(kind_name)
+    assert sys.monitoring.get_events(TOOL_ID) == sys.monitoring.events.NO_EVENTS
 
 
 def _like(leaf: np.ndarray, value) -> np.ndarray:
